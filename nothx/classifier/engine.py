@@ -3,7 +3,7 @@
 from typing import Optional
 
 from ..config import Config
-from ..models import SenderStats, Classification, Action
+from ..models import SenderStats, Classification, Action, EmailType
 from .rules import RulesMatcher
 from .patterns import PatternMatcher
 from .ai import AIClassifier
@@ -55,7 +55,7 @@ class ClassificationEngine:
 
         # Layer 5: Review queue (uncertain)
         return Classification(
-            email_type=sender.domain,  # Will be fixed by type system
+            email_type=EmailType.UNKNOWN,
             action=Action.REVIEW,
             confidence=0.5,
             reasoning="Could not confidently classify - needs manual review",
@@ -109,7 +109,7 @@ class ClassificationEngine:
                 else:
                     # Layer 5: Review queue
                     results[sender.domain] = Classification(
-                        email_type=sender.domain,
+                        email_type=EmailType.UNKNOWN,
                         action=Action.REVIEW,
                         confidence=0.5,
                         reasoning="Could not confidently classify",
@@ -123,7 +123,7 @@ class ClassificationEngine:
                     results[sender.domain] = result
                 else:
                     results[sender.domain] = Classification(
-                        email_type=sender.domain,
+                        email_type=EmailType.UNKNOWN,
                         action=Action.REVIEW,
                         confidence=0.5,
                         reasoning="Could not confidently classify",

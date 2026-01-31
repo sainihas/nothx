@@ -11,8 +11,8 @@ from .models import EmailHeader, UnsubResult, UnsubMethod, SenderStatus
 from . import db
 
 
-# User agent for HTTP requests
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) nothx/0.1"
+# User agent for HTTP requests - identifies as nothx email automation tool
+USER_AGENT = "nothx/0.1.0 (Email Unsubscribe Automation; +https://github.com/nothx/nothx)"
 
 # Timeout for HTTP requests
 REQUEST_TIMEOUT = 30

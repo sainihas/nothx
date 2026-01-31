@@ -1,11 +1,14 @@
 """Layer 3: AI-powered classification using Anthropic Claude."""
 
 import json
+import logging
 from typing import Optional
 
 from ..config import Config
 from ..models import SenderStats, Classification, Action, EmailType
 from .. import db
+
+logger = logging.getLogger("nothx.classifier.ai")
 
 
 CLASSIFICATION_PROMPT = """You are an email classification assistant. Your job is to analyze email senders and classify them to help users manage their inbox.
@@ -141,7 +144,7 @@ class AIClassifier:
 
         except Exception as e:
             # Log error but don't crash
-            print(f"AI classification error: {e}")
+            logger.error("AI classification error: %s", e)
             return {}
 
     def classify_single(self, sender: SenderStats) -> Optional[Classification]:

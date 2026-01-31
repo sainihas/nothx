@@ -64,10 +64,10 @@ class HeuristicScorer:
             score += 15
         elif sender.open_rate < 25:
             score += 5
+        elif sender.open_rate > 75:
+            score -= 30  # Very high engagement = definitely keep
         elif sender.open_rate > 50:
             score -= 20  # High engagement = keep
-        elif sender.open_rate > 75:
-            score -= 30
 
         # High volume is a signal
         if sender.total_emails > 50:

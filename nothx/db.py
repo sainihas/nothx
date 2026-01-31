@@ -228,8 +228,8 @@ def get_recent_corrections(limit: int = 20) -> list[dict]:
         return [dict(row) for row in rows]
 
 
-def log_run(stats: RunStats) -> int:
-    """Log a run and return its ID."""
+def log_run(stats: RunStats) -> Optional[int]:
+    """Log a run and return its ID (or None if insert failed)."""
     with get_db() as conn:
         cursor = conn.execute("""
             INSERT INTO runs (ran_at, mode, emails_scanned, unique_senders, auto_unsubbed, kept, review_queued, failed)

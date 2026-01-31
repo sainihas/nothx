@@ -15,7 +15,7 @@ from .config import Config, AccountConfig, get_config_dir
 from .imap import test_account
 from .classifier.ai import test_ai_connection
 from .classifier import ClassificationEngine
-from .scanner import scan_inbox, get_emails_for_domain
+from .scanner import scan_inbox
 from .unsubscriber import unsubscribe
 from .scheduler import install_schedule, uninstall_schedule, get_schedule_status
 from .models import Action, SenderStatus, RunStats
@@ -160,7 +160,8 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
         console=console,
     ) as progress:
         task = progress.add_task("Scanning inbox...", total=None)
-        sender_stats = scan_inbox(config)
+        scan_result = scan_inbox(config)
+        sender_stats = scan_result.sender_stats
         progress.update(task, description=f"Found {len(sender_stats)} senders with marketing emails")
 
     if not sender_stats:
@@ -226,10 +227,9 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
                 task = progress.add_task("Unsubscribing...", total=len(to_unsub) + len(to_block))
 
                 for sender, _ in to_unsub + to_block:
-                    # Get a sample email with unsubscribe header
-                    emails = get_emails_for_domain(config, sender.domain)
-                    if emails:
-                        email = emails[0]
+                    # Get a sample email with unsubscribe header from cache
+                    email = scan_result.get_email_for_domain(sender.domain)
+                    if email:
                         result = unsubscribe(email, config, account)
                         if result.success:
                             stats.auto_unsubbed += 1

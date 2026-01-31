@@ -1,11 +1,11 @@
 """Layer 2: Preset pattern matching for classification."""
 
-import fnmatch
 import json
 from pathlib import Path
 from typing import Optional
 
 from ..models import SenderStats, Classification, Action, EmailType
+from .utils import matches_pattern
 
 
 # Default patterns shipped with nothx
@@ -106,7 +106,7 @@ class PatternMatcher:
 
         # Check block patterns first (highest priority for presets)
         for pattern in self.patterns.get("block_patterns", []):
-            if self._matches_pattern(domain, pattern):
+            if matches_pattern(domain, pattern):
                 return Classification(
                     email_type=EmailType.MARKETING,
                     action=Action.BLOCK,
@@ -117,7 +117,7 @@ class PatternMatcher:
 
         # Check keep patterns
         for pattern in self.patterns.get("keep_patterns", []):
-            if self._matches_pattern(domain, pattern):
+            if matches_pattern(domain, pattern):
                 return Classification(
                     email_type=EmailType.TRANSACTIONAL,
                     action=Action.KEEP,
@@ -128,7 +128,7 @@ class PatternMatcher:
 
         # Check unsub patterns
         for pattern in self.patterns.get("unsub_patterns", []):
-            if self._matches_pattern(domain, pattern):
+            if matches_pattern(domain, pattern):
                 return Classification(
                     email_type=EmailType.MARKETING,
                     action=Action.UNSUB,
@@ -138,29 +138,3 @@ class PatternMatcher:
                 )
 
         return None
-
-    def _matches_pattern(self, domain: str, pattern: str) -> bool:
-        """Check if domain matches a pattern (supports wildcards)."""
-        pattern = pattern.lower()
-
-        # Handle patterns like "marketing.*" (prefix match)
-        if pattern.endswith(".*"):
-            prefix = pattern[:-2]
-            # Check if domain starts with prefix (e.g., marketing.company.com)
-            if domain.startswith(prefix + "."):
-                return True
-            # Or if sender email would start with it
-            return False
-
-        # Handle patterns like "*.domain.com" (suffix match)
-        if pattern.startswith("*."):
-            suffix = pattern[1:]  # Keep the dot
-            if domain.endswith(suffix) or domain == suffix[1:]:
-                return True
-
-        # Handle patterns with * in the middle (e.g., "*bank*")
-        if "*" in pattern:
-            return fnmatch.fnmatch(domain, pattern)
-
-        # Direct match
-        return domain == pattern

@@ -1,10 +1,10 @@
 """Layer 1: User-defined rules for classification."""
 
-import fnmatch
 from typing import Optional
 
 from ..models import SenderStats, Classification, Action, EmailType
 from .. import db
+from .utils import matches_pattern
 
 
 class RulesMatcher:
@@ -32,13 +32,20 @@ class RulesMatcher:
 
         for rule in rules:
             pattern = rule["pattern"].lower()
-            action = rule["action"]
+            action_str = rule["action"]
+
+            # Validate action value
+            try:
+                action = Action(action_str)
+            except ValueError:
+                # Skip rules with invalid action values
+                continue
 
             # Check if domain matches pattern
-            if self._matches_pattern(sender.domain, pattern):
+            if matches_pattern(sender.domain, pattern):
                 return Classification(
                     email_type=EmailType.UNKNOWN,
-                    action=Action(action),
+                    action=action,
                     confidence=1.0,
                     reasoning=f"Matched user rule: {pattern}",
                     source="user_rule",
@@ -47,37 +54,21 @@ class RulesMatcher:
         # Check if there's a user override in the sender record
         sender_record = db.get_sender(sender.domain)
         if sender_record and sender_record.get("user_override"):
-            override = sender_record["user_override"]
-            return Classification(
-                email_type=EmailType.UNKNOWN,
-                action=Action(override),
-                confidence=1.0,
-                reasoning="User override",
-                source="user_rule",
-            )
+            override_str = sender_record["user_override"]
+            try:
+                override_action = Action(override_str)
+                return Classification(
+                    email_type=EmailType.UNKNOWN,
+                    action=override_action,
+                    confidence=1.0,
+                    reasoning="User override",
+                    source="user_rule",
+                )
+            except ValueError:
+                # Invalid override value, skip
+                pass
 
         return None
-
-    def _matches_pattern(self, domain: str, pattern: str) -> bool:
-        """Check if domain matches a pattern (supports wildcards)."""
-        domain = domain.lower()
-        pattern = pattern.lower()
-
-        # Direct match
-        if domain == pattern:
-            return True
-
-        # Wildcard match
-        if fnmatch.fnmatch(domain, pattern):
-            return True
-
-        # Check if pattern matches email prefix (e.g., "marketing@*")
-        if "@" in pattern:
-            # This would need the full email, not just domain
-            # For now, skip email-based patterns
-            pass
-
-        return False
 
     def add_rule(self, pattern: str, action: str) -> None:
         """Add a new rule."""

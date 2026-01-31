@@ -1,6 +1,6 @@
 """Scheduler management for nothx (launchd on macOS, systemd on Linux)."""
 
-import os
+import subprocess
 import sys
 import platform
 import plistlib
@@ -111,15 +111,23 @@ def _install_launchd(frequency: str) -> tuple[bool, str]:
     try:
         # Unload existing if present
         if plist_path.exists():
-            os.system(f"launchctl unload {plist_path} 2>/dev/null")
+            subprocess.run(
+                ["launchctl", "unload", str(plist_path)],
+                capture_output=True,
+                check=False
+            )
 
         # Write plist
         with open(plist_path, "wb") as f:
             plistlib.dump(plist, f)
 
         # Load the new plist
-        result = os.system(f"launchctl load {plist_path}")
-        if result != 0:
+        result = subprocess.run(
+            ["launchctl", "load", str(plist_path)],
+            capture_output=True,
+            check=False
+        )
+        if result.returncode != 0:
             return False, "Failed to load launchd job"
 
         return True, f"Scheduled {frequency} runs via launchd"
@@ -136,7 +144,11 @@ def _uninstall_launchd() -> tuple[bool, str]:
         return True, "No schedule to remove"
 
     try:
-        os.system(f"launchctl unload {plist_path}")
+        subprocess.run(
+            ["launchctl", "unload", str(plist_path)],
+            capture_output=True,
+            check=False
+        )
         plist_path.unlink()
         return True, "Schedule removed"
     except Exception as e:
@@ -222,9 +234,9 @@ WantedBy=timers.target
             f.write(timer_content)
 
         # Reload and enable
-        os.system("systemctl --user daemon-reload")
-        os.system("systemctl --user enable nothx.timer")
-        os.system("systemctl --user start nothx.timer")
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, check=False)
+        subprocess.run(["systemctl", "--user", "enable", "nothx.timer"], capture_output=True, check=False)
+        subprocess.run(["systemctl", "--user", "start", "nothx.timer"], capture_output=True, check=False)
 
         return True, f"Scheduled {frequency} runs via systemd"
 
@@ -235,8 +247,8 @@ WantedBy=timers.target
 def _uninstall_systemd() -> tuple[bool, str]:
     """Uninstall systemd schedule."""
     try:
-        os.system("systemctl --user stop nothx.timer 2>/dev/null")
-        os.system("systemctl --user disable nothx.timer 2>/dev/null")
+        subprocess.run(["systemctl", "--user", "stop", "nothx.timer"], capture_output=True, check=False)
+        subprocess.run(["systemctl", "--user", "disable", "nothx.timer"], capture_output=True, check=False)
 
         service_path = get_systemd_path()
         timer_path = get_systemd_timer_path()
@@ -246,7 +258,7 @@ def _uninstall_systemd() -> tuple[bool, str]:
         if timer_path.exists():
             timer_path.unlink()
 
-        os.system("systemctl --user daemon-reload")
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, check=False)
 
         return True, "Schedule removed"
     except Exception as e:

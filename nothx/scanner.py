@@ -10,10 +10,34 @@ from .models import EmailHeader, SenderStats
 from . import db
 
 
-def scan_inbox(config: Config, account_name: Optional[str] = None) -> dict[str, SenderStats]:
+class ScanResult:
+    """Result of scanning inbox, containing stats and cached email headers."""
+
+    def __init__(
+        self,
+        sender_stats: dict[str, SenderStats],
+        domain_emails: dict[str, list[EmailHeader]]
+    ):
+        self.sender_stats = sender_stats
+        self.domain_emails = domain_emails
+
+    def get_email_for_domain(self, domain: str) -> Optional[EmailHeader]:
+        """Get a sample email with unsubscribe header for a domain."""
+        emails = self.domain_emails.get(domain, [])
+        # Prefer emails with unsubscribe links
+        for email in emails:
+            if email.list_unsubscribe:
+                return email
+        return emails[0] if emails else None
+
+
+def scan_inbox(
+    config: Config,
+    account_name: Optional[str] = None
+) -> ScanResult:
     """
     Scan inbox for marketing emails and aggregate by sender domain.
-    Returns a dictionary mapping domain -> SenderStats.
+    Returns a ScanResult containing sender stats and cached email headers.
     """
     account = config.get_account(account_name)
     if not account:
@@ -67,7 +91,7 @@ def scan_inbox(config: Config, account_name: Optional[str] = None) -> dict[str, 
             last_seen=last_seen,
         )
 
-    return sender_stats
+    return ScanResult(sender_stats, dict(domain_emails))
 
 
 def get_emails_for_domain(

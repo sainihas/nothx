@@ -1,7 +1,7 @@
 """Configuration management for nothx."""
 
 import json
-import os
+import stat
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -81,11 +81,14 @@ class Config:
     scan_days: int = 30
 
     def save(self) -> None:
-        """Save configuration to disk."""
+        """Save configuration to disk with secure permissions."""
         config_path = get_config_path()
         data = self._to_dict()
         with open(config_path, "w") as f:
             json.dump(data, f, indent=2)
+        # Set file permissions to owner read/write only (0600)
+        # This protects sensitive data like API keys and app passwords
+        config_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
     def _to_dict(self) -> dict:
         """Convert config to dictionary for JSON serialization."""

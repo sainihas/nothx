@@ -276,6 +276,24 @@ def get_recent_unsubscribes(days: int = 30) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def get_unsub_success_rate() -> tuple[int, int]:
+    """Get unsubscribe success and failure counts.
+
+    Returns:
+        Tuple of (successful_count, failed_count)
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) as successful,
+                COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) as failed
+            FROM unsub_log
+        """
+        ).fetchone()
+        return (row["successful"], row["failed"]) if row else (0, 0)
+
+
 def add_rule(pattern: str, action: str) -> None:
     """Add a user rule."""
     with get_db() as conn:
@@ -326,3 +344,124 @@ def get_stats() -> dict:
             "total_runs": runs["count"],
             "last_run": last_run["ran_at"] if last_run else None,
         }
+
+
+def get_all_senders(status_filter: str | None = None, sort_by: str = "last_seen") -> list[dict]:
+    """Get all senders with optional filtering and sorting.
+
+    Args:
+        status_filter: Filter by status (keep, unsubscribed, blocked, unknown)
+        sort_by: Sort by 'emails', 'domain', or 'last_seen' (default)
+    """
+    with get_db() as conn:
+        query = "SELECT * FROM senders"
+        params: list = []
+
+        if status_filter:
+            query += " WHERE status = ?"
+            params.append(status_filter)
+
+        sort_map = {
+            "emails": "total_emails DESC",
+            "domain": "domain ASC",
+            "last_seen": "last_seen DESC",
+        }
+        order = sort_map.get(sort_by, "last_seen DESC")
+        query += f" ORDER BY {order}"
+
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+
+def search_senders(pattern: str) -> list[dict]:
+    """Search senders by domain pattern."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM senders
+            WHERE domain LIKE ?
+            ORDER BY total_emails DESC
+        """,
+            (f"%{pattern}%",),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_activity_log(limit: int = 50, failures_only: bool = False) -> list[dict]:
+    """Get recent activity log combining runs and unsubscribe attempts.
+
+    Args:
+        limit: Maximum number of entries to return
+        failures_only: If True, only return failed unsubscribe attempts (skips runs)
+
+    Returns a unified log of activity sorted by timestamp.
+    """
+    with get_db() as conn:
+        all_activity: list[dict] = []
+
+        # Get runs (skip when showing failures only, since runs aren't "failures")
+        if not failures_only:
+            runs = conn.execute(
+                """
+                SELECT
+                    'run' as type,
+                    ran_at as timestamp,
+                    emails_scanned,
+                    unique_senders,
+                    auto_unsubbed,
+                    failed,
+                    mode
+                FROM runs
+                ORDER BY ran_at DESC
+                LIMIT ?
+            """,
+                (limit,),
+            ).fetchall()
+            all_activity.extend(dict(row) for row in runs)
+
+        # Get unsubscribe attempts
+        unsub_query = """
+            SELECT
+                'unsub' as type,
+                attempted_at as timestamp,
+                domain,
+                success,
+                method,
+                error
+            FROM unsub_log
+        """
+        if failures_only:
+            unsub_query += " WHERE success = 0"
+        unsub_query += " ORDER BY attempted_at DESC LIMIT ?"
+
+        unsubs = conn.execute(unsub_query, (limit,)).fetchall()
+        all_activity.extend(dict(row) for row in unsubs)
+
+        # Combine and sort
+        all_activity.sort(key=lambda x: x["timestamp"], reverse=True)
+
+        return all_activity[:limit]
+
+
+def reset_database(keep_config: bool = False) -> tuple[int, int]:
+    """Clear all data from the database.
+
+    Args:
+        keep_config: If True, keep rules table (not currently used as rules are in DB)
+
+    Returns:
+        Tuple of (senders_deleted, unsub_logs_deleted)
+    """
+    with get_db() as conn:
+        senders = conn.execute("SELECT COUNT(*) as count FROM senders").fetchone()["count"]
+        unsubs = conn.execute("SELECT COUNT(*) as count FROM unsub_log").fetchone()["count"]
+
+        conn.execute("DELETE FROM senders")
+        conn.execute("DELETE FROM unsub_log")
+        conn.execute("DELETE FROM corrections")
+        conn.execute("DELETE FROM runs")
+
+        if not keep_config:
+            conn.execute("DELETE FROM rules")
+
+        return (senders, unsubs)

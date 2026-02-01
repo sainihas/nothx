@@ -27,6 +27,8 @@ classifiers = [
 dependencies = [
     "anthropic>=0.40.0",
     "click>=8.0",
+    "humanize>=4.0.0",
+    "questionary>=2.0.0",
     "rich>=13.0",
 ]
 

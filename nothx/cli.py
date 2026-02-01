@@ -478,7 +478,16 @@ def _run_scan(
         transient=True,
     ) as progress:
         task = progress.add_task("Connecting to mailbox...", total=None)
-        scan_result = scan_inbox(config, account_names=account_names)
+
+        def on_account_start(email: str, name: str, current: int, total: int) -> None:
+            if total > 1:
+                progress.update(task, description=f"Scanning {email}... ({current}/{total})")
+            else:
+                progress.update(task, description=f"Scanning {email}...")
+
+        scan_result = scan_inbox(
+            config, account_names=account_names, on_account_start=on_account_start
+        )
         sender_stats = scan_result.sender_stats
 
     if not sender_stats:

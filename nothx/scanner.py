@@ -1,6 +1,10 @@
 """Email scanning and sender aggregation for nothx."""
 
 from collections import defaultdict
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from . import db
 from .config import Config
@@ -27,13 +31,22 @@ class ScanResult:
         return emails[0] if emails else None
 
 
-def scan_inbox(config: Config, account_names: list[str] | None = None) -> ScanResult:
+def scan_inbox(
+    config: Config,
+    account_names: list[str] | None = None,
+    on_account_start: "Callable[[str, str, int, int], None] | None" = None,
+) -> ScanResult:
     """
     Scan inbox for marketing emails and aggregate by sender domain.
     Returns a ScanResult containing sender stats and cached email headers.
 
     If account_names is provided, scans only those accounts.
     Otherwise, scans ALL configured accounts.
+
+    Args:
+        config: The configuration object
+        account_names: Optional list of account names to scan
+        on_account_start: Optional callback(email, name, current, total) called when starting each account
     """
     # Determine which accounts to scan
     if account_names:
@@ -50,8 +63,13 @@ def scan_inbox(config: Config, account_names: list[str] | None = None) -> ScanRe
 
     # Aggregate emails by domain across all accounts
     domain_emails: dict[str, list[EmailHeader]] = defaultdict(list)
+    total_accounts = len(accounts_to_scan)
 
-    for account_name, account in accounts_to_scan:
+    for idx, (account_name, account) in enumerate(accounts_to_scan, 1):
+        # Notify progress callback
+        if on_account_start:
+            on_account_start(account.email, account_name, idx, total_accounts)
+
         with IMAPConnection(account) as conn:
             for header in conn.fetch_marketing_emails(days=config.scan_days):
                 # Track which account this email came from (for mailto unsubscribes)

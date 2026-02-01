@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nothx"
-version = "0.1.0"
+version = "0.1.1"
 description = "AI-powered email unsubscribe tool. Set it up once, AI handles your inbox forever."
 readme = "README.md"
 license = "MIT"

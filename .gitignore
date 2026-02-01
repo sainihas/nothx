@@ -43,6 +43,9 @@ htmlcov/
 # nothx local data
 .nothx/
 
+# Claude local settings (keep .claude/ but ignore local overrides)
+.claude/settings.local.json
+
 # macOS
 .DS_Store
 
@@ -52,4 +55,5 @@ htmlcov/
 # Secrets (never commit)
 *.env
 .env.*
+!.env.example
 config.json

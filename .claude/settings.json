@@ -1,3 +1,30 @@
 {
-  "includeCoAuthoredBy": false
+  "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "pytest",
+      "pytest --cov=nothx",
+      "pytest --cov=nothx --cov-report=term-missing",
+      "python -m nothx",
+      "python -m nothx *",
+      "ruff check",
+      "ruff check --fix",
+      "ruff format",
+      "git add",
+      "git commit",
+      "git status",
+      "git diff",
+      "git log",
+      "pip install -e .",
+      "pip install -e \".[dev]\""
+    ],
+    "deny": [
+      "git push --force",
+      "git push -f",
+      "git reset --hard",
+      "rm -rf",
+      "rm -r /",
+      "git clean -fd"
+    ]
+  }
 }

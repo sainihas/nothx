@@ -628,15 +628,18 @@ class TestExportCommand:
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
             output_path = f.name
 
-        result = runner.invoke(export, ["senders", "--output", output_path])
+        try:
+            result = runner.invoke(export, ["senders", "--output", output_path])
 
-        assert result.exit_code == 0
-        assert "Exported" in result.output
+            assert result.exit_code == 0
+            assert "Exported" in result.output
 
-        # Verify CSV content
-        with open(output_path) as f:
-            content = f.read()
-            assert "test.com" in content
+            # Verify CSV content
+            with open(output_path) as f:
+                content = f.read()
+                assert "test.com" in content
+        finally:
+            Path(output_path).unlink(missing_ok=True)
 
     def test_export_history(self, runner, temp_config_dir):
         """Test exporting history to CSV."""
@@ -645,20 +648,26 @@ class TestExportCommand:
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
             output_path = f.name
 
-        result = runner.invoke(export, ["history", "--output", output_path])
+        try:
+            result = runner.invoke(export, ["history", "--output", output_path])
 
-        assert result.exit_code == 0
-        assert "Exported" in result.output
+            assert result.exit_code == 0
+            assert "Exported" in result.output
+        finally:
+            Path(output_path).unlink(missing_ok=True)
 
     def test_export_senders_empty(self, runner, temp_config_dir):
         """Test exporting when no data."""
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
             output_path = f.name
 
-        result = runner.invoke(export, ["senders", "--output", output_path])
+        try:
+            result = runner.invoke(export, ["senders", "--output", output_path])
 
-        assert result.exit_code == 0
-        assert "No senders to export" in result.output
+            assert result.exit_code == 0
+            assert "No senders to export" in result.output
+        finally:
+            Path(output_path).unlink(missing_ok=True)
 
 
 class TestTestConnectionCommand:

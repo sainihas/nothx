@@ -2,6 +2,7 @@
 
 import math
 import re
+import threading
 from datetime import datetime
 
 from .. import db
@@ -65,8 +66,6 @@ class PreferenceLearner:
         This is the main learning entry point. Called after each user action
         to incrementally update learned preferences.
         """
-        self._invalidate_cache()
-
         # Update keyword preferences based on domain
         self._update_keyword_preferences(action)
 
@@ -75,6 +74,9 @@ class PreferenceLearner:
 
         # Update volume preference (at what count does user unsub?)
         self._update_volume_preference(action)
+
+        # Invalidate cache AFTER all DB operations complete
+        self._invalidate_cache()
 
     def _update_keyword_preferences(self, action: UserAction) -> None:
         """Learn keyword associations from domain patterns."""
@@ -348,19 +350,24 @@ class PreferenceLearner:
         return summary
 
 
-# Global learner instance
+# Global learner instance with thread-safe initialization
 _learner: PreferenceLearner | None = None
+_learner_lock = threading.Lock()
 
 
 def get_learner() -> PreferenceLearner:
-    """Get the global preference learner instance."""
+    """Get the global preference learner instance (thread-safe)."""
     global _learner
     if _learner is None:
-        _learner = PreferenceLearner()
+        with _learner_lock:
+            # Double-check after acquiring lock
+            if _learner is None:
+                _learner = PreferenceLearner()
     return _learner
 
 
 def reset_learner() -> None:
     """Reset the global learner instance (for testing)."""
     global _learner
-    _learner = None
+    with _learner_lock:
+        _learner = None

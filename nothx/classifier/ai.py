@@ -270,15 +270,22 @@ class AIClassifier:
         return _call()
 
     def _sanitize_for_prompt(self, text: str) -> str:
-        """Sanitize text to prevent prompt injection attacks."""
+        """Sanitize text to prevent prompt injection attacks.
+
+        Uses json.dumps for proper escaping, then removes quotes to get clean text.
+        This ensures all special characters are properly escaped.
+        """
         if not text:
             return ""
-        # Remove potential JSON-breaking characters and limit length
-        sanitized = text.replace('"', "'").replace("\\", "")
-        # Remove control characters
-        sanitized = "".join(c for c in sanitized if ord(c) >= 32 or c in "\n\t")
-        # Limit length
-        return sanitized[:500]
+        # Remove control characters first
+        sanitized = "".join(c for c in text if ord(c) >= 32)
+        # Limit length before JSON encoding
+        sanitized = sanitized[:500]
+        # Use json.dumps for proper escaping, then strip the surrounding quotes
+        # This handles all edge cases including quotes, backslashes, unicode, etc.
+        json_escaped = json.dumps(sanitized)
+        # Remove surrounding quotes from json.dumps output
+        return json_escaped[1:-1]
 
     def classify_single(self, sender: SenderStats) -> Classification | None:
         """Classify a single sender."""
@@ -293,8 +300,12 @@ class AIClassifier:
 
         context_lines = ["User has made these corrections to previous AI decisions:"]
         for c in corrections:
+            # Sanitize correction data to prevent prompt injection
+            domain = self._sanitize_for_prompt(str(c.get("domain", "")))
+            ai_decision = self._sanitize_for_prompt(str(c.get("ai_decision", "")))
+            user_decision = self._sanitize_for_prompt(str(c.get("user_decision", "")))
             context_lines.append(
-                f"- {c['domain']}: AI said '{c['ai_decision']}', user changed to '{c['user_decision']}'"
+                f"- {domain}: AI said '{ai_decision}', user changed to '{user_decision}'"
             )
         context_lines.append("\nLearn from these corrections and adjust your recommendations.")
 

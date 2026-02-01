@@ -3,9 +3,21 @@
 import logging
 from typing import Any
 
-from .base import BaseAIProvider, ProviderResponse
+from .base import BaseAIProvider, ProviderError, ProviderErrorType, ProviderResponse
 
 logger = logging.getLogger("nothx.providers.gemini")
+
+
+def _sanitize_error_message(error: Exception) -> str:
+    """Sanitize error message to avoid exposing API keys."""
+    msg = str(error)
+    # Common patterns that might contain API keys
+    sensitive_patterns = ["api_key=", "api-key=", "authorization:", "bearer ", "aiza"]
+    msg_lower = msg.lower()
+    for pattern in sensitive_patterns:
+        if pattern in msg_lower:
+            return "API error (details redacted for security)"
+    return msg
 
 
 class GeminiProvider(BaseAIProvider):
@@ -51,27 +63,72 @@ class GeminiProvider(BaseAIProvider):
 
     def complete(self, prompt: str, max_tokens: int = 4096) -> ProviderResponse:
         """Send prompt to Gemini and get response."""
-        client = self._get_client()
+        try:
+            from google.api_core import exceptions as google_exceptions
 
-        # Gemini uses generation_config for max tokens
-        response = client.generate_content(
-            prompt,
-            generation_config={"max_output_tokens": max_tokens},
-        )
+            client = self._get_client()
 
-        # Extract usage if available
-        usage = None
-        if hasattr(response, "usage_metadata") and response.usage_metadata:
-            usage = {
-                "input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
-                "output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
-            }
+            # Gemini uses generation_config for max tokens
+            response = client.generate_content(
+                prompt,
+                generation_config={"max_output_tokens": max_tokens},
+            )
 
-        return ProviderResponse(
-            text=response.text,
-            model=self.model,
-            usage=usage,
-        )
+            # Extract usage if available
+            usage = None
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                usage = {
+                    "input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
+                    "output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
+                }
+
+            return ProviderResponse(
+                text=response.text,
+                model=self.model,
+                usage=usage,
+            )
+        except ImportError:
+            raise
+        except google_exceptions.ResourceExhausted as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.RATE_LIMIT_ERROR,
+                message=str(e),
+                provider=self.name,
+                retryable=True,
+                cause=e,
+            ) from e
+        except google_exceptions.PermissionDenied as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.AUTHENTICATION_ERROR,
+                message=_sanitize_error_message(e),
+                provider=self.name,
+                retryable=False,
+                cause=e,
+            ) from e
+        except google_exceptions.DeadlineExceeded as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.TIMEOUT_ERROR,
+                message=str(e),
+                provider=self.name,
+                retryable=True,
+                cause=e,
+            ) from e
+        except google_exceptions.ServiceUnavailable as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.CONNECTION_ERROR,
+                message=str(e),
+                provider=self.name,
+                retryable=True,
+                cause=e,
+            ) from e
+        except Exception as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.UNKNOWN,
+                message=_sanitize_error_message(e),
+                provider=self.name,
+                retryable=False,
+                cause=e,
+            ) from e
 
     def test_connection(self) -> tuple[bool, str]:
         """Test Gemini API connection."""
@@ -91,4 +148,4 @@ class GeminiProvider(BaseAIProvider):
                 "Google Generative AI SDK not installed. Run: pip install google-generativeai",
             )
         except Exception as e:
-            return False, str(e)
+            return False, _sanitize_error_message(e)

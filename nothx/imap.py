@@ -186,7 +186,12 @@ class IMAPConnection:
                 e,
                 extra={"since_date": since_date, "error": str(e)},
             )
-            return
+            raise IMAPError(
+                code=ErrorCode.IMAP_FETCH_ERROR,
+                message=f"IMAP search failed: {e}",
+                details={"since_date": since_date},
+                cause=e,
+            ) from e
 
         if status != "OK":
             logger.warning(
@@ -194,7 +199,11 @@ class IMAPConnection:
                 status,
                 extra={"status": status},
             )
-            return
+            raise IMAPError(
+                code=ErrorCode.IMAP_FETCH_ERROR,
+                message=f"IMAP search returned non-OK status: {status}",
+                details={"status": status},
+            )
 
         message_ids = data[0].split()
         logger.debug(

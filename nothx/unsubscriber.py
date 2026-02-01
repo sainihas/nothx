@@ -1,15 +1,13 @@
 """Unsubscribe execution for nothx."""
 
 import smtplib
-import urllib.request
 import urllib.parse
+import urllib.request
 from email.mime.text import MIMEText
-from typing import Optional
 
-from .config import Config, AccountConfig
-from .models import EmailHeader, UnsubResult, UnsubMethod, SenderStatus
 from . import db
-
+from .config import AccountConfig, Config
+from .models import EmailHeader, SenderStatus, UnsubMethod, UnsubResult
 
 # User agent for HTTP requests - identifies as nothx email automation tool
 USER_AGENT = "nothx/0.1.0 (Email Unsubscribe Automation; +https://github.com/nothx/nothx)"
@@ -19,9 +17,7 @@ REQUEST_TIMEOUT = 30
 
 
 def unsubscribe(
-    email_header: EmailHeader,
-    config: Config,
-    account: Optional[AccountConfig] = None
+    email_header: EmailHeader, config: Config, account: AccountConfig | None = None
 ) -> UnsubResult:
     """
     Attempt to unsubscribe from a sender.
@@ -48,11 +44,7 @@ def unsubscribe(
         return result
 
     # No method available
-    result = UnsubResult(
-        success=False,
-        method=None,
-        error="No unsubscribe method available"
-    )
+    result = UnsubResult(success=False, method=None, error="No unsubscribe method available")
     _log_result(email_header.domain, result)
     return result
 
@@ -68,7 +60,7 @@ def _execute_one_click(url: str) -> UnsubResult:
                 "User-Agent": USER_AGENT,
                 "Content-Type": "application/x-www-form-urlencoded",
             },
-            method="POST"
+            method="POST",
         )
 
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
@@ -103,11 +95,7 @@ def _execute_one_click(url: str) -> UnsubResult:
 def _execute_get(url: str) -> UnsubResult:
     """Execute GET request to unsubscribe URL."""
     try:
-        request = urllib.request.Request(
-            url,
-            headers={"User-Agent": USER_AGENT},
-            method="GET"
-        )
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
 
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
             status = response.getcode()

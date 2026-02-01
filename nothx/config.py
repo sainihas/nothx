@@ -2,9 +2,8 @@
 
 import json
 import stat
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 def get_config_dir() -> Path:
@@ -27,6 +26,7 @@ def get_db_path() -> Path:
 @dataclass
 class AccountConfig:
     """Configuration for an email account."""
+
     provider: str  # "gmail" or "outlook"
     email: str
     password: str  # App password for Gmail
@@ -35,9 +35,10 @@ class AccountConfig:
 @dataclass
 class AIConfig:
     """Configuration for AI features."""
+
     enabled: bool = True
     provider: str = "anthropic"  # "anthropic", "ollama", or "none"
-    api_key: Optional[str] = None
+    api_key: str | None = None
     model: str = "claude-sonnet-4-20250514"
     confidence_threshold: float = 0.80
 
@@ -45,6 +46,7 @@ class AIConfig:
 @dataclass
 class NotificationConfig:
     """Configuration for notifications."""
+
     enabled: bool = False
     on_unsubscribe: bool = False
     on_error: bool = True
@@ -55,6 +57,7 @@ class NotificationConfig:
 @dataclass
 class ThresholdConfig:
     """Configuration for auto-decision thresholds."""
+
     unsub_confidence: float = 0.80
     keep_confidence: float = 0.80
     min_emails_before_action: int = 3
@@ -63,6 +66,7 @@ class ThresholdConfig:
 @dataclass
 class SafetyConfig:
     """Safety configuration."""
+
     never_unsub_domains: list[str] = field(default_factory=lambda: ["*.gov", "*bank*", "*health*"])
     always_confirm_domains: list[str] = field(default_factory=list)
     dry_run: bool = False
@@ -71,8 +75,9 @@ class SafetyConfig:
 @dataclass
 class Config:
     """Main configuration for nothx."""
+
     accounts: dict[str, AccountConfig] = field(default_factory=dict)
-    default_account: Optional[str] = None
+    default_account: str | None = None
     ai: AIConfig = field(default_factory=AIConfig)
     operation_mode: str = "hands_off"  # "hands_off", "notify", "confirm"
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
@@ -93,9 +98,7 @@ class Config:
     def _to_dict(self) -> dict:
         """Convert config to dictionary for JSON serialization."""
         return {
-            "accounts": {
-                name: asdict(acc) for name, acc in self.accounts.items()
-            },
+            "accounts": {name: asdict(acc) for name, acc in self.accounts.items()},
             "default_account": self.default_account,
             "ai": asdict(self.ai),
             "operation_mode": self.operation_mode,
@@ -145,7 +148,7 @@ class Config:
 
         return config
 
-    def get_account(self, name: Optional[str] = None) -> Optional[AccountConfig]:
+    def get_account(self, name: str | None = None) -> AccountConfig | None:
         """Get an account by name or the default account."""
         if name:
             return self.accounts.get(name)

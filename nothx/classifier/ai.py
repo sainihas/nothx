@@ -2,11 +2,10 @@
 
 import json
 import logging
-from typing import Optional
 
-from ..config import Config
-from ..models import SenderStats, Classification, Action, EmailType
 from .. import db
+from ..config import Config
+from ..models import Action, Classification, EmailType, SenderStats
 
 logger = logging.getLogger("nothx.classifier.ai")
 
@@ -71,6 +70,7 @@ class AIClassifier:
         """Get or create Anthropic client."""
         if self._client is None:
             import anthropic
+
             self._client = anthropic.Anthropic(api_key=self.config.ai.api_key)
         return self._client
 
@@ -84,10 +84,7 @@ class AIClassifier:
             return False
         return True
 
-    def classify_batch(
-        self,
-        senders: list[SenderStats]
-    ) -> dict[str, Classification]:
+    def classify_batch(self, senders: list[SenderStats]) -> dict[str, Classification]:
         """
         Classify a batch of senders using AI.
         Returns a dictionary mapping domain -> Classification.
@@ -115,8 +112,7 @@ class AIClassifier:
 
         # Build prompt
         prompt = CLASSIFICATION_PROMPT.format(
-            correction_context=correction_context,
-            senders=json.dumps(sender_descriptions, indent=2)
+            correction_context=correction_context, senders=json.dumps(sender_descriptions, indent=2)
         )
 
         # Call Claude API
@@ -125,7 +121,7 @@ class AIClassifier:
             response = client.messages.create(
                 model=self.config.ai.model,
                 max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
             )
 
             # Parse response
@@ -137,7 +133,7 @@ class AIClassifier:
                 db.update_sender_classification(
                     domain=domain,
                     classification=classification.email_type.value,
-                    confidence=classification.confidence
+                    confidence=classification.confidence,
                 )
 
             return classifications
@@ -147,7 +143,7 @@ class AIClassifier:
             logger.error("AI classification error: %s", e)
             return {}
 
-    def classify_single(self, sender: SenderStats) -> Optional[Classification]:
+    def classify_single(self, sender: SenderStats) -> Classification | None:
         """Classify a single sender."""
         results = self.classify_batch([sender])
         return results.get(sender.domain)
@@ -169,7 +165,7 @@ class AIClassifier:
 
     def _parse_response(self, response_text: str) -> dict[str, Classification]:
         """Parse AI response into Classification objects."""
-        results = {}
+        results: dict[str, Classification] = {}
 
         try:
             # Extract JSON from response
@@ -221,11 +217,10 @@ def test_ai_connection(config: Config) -> tuple[bool, str]:
 
     try:
         import anthropic
+
         client = anthropic.Anthropic(api_key=config.ai.api_key)
-        response = client.messages.create(
-            model=config.ai.model,
-            max_tokens=10,
-            messages=[{"role": "user", "content": "Say 'ok'"}]
+        client.messages.create(
+            model=config.ai.model, max_tokens=10, messages=[{"role": "user", "content": "Say 'ok'"}]
         )
         return True, "Connection successful"
     except Exception as e:

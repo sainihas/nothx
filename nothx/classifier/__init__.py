@@ -1,10 +1,10 @@
 """Classification system for nothx."""
 
-from .engine import ClassificationEngine
-from .rules import RulesMatcher
-from .patterns import PatternMatcher
 from .ai import AIClassifier
+from .engine import ClassificationEngine
 from .heuristics import HeuristicScorer
+from .patterns import PatternMatcher
+from .rules import RulesMatcher
 
 __all__ = [
     "ClassificationEngine",

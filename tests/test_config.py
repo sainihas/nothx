@@ -1,19 +1,18 @@
 """Tests for configuration management."""
 
-import pytest
-import tempfile
 import stat
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from nothx.config import (
-    Config,
     AccountConfig,
     AIConfig,
-    ThresholdConfig,
+    Config,
     SafetyConfig,
-    get_config_dir,
-    get_config_path,
+    ThresholdConfig,
 )
 
 
@@ -75,9 +74,7 @@ class TestConfigSaveLoad:
         """Test saving and loading configuration."""
         config = Config()
         config.accounts["default"] = AccountConfig(
-            provider="gmail",
-            email="test@example.com",
-            password="secret123"
+            provider="gmail", email="test@example.com", password="secret123"
         )
         config.default_account = "default"
         config.ai.api_key = "test-api-key"
@@ -98,9 +95,7 @@ class TestConfigSaveLoad:
         """Test that save sets secure file permissions."""
         config = Config()
         config.accounts["default"] = AccountConfig(
-            provider="gmail",
-            email="test@example.com",
-            password="secret123"
+            provider="gmail", email="test@example.com", password="secret123"
         )
         config.save()
 
@@ -126,14 +121,10 @@ class TestConfigMethods:
         """Test getting account by name."""
         config = Config()
         config.accounts["work"] = AccountConfig(
-            provider="outlook",
-            email="work@company.com",
-            password="pass"
+            provider="outlook", email="work@company.com", password="pass"
         )
         config.accounts["personal"] = AccountConfig(
-            provider="gmail",
-            email="personal@gmail.com",
-            password="pass"
+            provider="gmail", email="personal@gmail.com", password="pass"
         )
 
         account = config.get_account("work")
@@ -144,9 +135,7 @@ class TestConfigMethods:
         """Test getting default account."""
         config = Config()
         config.accounts["main"] = AccountConfig(
-            provider="gmail",
-            email="main@gmail.com",
-            password="pass"
+            provider="gmail", email="main@gmail.com", password="pass"
         )
         config.default_account = "main"
 
@@ -158,9 +147,7 @@ class TestConfigMethods:
         """Test fallback to first account when no default."""
         config = Config()
         config.accounts["only"] = AccountConfig(
-            provider="gmail",
-            email="only@gmail.com",
-            password="pass"
+            provider="gmail", email="only@gmail.com", password="pass"
         )
 
         account = config.get_account()
@@ -178,9 +165,7 @@ class TestConfigMethods:
         """Test is_configured returns True when properly configured."""
         config = Config()
         config.accounts["default"] = AccountConfig(
-            provider="gmail",
-            email="test@gmail.com",
-            password="pass"
+            provider="gmail", email="test@gmail.com", password="pass"
         )
         config.ai.api_key = "test-key"
 
@@ -197,9 +182,7 @@ class TestConfigMethods:
         """Test is_configured returns False without API key."""
         config = Config()
         config.accounts["default"] = AccountConfig(
-            provider="gmail",
-            email="test@gmail.com",
-            password="pass"
+            provider="gmail", email="test@gmail.com", password="pass"
         )
 
         assert config.is_configured() is False
@@ -208,9 +191,7 @@ class TestConfigMethods:
         """Test is_configured with provider='none' (heuristics only)."""
         config = Config()
         config.accounts["default"] = AccountConfig(
-            provider="gmail",
-            email="test@gmail.com",
-            password="pass"
+            provider="gmail", email="test@gmail.com", password="pass"
         )
         config.ai.provider = "none"
 

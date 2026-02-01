@@ -1,11 +1,10 @@
 """Scheduler management for nothx (launchd on macOS, systemd on Linux)."""
 
-import subprocess
-import sys
 import platform
 import plistlib
+import subprocess
+import sys
 from pathlib import Path
-from typing import Optional
 
 
 def get_scheduler_type() -> str:
@@ -66,7 +65,7 @@ def uninstall_schedule() -> tuple[bool, str]:
         return False, "Unsupported scheduler"
 
 
-def get_schedule_status() -> Optional[dict]:
+def get_schedule_status() -> dict | None:
     """Get current schedule status."""
     scheduler = get_scheduler_type()
 
@@ -112,9 +111,7 @@ def _install_launchd(frequency: str) -> tuple[bool, str]:
         # Unload existing if present
         if plist_path.exists():
             subprocess.run(
-                ["launchctl", "unload", str(plist_path)],
-                capture_output=True,
-                check=False
+                ["launchctl", "unload", str(plist_path)], capture_output=True, check=False
             )
 
         # Write plist
@@ -123,9 +120,7 @@ def _install_launchd(frequency: str) -> tuple[bool, str]:
 
         # Load the new plist
         result = subprocess.run(
-            ["launchctl", "load", str(plist_path)],
-            capture_output=True,
-            check=False
+            ["launchctl", "load", str(plist_path)], capture_output=True, check=False
         )
         if result.returncode != 0:
             return False, "Failed to load launchd job"
@@ -144,18 +139,14 @@ def _uninstall_launchd() -> tuple[bool, str]:
         return True, "No schedule to remove"
 
     try:
-        subprocess.run(
-            ["launchctl", "unload", str(plist_path)],
-            capture_output=True,
-            check=False
-        )
+        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True, check=False)
         plist_path.unlink()
         return True, "Schedule removed"
     except Exception as e:
         return False, str(e)
 
 
-def _get_launchd_status() -> Optional[dict]:
+def _get_launchd_status() -> dict | None:
     """Get launchd schedule status."""
     plist_path = get_launchd_path()
 
@@ -235,8 +226,12 @@ WantedBy=timers.target
 
         # Reload and enable
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, check=False)
-        subprocess.run(["systemctl", "--user", "enable", "nothx.timer"], capture_output=True, check=False)
-        subprocess.run(["systemctl", "--user", "start", "nothx.timer"], capture_output=True, check=False)
+        subprocess.run(
+            ["systemctl", "--user", "enable", "nothx.timer"], capture_output=True, check=False
+        )
+        subprocess.run(
+            ["systemctl", "--user", "start", "nothx.timer"], capture_output=True, check=False
+        )
 
         return True, f"Scheduled {frequency} runs via systemd"
 
@@ -247,8 +242,12 @@ WantedBy=timers.target
 def _uninstall_systemd() -> tuple[bool, str]:
     """Uninstall systemd schedule."""
     try:
-        subprocess.run(["systemctl", "--user", "stop", "nothx.timer"], capture_output=True, check=False)
-        subprocess.run(["systemctl", "--user", "disable", "nothx.timer"], capture_output=True, check=False)
+        subprocess.run(
+            ["systemctl", "--user", "stop", "nothx.timer"], capture_output=True, check=False
+        )
+        subprocess.run(
+            ["systemctl", "--user", "disable", "nothx.timer"], capture_output=True, check=False
+        )
 
         service_path = get_systemd_path()
         timer_path = get_systemd_timer_path()
@@ -265,7 +264,7 @@ def _uninstall_systemd() -> tuple[bool, str]:
         return False, str(e)
 
 
-def _get_systemd_status() -> Optional[dict]:
+def _get_systemd_status() -> dict | None:
     """Get systemd schedule status."""
     timer_path = get_systemd_timer_path()
 

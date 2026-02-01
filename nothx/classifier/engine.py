@@ -1,13 +1,11 @@
 """Classification engine that orchestrates all layers."""
 
-from typing import Optional
-
 from ..config import Config
-from ..models import SenderStats, Classification, Action, EmailType
-from .rules import RulesMatcher
-from .patterns import PatternMatcher
+from ..models import Action, Classification, EmailType, SenderStats
 from .ai import AIClassifier
 from .heuristics import HeuristicScorer
+from .patterns import PatternMatcher
+from .rules import RulesMatcher
 
 
 class ClassificationEngine:
@@ -62,10 +60,7 @@ class ClassificationEngine:
             source="uncertain",
         )
 
-    def classify_batch(
-        self,
-        senders: list[SenderStats]
-    ) -> dict[str, Classification]:
+    def classify_batch(self, senders: list[SenderStats]) -> dict[str, Classification]:
         """
         Classify a batch of senders efficiently.
         Uses AI batch classification for better efficiency.

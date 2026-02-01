@@ -1,14 +1,14 @@
 """Tests for database operations."""
 
-import pytest
 import tempfile
-import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from nothx.models import SenderStatus, RunStats
+import pytest
+
 from nothx import db
+from nothx.models import RunStats, SenderStatus
 
 
 @pytest.fixture
@@ -28,9 +28,7 @@ class TestDatabaseInit:
         """Test that init_db creates all required tables."""
         with db.get_db() as conn:
             # Check tables exist
-            cursor = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = {row[0] for row in cursor.fetchall()}
 
             assert "senders" in tables

@@ -1,10 +1,8 @@
 """Layer 4: Heuristic-based scoring for classification."""
 
 import re
-from typing import Optional
 
-from ..models import SenderStats, Classification, Action, EmailType
-
+from ..models import Action, Classification, EmailType, SenderStats
 
 # Spam signal patterns
 SPAM_SUBJECT_PATTERNS = [
@@ -116,7 +114,7 @@ class HeuristicScorer:
         # Clamp to 0-100
         return max(0, min(100, score))
 
-    def classify(self, sender: SenderStats) -> Optional[Classification]:
+    def classify(self, sender: SenderStats) -> Classification | None:
         """
         Classify a sender based on heuristic score.
         Returns Classification if confident, None if uncertain.
@@ -132,7 +130,8 @@ class HeuristicScorer:
                 email_type=EmailType.COLD_OUTREACH if is_cold else EmailType.MARKETING,
                 action=Action.BLOCK if is_cold else Action.UNSUB,
                 confidence=min(score / 100, 0.90),
-                reasoning=f"Heuristic score: {score}/100" + (" (cold outreach detected)" if is_cold else ""),
+                reasoning=f"Heuristic score: {score}/100"
+                + (" (cold outreach detected)" if is_cold else ""),
                 source="heuristics",
             )
 

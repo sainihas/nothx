@@ -2,16 +2,12 @@
 
 import logging
 import sys
-from pathlib import Path
-from typing import Optional
 
 from .config import get_config_dir
 
 
 def setup_logging(
-    level: int = logging.INFO,
-    log_to_file: bool = False,
-    verbose: bool = False
+    level: int = logging.INFO, log_to_file: bool = False, verbose: bool = False
 ) -> logging.Logger:
     """
     Set up logging for nothx.
@@ -50,16 +46,14 @@ def setup_logging(
 
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.DEBUG)
-        file_format = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
+        file_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         file_handler.setFormatter(file_format)
         logger.addHandler(file_handler)
 
     return logger
 
 
-def get_logger(name: Optional[str] = None) -> logging.Logger:
+def get_logger(name: str | None = None) -> logging.Logger:
     """
     Get a logger instance.
 

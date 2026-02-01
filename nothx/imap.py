@@ -1,16 +1,15 @@
 """IMAP connection and email fetching for nothx."""
 
-import imaplib
 import email
 import email.utils
+import imaplib
+from collections.abc import Iterator
+from datetime import datetime, timedelta
 from email.header import decode_header
 from email.message import Message
-from datetime import datetime, timedelta
-from typing import Optional, Iterator
 
 from .config import AccountConfig
 from .models import EmailHeader
-
 
 # IMAP server settings
 IMAP_SERVERS = {
@@ -25,7 +24,7 @@ class IMAPConnection:
     def __init__(self, account: AccountConfig):
         self.account = account
         self.server = IMAP_SERVERS.get(account.provider, account.provider)
-        self.conn: Optional[imaplib.IMAP4_SSL] = None
+        self.conn: imaplib.IMAP4_SSL | None = None
 
     def connect(self) -> bool:
         """Connect to the IMAP server."""
@@ -34,7 +33,7 @@ class IMAPConnection:
             self.conn.login(self.account.email, self.account.password)
             return True
         except imaplib.IMAP4.error as e:
-            raise ConnectionError(f"Failed to connect: {e}")
+            raise ConnectionError(f"Failed to connect: {e}") from e
 
     def disconnect(self) -> None:
         """Disconnect from the IMAP server."""
@@ -56,6 +55,8 @@ class IMAPConnection:
         """Test if the connection works."""
         try:
             self.connect()
+            if self.conn is None:
+                return False
             self.conn.select("INBOX", readonly=True)
             self.disconnect()
             return True
@@ -63,9 +64,7 @@ class IMAPConnection:
             return False
 
     def fetch_marketing_emails(
-        self,
-        days: int = 30,
-        folder: str = "INBOX"
+        self, days: int = 30, folder: str = "INBOX"
     ) -> Iterator[EmailHeader]:
         """
         Fetch emails with List-Unsubscribe header from the last N days.
@@ -91,7 +90,7 @@ class IMAPConnection:
                 # Fetch only headers
                 status, msg_data = self.conn.fetch(
                     msg_id,
-                    "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST X-MAILER)])"
+                    "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST X-MAILER)])",
                 )
                 if status != "OK":
                     continue
@@ -99,7 +98,11 @@ class IMAPConnection:
                 # Parse the response
                 for response_part in msg_data:
                     if isinstance(response_part, tuple):
-                        flags_part = response_part[0].decode() if isinstance(response_part[0], bytes) else response_part[0]
+                        flags_part = (
+                            response_part[0].decode()
+                            if isinstance(response_part[0], bytes)
+                            else response_part[0]
+                        )
                         is_seen = "\\Seen" in flags_part
 
                         msg = email.message_from_bytes(response_part[1])
@@ -117,7 +120,7 @@ class IMAPConnection:
                 # Skip problematic emails
                 continue
 
-    def _parse_header(self, msg: Message, is_seen: bool) -> Optional[EmailHeader]:
+    def _parse_header(self, msg: Message, is_seen: bool) -> EmailHeader | None:
         """Parse an email message into an EmailHeader."""
         try:
             # Decode sender

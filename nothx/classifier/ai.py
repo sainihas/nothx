@@ -105,6 +105,7 @@ class AIClassifier:
             return {}
 
         provider = self._get_provider()
+        assert provider is not None  # Guaranteed by is_available() check above
 
         # Build sender descriptions
         sender_descriptions = []
@@ -320,6 +321,7 @@ class AIPatternAnalyzer:
             return None
 
         provider = self._get_provider()
+        assert provider is not None  # Guaranteed by is_available() check above
 
         # Get recent user actions
         actions = db.get_user_actions(days=60, limit=100)

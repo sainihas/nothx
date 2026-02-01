@@ -80,7 +80,6 @@ def _show_welcome_screen() -> None:
             questionary.Choice("nothx status   Show current stats", value="status"),
             questionary.Choice("nothx review   Review pending decisions", value="review"),
             questionary.Choice("nothx senders  List all tracked senders", value="senders"),
-            questionary.Choice("nothx update   Check for updates", value="update"),
             questionary.Choice("nothx --help   View all commands", value="help"),
         ]
 

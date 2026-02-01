@@ -298,31 +298,101 @@ def init():
         if not add_another:
             break
 
-    # Anthropic API key
+    # AI Provider setup
     console.print("\n[header]AI Classification Setup[/header]")
-    console.print("nothx uses Claude AI to classify your emails.")
-    console.print("Your email [bold]headers only[/bold] (never bodies) are sent to Anthropic.\n")
+    console.print("nothx can use AI to classify your emails more accurately.")
+    console.print("Your email [bold]headers only[/bold] (never bodies) are sent to the AI provider.\n")
 
-    api_key = questionary.text(
-        "Anthropic API key (leave empty to skip):",
+    from .classifier.providers import SUPPORTED_PROVIDERS
+
+    # Build provider choices
+    provider_choices = []
+    for key, info in SUPPORTED_PROVIDERS.items():
+        provider_choices.append(
+            questionary.Choice(f"{info['name']} - {info['description']}", value=key)
+        )
+
+    provider = questionary.select(
+        "Select AI provider:",
+        choices=provider_choices,
+        default="anthropic",
     ).ask()
 
-    if api_key and api_key.strip():
-        config.ai.api_key = api_key.strip()
-        config.ai.enabled = True
+    config.ai.provider = provider
 
-        with console.status("Testing AI connection..."):
+    if provider == "none":
+        config.ai.enabled = False
+        console.print("Running in heuristics-only mode.\n")
+    elif provider == "ollama":
+        config.ai.enabled = True
+        config.ai.api_key = None
+
+        # Ask for Ollama URL
+        api_base = questionary.text(
+            "Ollama URL:",
+            default="http://localhost:11434",
+        ).ask()
+        config.ai.api_base = api_base
+
+        # Ask for model
+        from .classifier.providers.ollama_provider import OllamaProvider
+
+        ollama = OllamaProvider(api_base=api_base)
+        available_models = ollama.get_model_options()
+
+        if available_models:
+            model = questionary.select(
+                "Select model:",
+                choices=available_models,
+                default=available_models[0] if available_models else "llama3.2",
+            ).ask()
+            config.ai.model = model
+        else:
+            config.ai.model = "llama3.2"
+            console.print("[warning]Could not fetch models. Using default: llama3.2[/warning]")
+
+        with console.status("Testing Ollama connection..."):
             success, msg = test_ai_connection(config)
 
         if success:
-            console.print("[success]✓ AI working![/success]\n")
+            console.print("[success]✓ Ollama working![/success]\n")
         else:
-            console.print(f"[warning]AI test failed: {msg}[/warning]")
+            console.print(f"[warning]Ollama test failed: {msg}[/warning]")
             console.print("Continuing with heuristics-only mode.\n")
             config.ai.enabled = False
     else:
-        config.ai.enabled = False
-        console.print("Running in heuristics-only mode.\n")
+        # Cloud provider - needs API key
+        provider_info = SUPPORTED_PROVIDERS[provider]
+
+        console.print(f"\nGet your API key from: [link]{provider_info['key_url']}[/link]")
+
+        api_key = questionary.text(
+            f"{provider_info['name']} API key (leave empty to skip):",
+        ).ask()
+
+        if api_key and api_key.strip():
+            config.ai.api_key = api_key.strip()
+            config.ai.enabled = True
+
+            # Set default model for provider
+            from .classifier.providers import get_provider
+
+            temp_provider = get_provider(provider, api_key=config.ai.api_key)
+            if temp_provider:
+                config.ai.model = temp_provider.default_model
+
+            with console.status(f"Testing {provider_info['name']} connection..."):
+                success, msg = test_ai_connection(config)
+
+            if success:
+                console.print(f"[success]✓ {provider_info['name']} working![/success]\n")
+            else:
+                console.print(f"[warning]AI test failed: {msg}[/warning]")
+                console.print("Continuing with heuristics-only mode.\n")
+                config.ai.enabled = False
+        else:
+            config.ai.enabled = False
+            console.print("Running in heuristics-only mode.\n")
 
     # Initialize database
     db.init_db()

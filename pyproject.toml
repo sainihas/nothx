@@ -25,19 +25,35 @@ classifiers = [
     "Topic :: Communications :: Email",
 ]
 dependencies = [
-    "anthropic>=0.40.0",
     "click>=8.0",
     "humanize>=4.0.0",
     "questionary>=2.0.0",
+    "requests>=2.30.0",
     "rich>=13.0",
 ]
 
 [project.optional-dependencies]
+# AI Providers (install the one you need)
+anthropic = ["anthropic>=0.40.0"]
+openai = ["openai>=1.0.0"]
+gemini = ["google-generativeai>=0.3.0"]
+# Ollama uses requests (included in base dependencies)
+
+# All AI providers
+all-ai = [
+    "anthropic>=0.40.0",
+    "openai>=1.0.0",
+    "google-generativeai>=0.3.0",
+]
+
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.4.0",
     "mypy>=1.10.0",
+    "anthropic>=0.40.0",
+    "openai>=1.0.0",
+    "google-generativeai>=0.3.0",
 ]
 
 [project.scripts]

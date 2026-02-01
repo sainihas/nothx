@@ -1,4 +1,4 @@
-"""Layer 3: AI-powered classification using Anthropic Claude."""
+"""Layer 3: AI-powered classification using configurable providers."""
 
 import json
 import logging
@@ -8,6 +8,8 @@ from typing import Any
 from .. import db
 from ..config import Config
 from ..models import Action, Classification, EmailType, SenderStats, UserPreference
+from .providers import get_provider, SUPPORTED_PROVIDERS
+from .providers.base import BaseAIProvider
 
 logger = logging.getLogger("nothx.classifier.ai")
 
@@ -62,29 +64,35 @@ Here are the senders to classify:
 
 
 class AIClassifier:
-    """AI-powered email classification using Anthropic Claude."""
+    """AI-powered email classification using configurable providers."""
 
     def __init__(self, config: Config):
         self.config = config
-        self._client: Any = None
+        self._provider: BaseAIProvider | None = None
+        self._provider_initialized = False
 
-    def _get_client(self):
-        """Get or create Anthropic client."""
-        if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic(api_key=self.config.ai.api_key)
-        return self._client
+    def _get_provider(self) -> BaseAIProvider | None:
+        """Get or create the AI provider."""
+        if not self._provider_initialized:
+            self._provider = get_provider(
+                provider_name=self.config.ai.provider,
+                api_key=self.config.ai.api_key,
+                model=self.config.ai.model,
+                api_base=self.config.ai.api_base,
+            )
+            self._provider_initialized = True
+        return self._provider
 
     def is_available(self) -> bool:
         """Check if AI classification is available."""
         if not self.config.ai.enabled:
             return False
-        if self.config.ai.provider != "anthropic":
+
+        provider = self._get_provider()
+        if provider is None:
             return False
-        if not self.config.ai.api_key:
-            return False
-        return True
+
+        return provider.is_available()
 
     def classify_batch(self, senders: list[SenderStats]) -> dict[str, Classification]:
         """
@@ -95,6 +103,10 @@ class AIClassifier:
             return {}
 
         if not senders:
+            return {}
+
+        provider = self._get_provider()
+        if provider is None:
             return {}
 
         # Build sender descriptions
@@ -114,21 +126,16 @@ class AIClassifier:
 
         # Build prompt
         prompt = CLASSIFICATION_PROMPT.format(
-            correction_context=correction_context, senders=json.dumps(sender_descriptions, indent=2)
+            correction_context=correction_context,
+            senders=json.dumps(sender_descriptions, indent=2),
         )
 
-        # Call Claude API
+        # Call provider
         try:
-            client = self._get_client()
-            response = client.messages.create(
-                model=self.config.ai.model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            response = provider.complete(prompt, max_tokens=4096)
 
             # Parse response
-            response_text = response.content[0].text
-            classifications = self._parse_response(response_text)
+            classifications = self._parse_response(response.text)
 
             # Update database with AI classifications
             for domain, classification in classifications.items():
@@ -277,23 +284,31 @@ class AIPatternAnalyzer:
 
     def __init__(self, config: Config):
         self.config = config
-        self._client: Any = None
+        self._provider: BaseAIProvider | None = None
+        self._provider_initialized = False
 
-    def _get_client(self):
-        """Get or create Anthropic client."""
-        if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic(api_key=self.config.ai.api_key)
-        return self._client
+    def _get_provider(self) -> BaseAIProvider | None:
+        """Get or create the AI provider."""
+        if not self._provider_initialized:
+            self._provider = get_provider(
+                provider_name=self.config.ai.provider,
+                api_key=self.config.ai.api_key,
+                model=self.config.ai.model,
+                api_base=self.config.ai.api_base,
+            )
+            self._provider_initialized = True
+        return self._provider
 
     def is_available(self) -> bool:
         """Check if AI analysis is available."""
         if not self.config.ai.enabled:
             return False
-        if not self.config.ai.api_key:
+
+        provider = self._get_provider()
+        if provider is None:
             return False
-        return True
+
+        return provider.is_available()
 
     def analyze_patterns(self, min_actions: int = 10) -> dict | None:
         """Analyze user actions to find patterns.
@@ -307,12 +322,18 @@ class AIPatternAnalyzer:
         if not self.is_available():
             return None
 
+        provider = self._get_provider()
+        if provider is None:
+            return None
+
         # Get recent user actions
         actions = db.get_user_actions(days=60, limit=100)
 
         if len(actions) < min_actions:
             logger.info(
-                "Not enough actions for AI pattern analysis (%d < %d)", len(actions), min_actions
+                "Not enough actions for AI pattern analysis (%d < %d)",
+                len(actions),
+                min_actions,
             )
             return None
 
@@ -329,19 +350,15 @@ class AIPatternAnalyzer:
             action_descriptions.append(desc)
 
         # Build prompt
-        prompt = PATTERN_ANALYSIS_PROMPT.format(actions=json.dumps(action_descriptions, indent=2))
+        prompt = PATTERN_ANALYSIS_PROMPT.format(
+            actions=json.dumps(action_descriptions, indent=2)
+        )
 
         try:
-            client = self._get_client()
-            response = client.messages.create(
-                model=self.config.ai.model,
-                max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            response = provider.complete(prompt, max_tokens=2048)
 
             # Parse response
-            response_text = response.content[0].text
-            return self._parse_analysis(response_text)
+            return self._parse_analysis(response.text)
 
         except Exception as e:
             logger.error("AI pattern analysis error: %s", e)
@@ -475,17 +492,18 @@ class AIPatternAnalyzer:
 
 
 def test_ai_connection(config: Config) -> tuple[bool, str]:
-    """Test if AI connection works."""
-    if not config.ai.api_key:
-        return False, "No API key configured"
+    """Test if AI connection works with the configured provider."""
+    if config.ai.provider == "none":
+        return True, "AI disabled (heuristics only)"
 
-    try:
-        import anthropic
+    provider = get_provider(
+        provider_name=config.ai.provider,
+        api_key=config.ai.api_key,
+        model=config.ai.model,
+        api_base=config.ai.api_base,
+    )
 
-        client = anthropic.Anthropic(api_key=config.ai.api_key)
-        client.messages.create(
-            model=config.ai.model, max_tokens=10, messages=[{"role": "user", "content": "Say 'ok'"}]
-        )
-        return True, "Connection successful"
-    except Exception as e:
-        return False, str(e)
+    if provider is None:
+        return False, "No provider configured"
+
+    return provider.test_connection()

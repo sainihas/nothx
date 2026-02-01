@@ -422,25 +422,22 @@ def run(auto: bool, dry_run: bool, verbose: bool, account: tuple[str, ...]):
     # Validate accounts if specified
     accounts_to_scan: list[str] | None = None
     if account:
+        # Build email-to-name map for efficient lookup
+        email_to_name = {acc_config.email: name for name, acc_config in config.accounts.items()}
+
         accounts_to_scan = []
         for acc in account:
             # Support both account name and email address
             if acc in config.accounts:
                 accounts_to_scan.append(acc)
+            elif acc in email_to_name:
+                accounts_to_scan.append(email_to_name[acc])
             else:
-                # Try to find by email
-                found = False
-                for name, acc_config in config.accounts.items():
-                    if acc_config.email == acc:
-                        accounts_to_scan.append(name)
-                        found = True
-                        break
-                if not found:
-                    console.print(f"[error]Account '{acc}' not found.[/error]")
-                    console.print(
-                        f"Available: {', '.join(f'{n} ({a.email})' for n, a in config.accounts.items())}"
-                    )
-                    return
+                console.print(f"[error]Account '{acc}' not found.[/error]")
+                console.print(
+                    f"Available: {', '.join(f'{n} ({a.email})' for n, a in config.accounts.items())}"
+                )
+                return
 
     db.init_db()
 
@@ -618,7 +615,6 @@ def _run_scan(
             f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
         ):
             console.print("\n[header]Phase 3/3: Unsubscribing[/header]")
-            account = config.get_account()
 
             with Progress(
                 SpinnerColumn(),
@@ -633,6 +629,8 @@ def _run_scan(
                     # Get a sample email with unsubscribe header from cache
                     email = scan_result.get_email_for_domain(sender.domain)
                     if email:
+                        # Use the account the email came from (for correct mailto credentials)
+                        account = config.get_account(email.account_name)
                         result = unsubscribe(email, config, account)
                         if result.success:
                             stats.auto_unsubbed += 1

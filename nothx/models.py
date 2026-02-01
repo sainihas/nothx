@@ -55,6 +55,7 @@ class EmailHeader:
     list_unsubscribe_post: str | None = None
     x_mailer: str | None = None
     is_seen: bool = False
+    account_name: str | None = None  # Track which account this email came from
 
     @property
     def domain(self) -> str:

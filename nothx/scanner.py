@@ -51,9 +51,11 @@ def scan_inbox(config: Config, account_names: list[str] | None = None) -> ScanRe
     # Aggregate emails by domain across all accounts
     domain_emails: dict[str, list[EmailHeader]] = defaultdict(list)
 
-    for _name, account in accounts_to_scan:
+    for account_name, account in accounts_to_scan:
         with IMAPConnection(account) as conn:
             for header in conn.fetch_marketing_emails(days=config.scan_days):
+                # Track which account this email came from (for mailto unsubscribes)
+                header.account_name = account_name
                 domain_emails[header.domain].append(header)
 
     # Convert to SenderStats

@@ -14,7 +14,9 @@ from .models import EmailHeader
 # IMAP server settings
 IMAP_SERVERS = {
     "gmail": "imap.gmail.com",
-    "outlook": "imap-mail.outlook.com",
+    "outlook": "outlook.office365.com",
+    "yahoo": "imap.mail.yahoo.com",
+    "icloud": "imap.mail.me.com",
 }
 
 

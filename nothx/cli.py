@@ -205,7 +205,9 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
         "Select your email provider:",
         choices=[
             questionary.Choice("Gmail", value="gmail"),
-            questionary.Choice("Outlook", value="outlook"),
+            questionary.Choice("Outlook / Live / Hotmail", value="outlook"),
+            questionary.Choice("Yahoo Mail", value="yahoo"),
+            questionary.Choice("iCloud Mail", value="icloud"),
         ],
     ).ask()
 
@@ -232,6 +234,22 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
         )
         console.print("  2. You may need to enable 2FA first at account.microsoft.com/security")
         console.print("  3. Generate a new app password and copy it\n")
+    elif provider == "yahoo":
+        console.print("\n[warning]For Yahoo Mail, you need an App Password:[/warning]")
+        console.print(
+            "  1. Go to [link=https://login.yahoo.com/account/security]login.yahoo.com/account/security[/link]"
+        )
+        console.print("  2. Enable 2-Step Verification if not already enabled")
+        console.print("  3. Click 'Generate app password' and select 'Other App'")
+        console.print("  4. Copy the generated password\n")
+    elif provider == "icloud":
+        console.print("\n[warning]For iCloud Mail, you need an App-Specific Password:[/warning]")
+        console.print(
+            "  1. Go to [link=https://appleid.apple.com/account/manage]appleid.apple.com[/link]"
+        )
+        console.print("  2. Sign in and go to 'Sign-In and Security' > 'App-Specific Passwords'")
+        console.print("  3. Click '+' to generate a new password for 'nothx'")
+        console.print("  4. Copy the generated password\n")
     else:
         console.print("\n[warning]Enter your email password or app password.[/warning]\n")
 
@@ -1494,6 +1512,16 @@ def test_connection():
                 console.print(
                     "  • Verify your app password at [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]"
                 )
+            elif account.provider == "yahoo":
+                console.print(
+                    "  • Verify your app password at [link=https://login.yahoo.com/account/security]login.yahoo.com/account/security[/link]"
+                )
+                console.print("  • Make sure 2-Step Verification is enabled")
+            elif account.provider == "icloud":
+                console.print(
+                    "  • Verify your app password at [link=https://appleid.apple.com/account/manage]appleid.apple.com[/link]"
+                )
+                console.print("  • Go to 'Sign-In and Security' > 'App-Specific Passwords'")
             console.print("  • Make sure IMAP is enabled in your email settings")
 
 

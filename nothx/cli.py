@@ -479,7 +479,7 @@ def _run_scan(
     ) as progress:
         task = progress.add_task("Connecting to mailbox...", total=None)
 
-        def on_account_start(email: str, name: str, current: int, total: int) -> None:
+        def on_account_start(email: str, _name: str, current: int, total: int) -> None:
             if total > 1:
                 progress.update(task, description=f"Scanning {email}... ({current}/{total})")
             else:

@@ -282,9 +282,7 @@ class AIClassifier:
 
         return "\n".join(context_lines)
 
-    def _parse_response(
-        self, response_text: str
-    ) -> tuple[dict[str, Classification], list[str]]:
+    def _parse_response(self, response_text: str) -> tuple[dict[str, Classification], list[str]]:
         """Parse AI response into Classification objects.
 
         Returns:
@@ -345,15 +343,11 @@ class AIClassifier:
                 try:
                     confidence = float(raw_confidence)
                 except (TypeError, ValueError):
-                    errors.append(
-                        f"Item {idx} ({domain}): invalid confidence '{raw_confidence}'"
-                    )
+                    errors.append(f"Item {idx} ({domain}): invalid confidence '{raw_confidence}'")
                     confidence = 0.5
 
                 # Validate and clamp confidence to [0.0, 1.0]
-                confidence = validate_confidence(
-                    confidence, context=f"AI response for {domain}"
-                )
+                confidence = validate_confidence(confidence, context=f"AI response for {domain}")
 
                 results[domain] = Classification(
                     email_type=email_type,

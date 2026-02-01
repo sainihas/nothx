@@ -44,7 +44,11 @@ class ClassificationEngine:
                 "Classified %s via user rule: %s",
                 sender.domain,
                 result.action.value,
-                extra={"domain": sender.domain, "source": "user_rule", "action": result.action.value},
+                extra={
+                    "domain": sender.domain,
+                    "source": "user_rule",
+                    "action": result.action.value,
+                },
             )
             return result
 
@@ -104,7 +108,11 @@ class ClassificationEngine:
                 "Classified %s via heuristics: %s",
                 sender.domain,
                 result.action.value,
-                extra={"domain": sender.domain, "source": "heuristics", "action": result.action.value},
+                extra={
+                    "domain": sender.domain,
+                    "source": "heuristics",
+                    "action": result.action.value,
+                },
             )
             return result
 

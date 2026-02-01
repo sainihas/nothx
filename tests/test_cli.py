@@ -290,9 +290,7 @@ class TestStatusCommand:
         assert "Status" in result.output
 
     @patch("nothx.cli.get_learner")
-    def test_status_learning_flag(
-        self, mock_learner, runner, configured_env, temp_config_dir
-    ):
+    def test_status_learning_flag(self, mock_learner, runner, configured_env, temp_config_dir):
         """Test status with --learning flag."""
         mock_learner.return_value.get_learning_summary.return_value = {
             "total_actions": 10,
@@ -326,9 +324,7 @@ class TestReviewCommand:
         assert "No senders" in result.output
 
     @patch("nothx.cli.questionary.select")
-    def test_review_with_senders(
-        self, mock_select, runner, configured_env, temp_config_dir
-    ):
+    def test_review_with_senders(self, mock_select, runner, configured_env, temp_config_dir):
         """Test review with pending senders."""
         # Add a sender to review
         db.upsert_sender("marketing.com", 5, 1, ["Buy now!"], True)
@@ -773,9 +769,7 @@ class TestUpdateCommand:
         from nothx import __version__
 
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps(
-            {"info": {"version": __version__}}
-        ).encode()
+        mock_response.read.return_value = json.dumps({"info": {"version": __version__}}).encode()
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
@@ -789,9 +783,7 @@ class TestUpdateCommand:
     def test_update_check_new_version(self, mock_urlopen, runner):
         """Test update check when new version available."""
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps(
-            {"info": {"version": "99.99.99"}}
-        ).encode()
+        mock_response.read.return_value = json.dumps({"info": {"version": "99.99.99"}}).encode()
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
@@ -852,9 +844,7 @@ class TestEdgeCases:
     def test_run_verbose_flag(self, runner, configured_env, temp_config_dir):
         """Test verbose output with -v flag."""
         with patch("nothx.cli.scan_inbox") as mock_scan:
-            mock_scan.return_value = MagicMock(
-                sender_stats={}, get_email_for_domain=lambda x: None
-            )
+            mock_scan.return_value = MagicMock(sender_stats={}, get_email_for_domain=lambda x: None)
 
             result = runner.invoke(run, ["--dry-run", "-v"])
 
@@ -902,13 +892,9 @@ class TestEdgeCases:
         config.save()
 
         with patch("nothx.cli.scan_inbox") as mock_scan:
-            mock_scan.return_value = MagicMock(
-                sender_stats={}, get_email_for_domain=lambda x: None
-            )
+            mock_scan.return_value = MagicMock(sender_stats={}, get_email_for_domain=lambda x: None)
 
-            result = runner.invoke(
-                run, ["--dry-run", "-a", "work", "-a", "personal"]
-            )
+            result = runner.invoke(run, ["--dry-run", "-a", "work", "-a", "personal"])
 
             assert result.exit_code == 0
 

@@ -94,6 +94,8 @@ def _show_welcome_screen() -> None:
     ).ask()
 
     if selected is None:
+        # User pressed ESC - exit cleanly
+        console.print()
         return
 
     # Execute the selected command

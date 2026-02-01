@@ -21,10 +21,27 @@ class PreferenceLearner:
     KEYWORD_CONFIDENCE_THRESHOLD = 0.7  # 70% consistency to create keyword preference
 
     # Domain parsing constants (class-level for performance)
-    _TLDS = frozenset({
-        "com", "org", "net", "io", "co", "ai", "app", "dev",
-        "edu", "gov", "mil", "us", "uk", "ca", "au", "de", "fr",
-    })
+    _TLDS = frozenset(
+        {
+            "com",
+            "org",
+            "net",
+            "io",
+            "co",
+            "ai",
+            "app",
+            "dev",
+            "edu",
+            "gov",
+            "mil",
+            "us",
+            "uk",
+            "ca",
+            "au",
+            "de",
+            "fr",
+        }
+    )
     _SKIP_PARTS = frozenset({"www", "mail", "email", "smtp", "mx"})
 
     def __init__(self) -> None:

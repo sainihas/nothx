@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nothx"
+version = "0.1.0"
+description = "AI-powered email unsubscribe tool. Set it up once, AI handles your inbox forever."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "nothx contributors" }
+]
+keywords = ["email", "unsubscribe", "ai", "privacy", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Email",
+]
+dependencies = [
+    "click>=8.0",
+    "humanize>=4.0.0",
+    "questionary>=2.0.0",
+    "requests>=2.30.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+# AI Providers (install the one you need)
+anthropic = ["anthropic>=0.40.0"]
+openai = ["openai>=1.0.0"]
+gemini = ["google-generativeai>=0.3.0"]
+# Ollama uses requests (included in base dependencies)
+
+# All AI providers
+all-ai = [
+    "anthropic>=0.40.0",
+    "openai>=1.0.0",
+    "google-generativeai>=0.3.0",
+]
+
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "types-requests>=2.30.0",
+    "anthropic>=0.40.0",
+    "openai>=1.0.0",
+    "google-generativeai>=0.3.0",
+]
+
+[project.scripts]
+nothx = "nothx.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/nothx/nothx"
+Repository = "https://github.com/nothx/nothx"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nothx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "UP",     # pyupgrade
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_ignores = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true

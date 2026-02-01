@@ -409,10 +409,11 @@ class TestPreferenceAdjustments:
     def test_keyword_boost_positive(self, temp_db, learner):
         """Test positive keyword boost (toward unsub)."""
         # Learn that 'promo' domains should be unsubbed
+        # Use domains where 'promo' is a consistent keyword across all samples
         for i in range(5):
             learner.update_from_action(
                 UserAction(
-                    domain=f"promo{i}.marketing.com",
+                    domain=f"promo.store{i}.com",
                     action=Action.UNSUB,
                     timestamp=datetime.now(),
                 )

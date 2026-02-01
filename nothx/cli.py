@@ -818,27 +818,15 @@ def status(learning: bool):
     total_unsub_attempts = successful + failed
     success_rate = (successful / total_unsub_attempts * 100) if total_unsub_attempts > 0 else 0
 
+    panel_data = [
+        (f"[count]{stats['total_senders']}[/count]", "Senders"),
+        (f"[count]{stats['unsubscribed']}[/count]", "Unsubbed"),
+        (f"[count]{stats['kept']}[/count]", "Kept"),
+        (f"[count]{success_rate:.0f}%[/count]", "Success"),
+    ]
     stat_panels = [
-        Panel(
-            f"[count]{stats['total_senders']}[/count]\n[muted]Senders[/muted]",
-            expand=True,
-            border_style="dim",
-        ),
-        Panel(
-            f"[count]{stats['unsubscribed']}[/count]\n[muted]Unsubbed[/muted]",
-            expand=True,
-            border_style="dim",
-        ),
-        Panel(
-            f"[count]{stats['kept']}[/count]\n[muted]Kept[/muted]",
-            expand=True,
-            border_style="dim",
-        ),
-        Panel(
-            f"[count]{success_rate:.0f}%[/count]\n[muted]Success[/muted]",
-            expand=True,
-            border_style="dim",
-        ),
+        Panel(f"{value}\n[muted]{label}[/muted]", expand=True, border_style="dim")
+        for value, label in panel_data
     ]
     console.print(Columns(stat_panels, equal=True, expand=True))
 

@@ -1,7 +1,43 @@
 """Base class for AI providers."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class ProviderErrorType(Enum):
+    """Types of provider errors for categorization."""
+
+    CONNECTION_ERROR = "connection_error"
+    AUTHENTICATION_ERROR = "authentication_error"
+    RATE_LIMIT_ERROR = "rate_limit_error"
+    TIMEOUT_ERROR = "timeout_error"
+    INVALID_REQUEST = "invalid_request"
+    MODEL_ERROR = "model_error"
+    PARSE_ERROR = "parse_error"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class ProviderError(Exception):
+    """Structured error from AI providers."""
+
+    error_type: ProviderErrorType
+    message: str
+    provider: str
+    details: dict[str, Any] = field(default_factory=dict)
+    retryable: bool = False
+    cause: Exception | None = None
+
+    def __str__(self) -> str:
+        parts = [f"[{self.provider}:{self.error_type.value}] {self.message}"]
+        if self.details:
+            details_str = ", ".join(f"{k}={v}" for k, v in self.details.items())
+            parts.append(f" ({details_str})")
+        if self.cause:
+            parts.append(f" caused by: {type(self.cause).__name__}: {self.cause}")
+        return "".join(parts)
 
 
 @dataclass

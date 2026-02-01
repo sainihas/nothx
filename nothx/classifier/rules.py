@@ -1,8 +1,12 @@
 """Layer 1: User-defined rules for classification."""
 
+import logging
+
 from .. import db
 from ..models import Action, Classification, EmailType, SenderStats
 from .utils import matches_pattern
+
+logger = logging.getLogger("nothx.classifier.rules")
 
 
 class RulesMatcher:
@@ -36,11 +40,32 @@ class RulesMatcher:
             try:
                 action = Action(action_str)
             except ValueError:
-                # Skip rules with invalid action values
+                # Log invalid rules instead of silently skipping
+                logger.warning(
+                    "Skipping rule with invalid action: pattern='%s', action='%s'",
+                    pattern,
+                    action_str,
+                    extra={
+                        "pattern": pattern,
+                        "invalid_action": action_str,
+                        "valid_actions": [a.value for a in Action],
+                    },
+                )
                 continue
 
             # Check if domain matches pattern
             if matches_pattern(sender.domain, pattern):
+                logger.debug(
+                    "Rule matched: %s -> %s (pattern: %s)",
+                    sender.domain,
+                    action.value,
+                    pattern,
+                    extra={
+                        "domain": sender.domain,
+                        "action": action.value,
+                        "pattern": pattern,
+                    },
+                )
                 return Classification(
                     email_type=EmailType.UNKNOWN,
                     action=action,
@@ -55,6 +80,12 @@ class RulesMatcher:
             override_str = sender_record["user_override"]
             try:
                 override_action = Action(override_str)
+                logger.debug(
+                    "User override applied: %s -> %s",
+                    sender.domain,
+                    override_action.value,
+                    extra={"domain": sender.domain, "action": override_action.value},
+                )
                 return Classification(
                     email_type=EmailType.UNKNOWN,
                     action=override_action,
@@ -63,8 +94,17 @@ class RulesMatcher:
                     source="user_rule",
                 )
             except ValueError:
-                # Invalid override value, skip
-                pass
+                # Log invalid override instead of silently skipping
+                logger.warning(
+                    "Sender %s has invalid user_override value: '%s'",
+                    sender.domain,
+                    override_str,
+                    extra={
+                        "domain": sender.domain,
+                        "invalid_override": override_str,
+                        "valid_actions": [a.value for a in Action],
+                    },
+                )
 
         return None
 

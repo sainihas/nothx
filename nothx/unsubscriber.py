@@ -1,5 +1,6 @@
 """Unsubscribe execution for nothx."""
 
+import logging
 import smtplib
 import urllib.parse
 import urllib.request
@@ -7,13 +8,21 @@ from email.mime.text import MIMEText
 
 from . import db
 from .config import AccountConfig, Config
+from .errors import RateLimiter, safe_truncate
 from .models import EmailHeader, SenderStatus, UnsubMethod, UnsubResult
+
+logger = logging.getLogger("nothx.unsubscriber")
 
 # User agent for HTTP requests - identifies as nothx email automation tool
 USER_AGENT = "nothx/0.1.0 (Email Unsubscribe Automation; +https://github.com/nothx/nothx)"
 
 # Timeout for HTTP requests
 REQUEST_TIMEOUT = 30
+
+# Rate limiter for HTTP unsubscribe requests
+# Default: 2 requests per second, burst of 5
+# This prevents overwhelming mail servers and getting blocked
+_http_rate_limiter = RateLimiter(requests_per_second=2.0, burst_size=5)
 
 
 def unsubscribe(
@@ -51,6 +60,15 @@ def unsubscribe(
 
 def _execute_one_click(url: str) -> UnsubResult:
     """Execute RFC 8058 one-click unsubscribe (POST request)."""
+    # Apply rate limiting to prevent overwhelming servers
+    if not _http_rate_limiter.acquire(timeout=30.0):
+        logger.warning("Rate limit timeout for one-click unsubscribe to %s", url)
+        return UnsubResult(
+            success=False,
+            method=UnsubMethod.ONE_CLICK,
+            error="Rate limit timeout",
+        )
+
     try:
         data = urllib.parse.urlencode({"List-Unsubscribe": "One-Click"}).encode()
         request = urllib.request.Request(
@@ -74,7 +92,7 @@ def _execute_one_click(url: str) -> UnsubResult:
                 success=success,
                 method=UnsubMethod.ONE_CLICK,
                 http_status=status,
-                response_snippet=body[:200] if body else None,
+                response_snippet=safe_truncate(body, 200) if body else None,
             )
 
     except urllib.error.HTTPError as e:
@@ -94,6 +112,15 @@ def _execute_one_click(url: str) -> UnsubResult:
 
 def _execute_get(url: str) -> UnsubResult:
     """Execute GET request to unsubscribe URL."""
+    # Apply rate limiting to prevent overwhelming servers
+    if not _http_rate_limiter.acquire(timeout=30.0):
+        logger.warning("Rate limit timeout for GET unsubscribe to %s", url)
+        return UnsubResult(
+            success=False,
+            method=UnsubMethod.GET,
+            error="Rate limit timeout",
+        )
+
     try:
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
 
@@ -108,7 +135,7 @@ def _execute_get(url: str) -> UnsubResult:
                 success=success,
                 method=UnsubMethod.GET,
                 http_status=status,
-                response_snippet=body[:200] if body else None,
+                response_snippet=safe_truncate(body, 200) if body else None,
             )
 
     except urllib.error.HTTPError as e:

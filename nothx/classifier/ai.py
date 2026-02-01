@@ -2,15 +2,34 @@
 
 import json
 import logging
+import re
 from datetime import datetime
 
 from .. import db
 from ..config import Config
+from ..errors import (
+    RetryConfig,
+    retry_with_backoff,
+    validate_confidence,
+)
 from ..models import Action, Classification, EmailType, SenderStats, UserPreference
 from .providers import get_provider
-from .providers.base import BaseAIProvider
+from .providers.base import BaseAIProvider, ProviderError
 
 logger = logging.getLogger("nothx.classifier.ai")
+
+# Retry configuration for AI API calls
+AI_RETRY_CONFIG = RetryConfig(
+    max_attempts=3,
+    base_delay=1.0,
+    max_delay=30.0,
+    exponential_base=2.0,
+    retryable_exceptions=(
+        ConnectionError,
+        TimeoutError,
+        OSError,
+    ),
+)
 
 
 CLASSIFICATION_PROMPT = """You are an email classification assistant. Your job is to analyze email senders and classify them to help users manage their inbox.
@@ -97,8 +116,13 @@ class AIClassifier:
         """
         Classify a batch of senders using AI.
         Returns a dictionary mapping domain -> Classification.
+
+        Raises:
+            AIError: If AI classification fails after retries (only for critical errors).
+                     Non-critical errors return empty dict to allow fallback to heuristics.
         """
         if not self.is_available():
+            logger.debug("AI classification unavailable, skipping batch")
             return {}
 
         if not senders:
@@ -107,14 +131,16 @@ class AIClassifier:
         provider = self._get_provider()
         assert provider is not None  # Guaranteed by is_available() check above
 
-        # Build sender descriptions
+        # Build sender descriptions with sanitized data
         sender_descriptions = []
         for sender in senders:
             desc = {
-                "domain": sender.domain,
+                "domain": self._sanitize_for_prompt(sender.domain),
                 "total_emails": sender.total_emails,
                 "open_rate": f"{sender.open_rate:.1f}%",
-                "sample_subjects": sender.sample_subjects[:3],
+                "sample_subjects": [
+                    self._sanitize_for_prompt(s) for s in sender.sample_subjects[:3]
+                ],
                 "has_unsubscribe": sender.has_unsubscribe,
             }
             sender_descriptions.append(desc)
@@ -128,12 +154,25 @@ class AIClassifier:
             senders=json.dumps(sender_descriptions, indent=2),
         )
 
-        # Call provider
+        # Call provider with retry logic
         try:
-            response = provider.complete(prompt, max_tokens=4096)
+            response = self._call_provider_with_retry(provider, prompt)
 
             # Parse response
-            classifications = self._parse_response(response.text)
+            classifications, parse_errors = self._parse_response(response.text)
+
+            # Log any parse errors
+            if parse_errors:
+                logger.warning(
+                    "AI response had %d parse errors: %s",
+                    len(parse_errors),
+                    "; ".join(parse_errors),
+                    extra={
+                        "parse_errors": parse_errors,
+                        "sender_count": len(senders),
+                        "classified_count": len(classifications),
+                    },
+                )
 
             # Update database with AI classifications
             for domain, classification in classifications.items():
@@ -143,12 +182,85 @@ class AIClassifier:
                     confidence=classification.confidence,
                 )
 
+            logger.info(
+                "AI classified %d/%d senders successfully",
+                len(classifications),
+                len(senders),
+                extra={
+                    "classified": len(classifications),
+                    "requested": len(senders),
+                    "provider": provider.name,
+                },
+            )
+
             return classifications
 
-        except Exception as e:
-            # Log error but don't crash
-            logger.error("AI classification error: %s", e)
+        except ProviderError as e:
+            logger.error(
+                "AI classification failed: %s",
+                e,
+                extra={
+                    "error_type": e.error_type.value,
+                    "provider": e.provider,
+                    "retryable": e.retryable,
+                    "sender_count": len(senders),
+                    "sender_domains": [s.domain for s in senders[:5]],  # Log first 5
+                },
+            )
+            # Return empty to allow fallback to heuristics
             return {}
+
+        except (ConnectionError, TimeoutError, OSError) as e:
+            logger.error(
+                "AI classification network error after retries: %s",
+                e,
+                extra={
+                    "error_type": type(e).__name__,
+                    "sender_count": len(senders),
+                },
+            )
+            return {}
+
+        except json.JSONDecodeError as e:
+            logger.error(
+                "AI response was not valid JSON: %s",
+                e,
+                extra={
+                    "error_type": "json_decode_error",
+                    "sender_count": len(senders),
+                },
+            )
+            return {}
+
+    def _call_provider_with_retry(
+        self, provider: BaseAIProvider, prompt: str, max_tokens: int = 4096
+    ):
+        """Call AI provider with retry logic for transient errors."""
+
+        @retry_with_backoff(
+            config=AI_RETRY_CONFIG,
+            on_retry=lambda e, attempt, delay: logger.info(
+                "Retrying AI call (attempt %d) after %.1fs due to: %s",
+                attempt,
+                delay,
+                e,
+            ),
+        )
+        def _call():
+            return provider.complete(prompt, max_tokens=max_tokens)
+
+        return _call()
+
+    def _sanitize_for_prompt(self, text: str) -> str:
+        """Sanitize text to prevent prompt injection attacks."""
+        if not text:
+            return ""
+        # Remove potential JSON-breaking characters and limit length
+        sanitized = text.replace('"', "'").replace("\\", "")
+        # Remove control characters
+        sanitized = "".join(c for c in sanitized if ord(c) >= 32 or c in "\n\t")
+        # Limit length
+        return sanitized[:500]
 
     def classify_single(self, sender: SenderStats) -> Classification | None:
         """Classify a single sender."""
@@ -170,51 +282,91 @@ class AIClassifier:
 
         return "\n".join(context_lines)
 
-    def _parse_response(self, response_text: str) -> dict[str, Classification]:
-        """Parse AI response into Classification objects."""
+    def _parse_response(
+        self, response_text: str
+    ) -> tuple[dict[str, Classification], list[str]]:
+        """Parse AI response into Classification objects.
+
+        Returns:
+            Tuple of (classifications dict, list of parse error messages)
+        """
         results: dict[str, Classification] = {}
+        errors: list[str] = []
 
         try:
-            # Extract JSON from response
-            json_start = response_text.find("[")
-            json_end = response_text.rfind("]") + 1
-            if json_start == -1 or json_end == 0:
-                return results
+            # Try to extract JSON from markdown code block first (more robust)
+            match = re.search(r"```json\s*(\[.*?\])\s*```", response_text, re.DOTALL)
+            if match:
+                json_str = match.group(1)
+            else:
+                # Fallback: find raw JSON array
+                json_start = response_text.find("[")
+                json_end = response_text.rfind("]") + 1
+                if json_start == -1 or json_end == 0:
+                    errors.append("No JSON array found in response")
+                    return results, errors
 
-            json_str = response_text[json_start:json_end]
+                json_str = response_text[json_start:json_end]
+
             data = json.loads(json_str)
 
-            for item in data:
-                domain = item.get("domain", "").lower()
-                if not domain:
+            if not isinstance(data, list):
+                errors.append(f"Expected JSON array, got {type(data).__name__}")
+                return results, errors
+
+            for idx, item in enumerate(data):
+                if not isinstance(item, dict):
+                    errors.append(f"Item {idx}: expected object, got {type(item).__name__}")
                     continue
 
-                # Parse email type
+                domain = item.get("domain", "").lower().strip()
+                if not domain:
+                    errors.append(f"Item {idx}: missing or empty domain")
+                    continue
+
+                # Parse email type with fallback
                 type_str = item.get("type", "unknown").lower()
                 try:
                     email_type = EmailType(type_str)
                 except ValueError:
+                    errors.append(f"Item {idx} ({domain}): invalid email type '{type_str}'")
                     email_type = EmailType.UNKNOWN
 
-                # Parse action
+                # Parse action with fallback
                 action_str = item.get("action", "review").lower()
                 try:
                     action = Action(action_str)
                 except ValueError:
+                    errors.append(f"Item {idx} ({domain}): invalid action '{action_str}'")
                     action = Action.REVIEW
+
+                # Parse and validate confidence
+                raw_confidence = item.get("confidence", 0.5)
+                try:
+                    confidence = float(raw_confidence)
+                except (TypeError, ValueError):
+                    errors.append(
+                        f"Item {idx} ({domain}): invalid confidence '{raw_confidence}'"
+                    )
+                    confidence = 0.5
+
+                # Validate and clamp confidence to [0.0, 1.0]
+                confidence = validate_confidence(
+                    confidence, context=f"AI response for {domain}"
+                )
 
                 results[domain] = Classification(
                     email_type=email_type,
                     action=action,
-                    confidence=float(item.get("confidence", 0.5)),
-                    reasoning=item.get("reasoning", ""),
+                    confidence=confidence,
+                    reasoning=str(item.get("reasoning", ""))[:500],  # Limit length
                     source="ai",
                 )
 
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            errors.append(f"JSON parse error: {e}")
 
-        return results
+        return results, errors
 
 
 PATTERN_ANALYSIS_PROMPT = """You are analyzing a user's email management decisions to identify their preferences.
@@ -318,6 +470,7 @@ class AIPatternAnalyzer:
             Dict with insights and behavior_shift, or None if not enough data/AI unavailable
         """
         if not self.is_available():
+            logger.debug("AI not available for pattern analysis")
             return None
 
         provider = self._get_provider()
@@ -331,14 +484,15 @@ class AIPatternAnalyzer:
                 "Not enough actions for AI pattern analysis (%d < %d)",
                 len(actions),
                 min_actions,
+                extra={"action_count": len(actions), "min_required": min_actions},
             )
             return None
 
-        # Build action descriptions
+        # Build action descriptions with sanitization
         action_descriptions = []
         for action in actions:
             desc = {
-                "domain": action.domain,
+                "domain": action.domain[:100],  # Limit domain length
                 "action": action.action.value,
                 "open_rate": f"{action.open_rate:.1f}%" if action.open_rate else "unknown",
                 "email_count": action.email_count or 0,
@@ -353,17 +507,49 @@ class AIPatternAnalyzer:
             response = provider.complete(prompt, max_tokens=2048)
 
             # Parse response
-            return self._parse_analysis(response.text)
+            result = self._parse_analysis(response.text)
+            if result:
+                logger.info(
+                    "AI pattern analysis found %d insights",
+                    len(result.get("insights", [])),
+                    extra={
+                        "insight_count": len(result.get("insights", [])),
+                        "action_count": len(actions),
+                    },
+                )
+            return result
 
-        except Exception as e:
-            logger.error("AI pattern analysis error: %s", e)
+        except ProviderError as e:
+            logger.error(
+                "AI pattern analysis provider error: %s",
+                e,
+                extra={
+                    "error_type": e.error_type.value,
+                    "provider": e.provider,
+                    "action_count": len(actions),
+                },
+            )
+            return None
+
+        except (ConnectionError, TimeoutError, OSError) as e:
+            logger.error(
+                "AI pattern analysis network error: %s",
+                e,
+                extra={"error_type": type(e).__name__, "action_count": len(actions)},
+            )
+            return None
+
+        except json.JSONDecodeError as e:
+            logger.error(
+                "AI pattern analysis JSON error: %s",
+                e,
+                extra={"error_type": "json_decode_error"},
+            )
             return None
 
     def _parse_analysis(self, response_text: str) -> dict | None:
-        """Parse AI analysis response."""
+        """Parse AI analysis response with validation."""
         try:
-            import re
-
             # Try to extract JSON from markdown code block first (more robust)
             match = re.search(r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL)
             if match:
@@ -373,13 +559,47 @@ class AIPatternAnalyzer:
                 json_start = response_text.find("{")
                 json_end = response_text.rfind("}") + 1
                 if json_start == -1 or json_end == 0:
+                    logger.warning(
+                        "No JSON object found in AI analysis response",
+                        extra={"response_preview": response_text[:200]},
+                    )
                     return None
                 json_str = response_text[json_start:json_end]
 
-            return json.loads(json_str)
+            result = json.loads(json_str)
 
-        except json.JSONDecodeError:
-            logger.error("Failed to parse AI analysis response")
+            # Validate expected structure
+            if not isinstance(result, dict):
+                logger.warning(
+                    "AI analysis response is not a dict: %s",
+                    type(result).__name__,
+                )
+                return None
+
+            # Validate and clamp confidence values in insights
+            if "insights" in result and isinstance(result["insights"], list):
+                for insight in result["insights"]:
+                    if isinstance(insight, dict) and "confidence" in insight:
+                        insight["confidence"] = validate_confidence(
+                            float(insight.get("confidence", 0.5)),
+                            context="AI pattern analysis insight",
+                        )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error(
+                "Failed to parse AI analysis JSON: %s",
+                e,
+                extra={"response_preview": response_text[:200]},
+            )
+            return None
+        except (TypeError, ValueError) as e:
+            logger.error(
+                "Failed to process AI analysis data: %s",
+                e,
+                extra={"error_type": type(e).__name__},
+            )
             return None
 
     def apply_insights_to_preferences(self, analysis: dict) -> int:

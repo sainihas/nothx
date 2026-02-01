@@ -1,6 +1,7 @@
 """Configuration management for nothx."""
 
 import json
+import os
 import stat
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -56,12 +57,59 @@ class NotificationConfig:
 
 
 @dataclass
+class ScoringConfig:
+    """Configuration for heuristic scoring weights and adjustments.
+
+    All scores start at base_score (50 = neutral).
+    Adjustments modify the score: positive = more likely spam, negative = more likely keep.
+    Final score: 0-25 = keep, 25-75 = uncertain, 75-100 = unsub/block.
+    """
+
+    # Base score (neutral starting point)
+    base_score: int = 50
+
+    # Open rate adjustments
+    open_rate_never_opened: int = 25  # 0% open rate with 5+ emails
+    open_rate_very_low: int = 15  # <10% open rate
+    open_rate_low: int = 5  # 10-25% open rate
+    open_rate_moderate: int = -10  # 25-50% open rate
+    open_rate_high: int = -20  # 50-75% open rate
+    open_rate_very_high: int = -30  # >75% open rate
+
+    # Volume adjustments
+    volume_high: int = 10  # >50 emails
+    volume_medium: int = 5  # 20-50 emails
+
+    # Subject pattern adjustments
+    subject_spam_pattern: int = 5  # Each spam pattern match
+    subject_safe_pattern: int = -10  # Each safe/transactional pattern match
+    subject_cold_outreach: int = 15  # Cold outreach patterns
+
+    # Domain pattern adjustments
+    domain_spam_pattern: int = 10  # Marketing/spam domain patterns
+    domain_safe_pattern: int = -15  # Safe domain patterns (security@, etc.)
+
+    # Other signals
+    no_unsubscribe_link: int = -5  # Missing unsubscribe = slightly safer
+
+    # Keyword boost limits from learning
+    keyword_boost_max: int = 30  # Max absolute value for learned keyword boosts
+
+    # Minimum emails to trust open rate at 0%
+    min_emails_for_never_opened: int = 5
+
+
+@dataclass
 class ThresholdConfig:
     """Configuration for auto-decision thresholds."""
 
     unsub_confidence: float = 0.80
     keep_confidence: float = 0.80
     min_emails_before_action: int = 3
+
+    # Heuristic score thresholds
+    unsub_score_threshold: int = 75  # Score >= this = unsub/block
+    keep_score_threshold: int = 25  # Score <= this = keep
 
 
 @dataclass
@@ -84,6 +132,7 @@ class Config:
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
     scan_days: int = 30
 
     def save(self) -> None:
@@ -106,6 +155,7 @@ class Config:
             "notifications": asdict(self.notifications),
             "thresholds": asdict(self.thresholds),
             "safety": asdict(self.safety),
+            "scoring": asdict(self.scoring),
             "scan_days": self.scan_days,
         }
 
@@ -131,6 +181,24 @@ class Config:
         if "ai" in data:
             config.ai = AIConfig(**data["ai"])
 
+        # Check environment variables for secrets (override file config)
+        # This allows secure deployment without storing secrets in config files
+        env_api_key = os.environ.get("NOTHX_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+        if env_api_key:
+            config.ai.api_key = env_api_key
+
+        # Also check for OpenAI key if using OpenAI provider
+        if config.ai.provider == "openai":
+            openai_key = os.environ.get("OPENAI_API_KEY")
+            if openai_key:
+                config.ai.api_key = openai_key
+
+        # Check for Gemini key
+        if config.ai.provider == "gemini":
+            gemini_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            if gemini_key:
+                config.ai.api_key = gemini_key
+
         config.operation_mode = data.get("operation_mode", "hands_off")
 
         # Load notifications
@@ -144,6 +212,10 @@ class Config:
         # Load safety
         if "safety" in data:
             config.safety = SafetyConfig(**data["safety"])
+
+        # Load scoring
+        if "scoring" in data:
+            config.scoring = ScoringConfig(**data["scoring"])
 
         config.scan_days = data.get("scan_days", 30)
 

@@ -329,11 +329,11 @@ def safe_truncate(text: str, max_length: int, suffix: str = "...") -> str:
 
     # If we cut in the middle of a multi-byte character, back up
     # This handles the case where slicing might create invalid UTF-8
-    try:
-        truncated.encode("utf-8")
-    except UnicodeEncodeError:
-        # Back up character by character until valid
-        while truncated and not truncated.encode("utf-8", errors="strict"):
-            truncated = truncated[:-1]
+    while truncated:
+        try:
+            truncated.encode("utf-8")
+            break  # The string is valid UTF-8, so we can stop
+        except UnicodeEncodeError:
+            truncated = truncated[:-1]  # Back up one character and try again
 
     return truncated + suffix

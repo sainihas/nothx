@@ -161,6 +161,24 @@ class AIClassifier:
             # Parse response
             classifications, parse_errors = self._parse_response(response.text)
 
+            # Validate domains - only accept classifications for domains we asked about
+            # This prevents prompt injection attacks from classifying arbitrary domains
+            requested_domains = {s.domain.lower() for s in senders}
+            unexpected_domains = set(classifications.keys()) - requested_domains
+            if unexpected_domains:
+                logger.warning(
+                    "AI returned %d unexpected domains not in request: %s",
+                    len(unexpected_domains),
+                    list(unexpected_domains)[:5],  # Log first 5
+                    extra={
+                        "unexpected_domains": list(unexpected_domains),
+                        "requested_count": len(requested_domains),
+                    },
+                )
+                # Remove unexpected domains
+                for domain in unexpected_domains:
+                    del classifications[domain]
+
             # Log any parse errors
             if parse_errors:
                 logger.warning(

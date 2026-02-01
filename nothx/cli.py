@@ -951,14 +951,14 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         if user_action is not None:
             # Get AI recommendation if available
             ai_rec = None
-            if sender.get("ai_classification"):
-                ai_class = sender["ai_classification"]
-                if ai_class in ("unsub", "unsubscribe"):
-                    ai_rec = Action.UNSUB
-                elif ai_class == "keep":
-                    ai_rec = Action.KEEP
-                elif ai_class == "block":
-                    ai_rec = Action.BLOCK
+            if ai_class_str := sender.get("ai_classification"):
+                # Normalize 'unsubscribe' to 'unsub' for enum matching
+                if ai_class_str == "unsubscribe":
+                    ai_class_str = "unsub"
+                try:
+                    ai_rec = Action(ai_class_str)
+                except ValueError:
+                    pass  # ai_rec remains None for unknown values
 
             # Calculate open rate
             seen = sender.get("seen_emails", 0)

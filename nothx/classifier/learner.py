@@ -20,6 +20,13 @@ class PreferenceLearner:
     MIN_SAMPLES_FOR_CONFIDENCE = 3  # Need at least 3 examples to trust a pattern
     KEYWORD_CONFIDENCE_THRESHOLD = 0.7  # 70% consistency to create keyword preference
 
+    # Domain parsing constants (class-level for performance)
+    _TLDS = frozenset({
+        "com", "org", "net", "io", "co", "ai", "app", "dev",
+        "edu", "gov", "mil", "us", "uk", "ca", "au", "de", "fr",
+    })
+    _SKIP_PARTS = frozenset({"www", "mail", "email", "smtp", "mx"})
+
     def __init__(self) -> None:
         """Initialize the learner."""
         self._preference_cache: dict[str, UserPreference] | None = None
@@ -251,43 +258,13 @@ class PreferenceLearner:
         - 'chase.bank.com' -> ['chase', 'bank']
         - 'news.ycombinator.com' -> ['news', 'ycombinator']
         """
-        # Remove TLD and split on dots/hyphens
-        domain_lower = domain.lower()
-
-        # Common TLDs to remove
-        tlds = {
-            "com",
-            "org",
-            "net",
-            "io",
-            "co",
-            "ai",
-            "app",
-            "dev",
-            "edu",
-            "gov",
-            "mil",
-            "us",
-            "uk",
-            "ca",
-            "au",
-            "de",
-            "fr",
-        }
-
-        parts = re.split(r"[.\-_]", domain_lower)
+        parts = re.split(r"[.\-_]", domain.lower())
         keywords = []
 
         for part in parts:
-            # Skip TLDs and very short parts
-            if part in tlds or len(part) < 3:
+            # Skip TLDs, very short parts, and non-meaningful parts
+            if part in self._TLDS or len(part) < 3 or part in self._SKIP_PARTS:
                 continue
-
-            # Skip common non-meaningful parts
-            skip_parts = {"www", "mail", "email", "smtp", "mx"}
-            if part in skip_parts:
-                continue
-
             keywords.append(part)
 
         return keywords

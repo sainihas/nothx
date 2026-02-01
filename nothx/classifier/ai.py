@@ -350,13 +350,20 @@ class AIPatternAnalyzer:
     def _parse_analysis(self, response_text: str) -> dict | None:
         """Parse AI analysis response."""
         try:
-            # Extract JSON from response
-            json_start = response_text.find("{")
-            json_end = response_text.rfind("}") + 1
-            if json_start == -1 or json_end == 0:
-                return None
+            import re
 
-            json_str = response_text[json_start:json_end]
+            # Try to extract JSON from markdown code block first (more robust)
+            match = re.search(r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL)
+            if match:
+                json_str = match.group(1)
+            else:
+                # Fallback for cases where the AI doesn't use markdown fences
+                json_start = response_text.find("{")
+                json_end = response_text.rfind("}") + 1
+                if json_start == -1 or json_end == 0:
+                    return None
+                json_str = response_text[json_start:json_end]
+
             return json.loads(json_str)
 
         except json.JSONDecodeError:
@@ -386,6 +393,9 @@ class AIPatternAnalyzer:
             if confidence < 0.5:
                 continue
 
+            # Get sample count from AI response, default to 3 (minimum required)
+            sample_count = insight.get("sample_count", 3)
+
             if insight_type == "keyword":
                 # Create/update keyword preference
                 pattern = insight.get("pattern", "")
@@ -399,7 +409,7 @@ class AIPatternAnalyzer:
                         feature=feature,
                         value=value,
                         confidence=confidence,
-                        sample_count=3,  # AI requires at least 3 examples
+                        sample_count=sample_count,
                         last_updated=now,
                         source="ai",
                     )
@@ -418,7 +428,7 @@ class AIPatternAnalyzer:
                         feature="open_rate_weight",
                         value=weight,
                         confidence=confidence,
-                        sample_count=3,
+                        sample_count=sample_count,
                         last_updated=now,
                         source="ai",
                     )
@@ -435,7 +445,7 @@ class AIPatternAnalyzer:
                         feature="volume_weight",
                         value=1.2,  # Increase volume importance
                         confidence=confidence,
-                        sample_count=3,
+                        sample_count=sample_count,
                         last_updated=now,
                         source="ai",
                     )
@@ -443,18 +453,18 @@ class AIPatternAnalyzer:
                     updated += 1
 
             elif insight_type == "category":
-                # Store category preference as a special keyword
+                # Store category preference as keyword so it influences scoring
                 pattern = insight.get("pattern", "")
                 action = insight.get("action", "")
                 if pattern and action:
-                    feature = f"category:{pattern}"
+                    feature = f"keyword:{pattern}"  # Use keyword: prefix for scoring
                     value = 1.0 if action == "keep" else 0.0
 
                     pref = UserPreference(
                         feature=feature,
                         value=value,
                         confidence=confidence,
-                        sample_count=3,
+                        sample_count=sample_count,
                         last_updated=now,
                         source="ai",
                     )

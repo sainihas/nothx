@@ -173,14 +173,3 @@ class UserPreference:
     sample_count: int
     last_updated: datetime
     source: str = "learned"  # "learned", "ai", "default"
-
-
-@dataclass
-class LearnedPattern:
-    """A pattern learned from user behavior."""
-
-    pattern: str  # e.g., "*bank*", "marketing@*"
-    action: Action
-    confidence: float
-    example_domains: list[str] = field(default_factory=list)
-    source: str = "learned"  # "learned:keyword", "learned:ai"

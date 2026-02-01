@@ -68,7 +68,7 @@ def _show_welcome_screen() -> None:
     console.print("\n[dim]" + "─" * 50 + "[/dim]")
 
     # Get started section with interactive selector
-    console.print("\n[bold]Get started[/bold]\n")
+    console.print("\n[header]Get started[/header]\n")
 
     # Build command choices based on configuration state
     if not config.accounts:
@@ -218,7 +218,7 @@ def init():
             break
 
     # Anthropic API key
-    console.print("\n[bold]AI Classification Setup[/bold]")
+    console.print("\n[header]AI Classification Setup[/header]")
     console.print("nothx uses Claude AI to classify your emails.")
     console.print("Your email [bold]headers only[/bold] (never bodies) are sent to Anthropic.\n")
 
@@ -337,7 +337,7 @@ def account_list():
         console.print("[warning]No accounts configured. Run 'nothx init' to add one.[/warning]")
         return
 
-    console.print("\n[bold]Configured Accounts[/bold]\n")
+    console.print("\n[header]Configured Accounts[/header]\n")
 
     table = Table(show_header=True)
     table.add_column("Name")
@@ -469,7 +469,7 @@ def _run_scan(
     else:
         account_count = len(config.accounts)
         label = f"({account_count} account{'s' if account_count != 1 else ''})"
-    console.print(f"\n[bold]Phase 1/3: Scanning inbox {label}[/bold]")
+    console.print(f"\n[header]Phase 1/3: Scanning inbox {label}[/header]")
 
     with Progress(
         SpinnerColumn(),
@@ -502,7 +502,7 @@ def _run_scan(
     )
 
     # Phase 2: Classify senders
-    console.print("\n[bold]Phase 2/3: Classifying senders[/bold]")
+    console.print("\n[header]Phase 2/3: Classifying senders[/header]")
     engine = ClassificationEngine(config)
 
     with Progress(
@@ -554,7 +554,7 @@ def _run_scan(
         ).ask()
 
         if review_decisions:
-            console.print("\n[bold]Manual Review[/bold]")
+            console.print("\n[header]Manual Review[/header]")
             console.print("[muted]Change any decisions you disagree with:[/muted]\n")
 
             # Review items marked for unsubscribe
@@ -611,7 +611,7 @@ def _run_scan(
                         console.print("  [review]→ Moved to review[/review]")
 
             # Updated summary
-            console.print("\n[bold]Updated decisions:[/bold]")
+            console.print("\n[header]Updated decisions:[/header]")
             console.print(f"  [unsubscribe]• {len(to_unsub)} to unsubscribe[/unsubscribe]")
             console.print(f"  [keep]• {len(to_keep)} to keep[/keep]")
             console.print(f"  [review]• {len(to_review)} need review[/review]")
@@ -623,7 +623,7 @@ def _run_scan(
         if auto or Confirm.ask(
             f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
         ):
-            console.print("\n[bold]Phase 3/3: Unsubscribing[/bold]")
+            console.print("\n[header]Phase 3/3: Unsubscribing[/header]")
 
             with Progress(
                 SpinnerColumn(),
@@ -718,17 +718,17 @@ def status():
 
     db.init_db()
 
-    console.print("\n[bold]nothx Status[/bold]")
+    console.print("\n[header]nothx Status[/header]")
     console.print("=" * 40)
 
     # Account info
-    console.print("\n[bold]Accounts[/bold]")
+    console.print("\n[header]Accounts[/header]")
     for name, acc in config.accounts.items():
         is_default = " [muted](default)[/muted]" if name == config.default_account else ""
         console.print(f"  {acc.email} ({acc.provider}){is_default}")
 
     # AI status
-    console.print("\n[bold]Configuration[/bold]")
+    console.print("\n[header]Configuration[/header]")
     if config.ai.enabled:
         console.print(f"  AI: [success]enabled[/success] ({config.ai.provider})")
     else:
@@ -741,7 +741,7 @@ def status():
     successful, failed = db.get_unsub_success_rate()
     total_unsub_attempts = successful + failed
 
-    console.print("\n[bold]Statistics[/bold]")
+    console.print("\n[header]Statistics[/header]")
     console.print(f"  Total senders tracked: [count]{stats['total_senders']}[/count]")
 
     # Show unsubscribe breakdown with success rate
@@ -770,7 +770,7 @@ def status():
     # Schedule status
     schedule = get_schedule_status()
     if schedule:
-        console.print("\n[bold]Schedule[/bold]")
+        console.print("\n[header]Schedule[/header]")
         console.print(f"  Type: {schedule['type']}")
         console.print(f"  Frequency: {schedule['frequency']}")
     else:
@@ -817,7 +817,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         console.print(f"[success]No senders {filter_label}![/success]")
         return
 
-    console.print(f"\n[bold]{len(senders)} senders {filter_label}:[/bold]\n")
+    console.print(f"\n[header]{len(senders)} senders {filter_label}:[/header]\n")
 
     for sender in senders:
         domain = sender["domain"]
@@ -889,7 +889,7 @@ def undo(domain: str | None):
         console.print("No recent unsubscribes to undo.")
         return
 
-    console.print("\n[bold]Recent unsubscribes (last 30 days):[/bold]\n")
+    console.print("\n[header]Recent unsubscribes (last 30 days):[/header]\n")
 
     for i, item in enumerate(recent[:20], 1):
         console.print(
@@ -909,7 +909,7 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
     if show_status or (not monthly and not weekly and not off):
         status = get_schedule_status()
         if status:
-            console.print("\n[bold]Current Schedule[/bold]")
+            console.print("\n[header]Current Schedule[/header]")
             console.print(f"  Type: {status['type']}")
             console.print(f"  Frequency: {status['frequency']}")
             console.print(f"  Path: {status['path']}")
@@ -955,7 +955,7 @@ def config_cmd(show: bool, ai: str | None, mode: str | None):
         console.print(f"Mode: {mode}")
 
     if show or (not ai and not mode):
-        console.print("\n[bold]Current Configuration[/bold]")
+        console.print("\n[header]Current Configuration[/header]")
         console.print(f"  Config dir: {get_config_dir()}")
         console.print(f"  AI enabled: {config.ai.enabled}")
         console.print(f"  AI provider: {config.ai.provider}")
@@ -1033,7 +1033,7 @@ def senders(status: str | None, sort: str, as_json: bool):
         return
 
     status_label = f" ({status})" if status else ""
-    console.print(f"\n[bold]Tracked Senders{status_label} ({len(all_senders)} total)[/bold]\n")
+    console.print(f"\n[header]Tracked Senders{status_label} ({len(all_senders)} total)[/header]\n")
 
     table = Table(show_header=True)
     table.add_column("Domain", style="domain")
@@ -1091,7 +1091,7 @@ def search(pattern: str, as_json: bool):
         click.echo(json.dumps(results, indent=2, default=str))
         return
 
-    console.print(f"\n[bold]Found {len(results)} sender(s) matching '{pattern}':[/bold]\n")
+    console.print(f"\n[header]Found {len(results)} sender(s) matching '{pattern}':[/header]\n")
 
     for sender in results:
         domain = sender["domain"]
@@ -1145,7 +1145,7 @@ def history(limit: int, failures: bool, as_json: bool):
         return
 
     label = " (failures only)" if failures else ""
-    console.print(f"\n[bold]Recent Activity{label}[/bold]\n")
+    console.print(f"\n[header]Recent Activity{label}[/header]\n")
 
     for entry in activity:
         timestamp = entry.get("timestamp", "")
@@ -1242,7 +1242,7 @@ def test_connection():
         return
 
     for _name, account in config.accounts.items():
-        console.print(f"\n[bold]Testing connection to {account.email}...[/bold]")
+        console.print(f"\n[header]Testing connection to {account.email}...[/header]")
 
         with console.status("Connecting..."):
             success, msg = test_account(account)
@@ -1404,7 +1404,7 @@ def update(check: bool):
     import urllib.error
     import urllib.request
 
-    console.print(f"\n[bold]Current version:[/bold] {__version__}")
+    console.print(f"\n[header]Current version:[/header] {__version__}")
 
     # Check for latest version on PyPI using the JSON API
     with console.status("Checking for updates..."):
@@ -1417,7 +1417,7 @@ def update(check: bool):
             latest = None
 
     if latest:
-        console.print(f"[bold]Latest version:[/bold]  {latest}")
+        console.print(f"[header]Latest version:[/header]  {latest}")
 
         if latest == __version__:
             console.print("\n[success]✓ You're already on the latest version![/success]")
@@ -1433,7 +1433,7 @@ def update(check: bool):
             console.print("Cancelled.")
             return
 
-        console.print("\n[bold]Updating...[/bold]")
+        console.print("\n[header]Updating...[/header]")
         try:
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--upgrade", "nothx"],

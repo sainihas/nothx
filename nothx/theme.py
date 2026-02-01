@@ -17,7 +17,7 @@ NOTHX_THEME = Theme(
         "block": "bold red",
         "review": "yellow",
         # UI elements
-        "header": "bold white",
+        "header": "bright_white",
         "muted": "dim",
         "highlight": "bold cyan",
         "domain": "cyan",

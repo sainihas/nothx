@@ -151,16 +151,13 @@ def _execute_mailto(mailto: str, account: AccountConfig, config: Config) -> Unsu
 
         # Send via SMTP
         server, port, use_starttls = _get_smtp_config(account.provider)
-        if use_starttls:
-            with smtplib.SMTP(server, port) as smtp:
+        smtp_class = smtplib.SMTP if use_starttls else smtplib.SMTP_SSL
+        with smtp_class(server, port) as smtp:
+            if use_starttls:
                 smtp.starttls()
                 smtp.ehlo()  # Required after STARTTLS
-                smtp.login(account.email, account.password)
-                smtp.send_message(msg)
-        else:
-            with smtplib.SMTP_SSL(server, port) as smtp:
-                smtp.login(account.email, account.password)
-                smtp.send_message(msg)
+            smtp.login(account.email, account.password)
+            smtp.send_message(msg)
 
         return UnsubResult(
             success=True,

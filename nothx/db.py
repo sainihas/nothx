@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from .config import get_db_path
-from .models import RunStats, SenderStatus, UnsubMethod
+from .models import Action, RunStats, SenderStatus, UnsubMethod, UserAction, UserPreference
 
 
 def get_connection() -> sqlite3.Connection:
@@ -89,6 +89,30 @@ def init_db() -> None:
                 pattern TEXT UNIQUE,
                 action TEXT,
                 created_at TEXT
+            );
+
+            -- User actions for learning (every decision, not just corrections)
+            CREATE TABLE IF NOT EXISTS user_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT,
+                action TEXT,
+                ai_recommendation TEXT,
+                heuristic_score INTEGER,
+                open_rate REAL,
+                email_count INTEGER,
+                timestamp TEXT,
+                FOREIGN KEY (domain) REFERENCES senders(domain)
+            );
+
+            -- Learned user preferences (weights and thresholds)
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                feature TEXT UNIQUE,
+                value REAL,
+                confidence REAL,
+                sample_count INTEGER,
+                source TEXT DEFAULT 'learned',
+                last_updated TEXT
             );
         """)
 
@@ -460,8 +484,239 @@ def reset_database(keep_config: bool = False) -> tuple[int, int]:
         conn.execute("DELETE FROM unsub_log")
         conn.execute("DELETE FROM corrections")
         conn.execute("DELETE FROM runs")
+        conn.execute("DELETE FROM user_actions")
+        conn.execute("DELETE FROM user_preferences")
 
         if not keep_config:
             conn.execute("DELETE FROM rules")
 
         return (senders, unsubs)
+
+
+# ============================================================================
+# User Learning System
+# ============================================================================
+
+
+def log_user_action(action: UserAction) -> None:
+    """Log a user action for learning."""
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_actions (domain, action, ai_recommendation, heuristic_score, open_rate, email_count, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                action.domain,
+                action.action.value,
+                action.ai_recommendation.value if action.ai_recommendation else None,
+                action.heuristic_score,
+                action.open_rate,
+                action.email_count,
+                action.timestamp.isoformat(),
+            ),
+        )
+
+
+def get_user_actions(
+    days: int | None = None,
+    limit: int = 100,
+    action_filter: Action | None = None,
+) -> list[UserAction]:
+    """Get user actions for learning analysis.
+
+    Args:
+        days: Only return actions from the last N days
+        limit: Maximum number of actions to return
+        action_filter: Filter by specific action type
+    """
+    with get_db() as conn:
+        query = "SELECT * FROM user_actions WHERE 1=1"
+        params: list = []
+
+        if days is not None:
+            query += " AND datetime(timestamp) > datetime('now', ?)"
+            params.append(f"-{days} days")
+
+        if action_filter is not None:
+            query += " AND action = ?"
+            params.append(action_filter.value)
+
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        rows = conn.execute(query, params).fetchall()
+
+        return [
+            UserAction(
+                domain=row["domain"],
+                action=Action(row["action"]),
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                ai_recommendation=Action(row["ai_recommendation"])
+                if row["ai_recommendation"]
+                else None,
+                heuristic_score=row["heuristic_score"],
+                open_rate=row["open_rate"],
+                email_count=row["email_count"],
+            )
+            for row in rows
+        ]
+
+
+def get_user_actions_by_domain_pattern(pattern: str) -> list[UserAction]:
+    """Get user actions for domains matching a pattern (for learning keyword associations)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM user_actions
+            WHERE domain LIKE ?
+            ORDER BY timestamp DESC
+        """,
+            (f"%{pattern}%",),
+        ).fetchall()
+
+        return [
+            UserAction(
+                domain=row["domain"],
+                action=Action(row["action"]),
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                ai_recommendation=Action(row["ai_recommendation"])
+                if row["ai_recommendation"]
+                else None,
+                heuristic_score=row["heuristic_score"],
+                open_rate=row["open_rate"],
+                email_count=row["email_count"],
+            )
+            for row in rows
+        ]
+
+
+def get_action_count() -> int:
+    """Get total number of logged user actions."""
+    with get_db() as conn:
+        row = conn.execute("SELECT COUNT(*) as count FROM user_actions").fetchone()
+        return row["count"] if row else 0
+
+
+def get_user_preference(feature: str) -> UserPreference | None:
+    """Get a specific user preference."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM user_preferences WHERE feature = ?", (feature,)
+        ).fetchone()
+
+        if not row:
+            return None
+
+        return UserPreference(
+            feature=row["feature"],
+            value=row["value"],
+            confidence=row["confidence"],
+            sample_count=row["sample_count"],
+            source=row["source"] or "learned",
+            last_updated=datetime.fromisoformat(row["last_updated"]),
+        )
+
+
+def set_user_preference(pref: UserPreference) -> None:
+    """Set or update a user preference."""
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_preferences (feature, value, confidence, sample_count, source, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(feature) DO UPDATE SET
+                value = excluded.value,
+                confidence = excluded.confidence,
+                sample_count = excluded.sample_count,
+                source = excluded.source,
+                last_updated = excluded.last_updated
+        """,
+            (
+                pref.feature,
+                pref.value,
+                pref.confidence,
+                pref.sample_count,
+                pref.source,
+                pref.last_updated.isoformat(),
+            ),
+        )
+
+
+def get_all_preferences() -> list[UserPreference]:
+    """Get all user preferences."""
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM user_preferences ORDER BY feature").fetchall()
+
+        return [
+            UserPreference(
+                feature=row["feature"],
+                value=row["value"],
+                confidence=row["confidence"],
+                sample_count=row["sample_count"],
+                source=row["source"] or "learned",
+                last_updated=datetime.fromisoformat(row["last_updated"]),
+            )
+            for row in rows
+        ]
+
+
+def get_preferences_by_prefix(prefix: str) -> list[UserPreference]:
+    """Get preferences matching a prefix (e.g., 'keyword:' for all keyword preferences)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM user_preferences WHERE feature LIKE ? ORDER BY feature",
+            (f"{prefix}%",),
+        ).fetchall()
+
+        return [
+            UserPreference(
+                feature=row["feature"],
+                value=row["value"],
+                confidence=row["confidence"],
+                sample_count=row["sample_count"],
+                source=row["source"] or "learned",
+                last_updated=datetime.fromisoformat(row["last_updated"]),
+            )
+            for row in rows
+        ]
+
+
+def delete_user_preference(feature: str) -> bool:
+    """Delete a user preference."""
+    with get_db() as conn:
+        cursor = conn.execute("DELETE FROM user_preferences WHERE feature = ?", (feature,))
+        return cursor.rowcount > 0
+
+
+def get_learning_stats() -> dict:
+    """Get statistics about the learning system."""
+    with get_db() as conn:
+        actions = conn.execute("SELECT COUNT(*) as count FROM user_actions").fetchone()
+        preferences = conn.execute("SELECT COUNT(*) as count FROM user_preferences").fetchone()
+        corrections = conn.execute(
+            """
+            SELECT COUNT(*) as count FROM user_actions
+            WHERE ai_recommendation IS NOT NULL AND action != ai_recommendation
+        """
+        ).fetchone()
+
+        # Action breakdown
+        keep_count = conn.execute(
+            "SELECT COUNT(*) as count FROM user_actions WHERE action = 'keep'"
+        ).fetchone()
+        unsub_count = conn.execute(
+            "SELECT COUNT(*) as count FROM user_actions WHERE action = 'unsub'"
+        ).fetchone()
+        block_count = conn.execute(
+            "SELECT COUNT(*) as count FROM user_actions WHERE action = 'block'"
+        ).fetchone()
+
+        return {
+            "total_actions": actions["count"] if actions else 0,
+            "total_preferences": preferences["count"] if preferences else 0,
+            "total_corrections": corrections["count"] if corrections else 0,
+            "keep_actions": keep_count["count"] if keep_count else 0,
+            "unsub_actions": unsub_count["count"] if unsub_count else 0,
+            "block_actions": block_count["count"] if block_count else 0,
+        }

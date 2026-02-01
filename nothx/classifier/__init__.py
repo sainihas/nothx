@@ -3,6 +3,7 @@
 from .ai import AIClassifier
 from .engine import ClassificationEngine
 from .heuristics import HeuristicScorer
+from .learner import PreferenceLearner, get_learner, reset_learner
 from .patterns import PatternMatcher
 from .rules import RulesMatcher
 
@@ -12,4 +13,7 @@ __all__ = [
     "PatternMatcher",
     "AIClassifier",
     "HeuristicScorer",
+    "PreferenceLearner",
+    "get_learner",
+    "reset_learner",
 ]

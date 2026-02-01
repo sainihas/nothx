@@ -71,6 +71,13 @@ class OpenAIProvider(BaseAIProvider):
     def complete(self, prompt: str, max_tokens: int = 4096) -> ProviderResponse:
         """Send prompt to GPT and get response."""
         try:
+            from openai import (
+                APIConnectionError,
+                APITimeoutError,
+                AuthenticationError,
+                RateLimitError,
+            )
+
             client = self._get_client()
             response = client.chat.completions.create(
                 model=self.model,
@@ -92,30 +99,44 @@ class OpenAIProvider(BaseAIProvider):
             )
         except ImportError:
             raise
-        except Exception as e:
-            error_msg = _sanitize_error_message(e)
-            error_type = ProviderErrorType.UNKNOWN
-            retryable = False
-
-            # Detect specific error types
-            error_str = str(e).lower()
-            if "rate" in error_str or "limit" in error_str:
-                error_type = ProviderErrorType.RATE_LIMIT_ERROR
-                retryable = True
-            elif "auth" in error_str or "key" in error_str or "401" in error_str:
-                error_type = ProviderErrorType.AUTHENTICATION_ERROR
-            elif "timeout" in error_str:
-                error_type = ProviderErrorType.TIMEOUT_ERROR
-                retryable = True
-            elif "connect" in error_str:
-                error_type = ProviderErrorType.CONNECTION_ERROR
-                retryable = True
-
+        except RateLimitError as e:
             raise ProviderError(
-                error_type=error_type,
-                message=error_msg,
+                error_type=ProviderErrorType.RATE_LIMIT_ERROR,
+                message=str(e),
                 provider=self.name,
-                retryable=retryable,
+                retryable=True,
+                cause=e,
+            ) from e
+        except AuthenticationError as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.AUTHENTICATION_ERROR,
+                message=_sanitize_error_message(e),
+                provider=self.name,
+                retryable=False,
+                cause=e,
+            ) from e
+        except APITimeoutError as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.TIMEOUT_ERROR,
+                message=str(e),
+                provider=self.name,
+                retryable=True,
+                cause=e,
+            ) from e
+        except APIConnectionError as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.CONNECTION_ERROR,
+                message=str(e),
+                provider=self.name,
+                retryable=True,
+                cause=e,
+            ) from e
+        except Exception as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.UNKNOWN,
+                message=_sanitize_error_message(e),
+                provider=self.name,
+                retryable=False,
                 cause=e,
             ) from e
 

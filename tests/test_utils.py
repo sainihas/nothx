@@ -1,6 +1,5 @@
 """Tests for pattern matching utilities."""
 
-import pytest
 from nothx.classifier.utils import matches_pattern
 
 
@@ -96,24 +95,11 @@ class TestPatternMatchingIntegration:
 
     def test_financial_domains_kept(self):
         """Test that financial domains match keep patterns."""
-        financial_domains = [
-            "alerts.chase.com",
-            "notifications.bankofamerica.com",
-            "secure.paypal.com",
-        ]
-
         # These should match *bank* or *.paypal.com patterns
         assert matches_pattern("notifications.bankofamerica.com", "*bank*") is True
         assert matches_pattern("secure.paypal.com", "*.paypal.com") is True
 
     def test_government_domains_kept(self):
         """Test government domain matching."""
-        gov_domains = [
-            "irs.gov",
-            "cdc.gov",
-            "state.ca.gov",
-            "hmrc.gov.uk",
-        ]
-
         assert matches_pattern("irs.gov", "*.gov") is True
         assert matches_pattern("hmrc.gov.uk", "*.gov.uk") is True

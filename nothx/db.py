@@ -1,13 +1,12 @@
 """SQLite database management for nothx."""
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
-from typing import Optional, Iterator
 
 from .config import get_db_path
-from .models import SenderStatus, UnsubMethod, RunStats
+from .models import RunStats, SenderStatus, UnsubMethod
 
 
 def get_connection() -> sqlite3.Connection:
@@ -100,8 +99,8 @@ def upsert_sender(
     seen_emails: int,
     sample_subjects: list[str],
     has_unsubscribe: bool,
-    first_seen: Optional[datetime] = None,
-    last_seen: Optional[datetime] = None,
+    first_seen: datetime | None = None,
+    last_seen: datetime | None = None,
 ) -> None:
     """Insert or update a sender record."""
     with get_db() as conn:
@@ -110,7 +109,8 @@ def upsert_sender(
         last = last_seen.isoformat() if last_seen else now
         subjects_json = "|".join(sample_subjects[:5])  # Store up to 5 samples
 
-        conn.execute("""
+        conn.execute(
+            """
             INSERT INTO senders (domain, first_seen, last_seen, total_emails, seen_emails, sample_subjects, has_unsubscribe)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(domain) DO UPDATE SET
@@ -119,47 +119,36 @@ def upsert_sender(
                 seen_emails = excluded.seen_emails,
                 sample_subjects = excluded.sample_subjects,
                 has_unsubscribe = excluded.has_unsubscribe
-        """, (domain, first, last, total_emails, seen_emails, subjects_json, int(has_unsubscribe)))
+        """,
+            (domain, first, last, total_emails, seen_emails, subjects_json, int(has_unsubscribe)),
+        )
 
 
 def update_sender_status(domain: str, status: SenderStatus) -> None:
     """Update the status of a sender."""
     with get_db() as conn:
-        conn.execute(
-            "UPDATE senders SET status = ? WHERE domain = ?",
-            (status.value, domain)
-        )
+        conn.execute("UPDATE senders SET status = ? WHERE domain = ?", (status.value, domain))
 
 
-def update_sender_classification(
-    domain: str,
-    classification: str,
-    confidence: float
-) -> None:
+def update_sender_classification(domain: str, classification: str, confidence: float) -> None:
     """Update the AI classification of a sender."""
     with get_db() as conn:
         conn.execute(
             "UPDATE senders SET ai_classification = ?, ai_confidence = ? WHERE domain = ?",
-            (classification, confidence, domain)
+            (classification, confidence, domain),
         )
 
 
 def set_user_override(domain: str, action: str) -> None:
     """Set a user override for a sender."""
     with get_db() as conn:
-        conn.execute(
-            "UPDATE senders SET user_override = ? WHERE domain = ?",
-            (action, domain)
-        )
+        conn.execute("UPDATE senders SET user_override = ? WHERE domain = ?", (action, domain))
 
 
-def get_sender(domain: str) -> Optional[dict]:
+def get_sender(domain: str) -> dict | None:
     """Get a sender by domain."""
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM senders WHERE domain = ?",
-            (domain,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM senders WHERE domain = ?", (domain,)).fetchone()
         return dict(row) if row else None
 
 
@@ -167,8 +156,7 @@ def get_senders_by_status(status: SenderStatus) -> list[dict]:
     """Get all senders with a specific status."""
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT * FROM senders WHERE status = ? ORDER BY total_emails DESC",
-            (status.value,)
+            "SELECT * FROM senders WHERE status = ? ORDER BY total_emails DESC", (status.value,)
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -187,96 +175,117 @@ def get_senders_for_review() -> list[dict]:
 def log_unsub_attempt(
     domain: str,
     success: bool,
-    method: Optional[UnsubMethod],
-    http_status: Optional[int] = None,
-    error: Optional[str] = None,
-    response_snippet: Optional[str] = None
+    method: UnsubMethod | None,
+    http_status: int | None = None,
+    error: str | None = None,
+    response_snippet: str | None = None,
 ) -> None:
     """Log an unsubscribe attempt."""
     with get_db() as conn:
-        conn.execute("""
+        conn.execute(
+            """
             INSERT INTO unsub_log (domain, attempted_at, success, method, http_status, error, response_snippet)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            domain,
-            datetime.now().isoformat(),
-            int(success),
-            method.value if method else None,
-            http_status,
-            error,
-            response_snippet
-        ))
+        """,
+            (
+                domain,
+                datetime.now().isoformat(),
+                int(success),
+                method.value if method else None,
+                http_status,
+                error,
+                response_snippet,
+            ),
+        )
 
 
 def log_correction(domain: str, ai_decision: str, user_decision: str) -> None:
     """Log a user correction to an AI decision."""
     with get_db() as conn:
-        conn.execute("""
+        conn.execute(
+            """
             INSERT INTO corrections (domain, ai_decision, user_decision, timestamp)
             VALUES (?, ?, ?, ?)
-        """, (domain, ai_decision, user_decision, datetime.now().isoformat()))
+        """,
+            (domain, ai_decision, user_decision, datetime.now().isoformat()),
+        )
 
 
 def get_recent_corrections(limit: int = 20) -> list[dict]:
     """Get recent user corrections for AI learning."""
     with get_db() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             SELECT * FROM corrections
             ORDER BY timestamp DESC
             LIMIT ?
-        """, (limit,)).fetchall()
+        """,
+            (limit,),
+        ).fetchall()
         return [dict(row) for row in rows]
 
 
-def log_run(stats: RunStats) -> Optional[int]:
+def log_run(stats: RunStats) -> int | None:
     """Log a run and return its ID (or None if insert failed)."""
     with get_db() as conn:
-        cursor = conn.execute("""
+        cursor = conn.execute(
+            """
             INSERT INTO runs (ran_at, mode, emails_scanned, unique_senders, auto_unsubbed, kept, review_queued, failed)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            stats.ran_at.isoformat(),
-            stats.mode,
-            stats.emails_scanned,
-            stats.unique_senders,
-            stats.auto_unsubbed,
-            stats.kept,
-            stats.review_queued,
-            stats.failed
-        ))
+        """,
+            (
+                stats.ran_at.isoformat(),
+                stats.mode,
+                stats.emails_scanned,
+                stats.unique_senders,
+                stats.auto_unsubbed,
+                stats.kept,
+                stats.review_queued,
+                stats.failed,
+            ),
+        )
         return cursor.lastrowid
 
 
 def get_recent_runs(limit: int = 10) -> list[dict]:
     """Get recent runs."""
     with get_db() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             SELECT * FROM runs ORDER BY ran_at DESC LIMIT ?
-        """, (limit,)).fetchall()
+        """,
+            (limit,),
+        ).fetchall()
         return [dict(row) for row in rows]
 
 
 def get_recent_unsubscribes(days: int = 30) -> list[dict]:
     """Get recent successful unsubscribes."""
     with get_db() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             SELECT s.domain, s.total_emails, u.attempted_at, u.method
             FROM unsub_log u
             JOIN senders s ON u.domain = s.domain
             WHERE u.success = 1
             AND datetime(u.attempted_at) > datetime('now', ?)
             ORDER BY u.attempted_at DESC
-        """, (f"-{days} days",)).fetchall()
+        """,
+            (f"-{days} days",),
+        ).fetchall()
         return [dict(row) for row in rows]
 
 
 def add_rule(pattern: str, action: str) -> None:
     """Add a user rule."""
     with get_db() as conn:
-        conn.execute("""
+        conn.execute(
+            """
             INSERT OR REPLACE INTO rules (pattern, action, created_at)
             VALUES (?, ?, ?)
-        """, (pattern, action, datetime.now().isoformat()))
+        """,
+            (pattern, action, datetime.now().isoformat()),
+        )
 
 
 def get_rules() -> list[dict]:
@@ -307,9 +316,7 @@ def get_stats() -> dict:
             "SELECT COUNT(*) as count FROM senders WHERE status = 'unknown' AND user_override IS NULL"
         ).fetchone()
         runs = conn.execute("SELECT COUNT(*) as count FROM runs").fetchone()
-        last_run = conn.execute(
-            "SELECT ran_at FROM runs ORDER BY ran_at DESC LIMIT 1"
-        ).fetchone()
+        last_run = conn.execute("SELECT ran_at FROM runs ORDER BY ran_at DESC LIMIT 1").fetchone()
 
         return {
             "total_senders": senders["count"],

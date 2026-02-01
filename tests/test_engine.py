@@ -1,14 +1,15 @@
 """Tests for the classification engine integration."""
 
-import pytest
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from nothx.config import Config, AccountConfig, AIConfig
-from nothx.models import SenderStats, Action, EmailType
-from nothx.classifier.engine import ClassificationEngine
+import pytest
+
 from nothx import db
+from nothx.classifier.engine import ClassificationEngine
+from nothx.config import Config
+from nothx.models import Action, EmailType, SenderStats
 
 
 @pytest.fixture
@@ -170,6 +171,7 @@ class TestShouldAutoAct:
         engine = ClassificationEngine(config)
 
         from nothx.models import Classification
+
         classification = Classification(
             email_type=EmailType.MARKETING,
             action=Action.UNSUB,
@@ -185,6 +187,7 @@ class TestShouldAutoAct:
         engine = ClassificationEngine(config_no_ai)
 
         from nothx.models import Classification
+
         classification = Classification(
             email_type=EmailType.UNKNOWN,
             action=Action.REVIEW,
@@ -200,6 +203,7 @@ class TestShouldAutoAct:
         engine = ClassificationEngine(config_no_ai)
 
         from nothx.models import Classification
+
         classification = Classification(
             email_type=EmailType.MARKETING,
             action=Action.UNSUB,
@@ -219,6 +223,7 @@ class TestShouldAutoAct:
         engine = ClassificationEngine(config)
 
         from nothx.models import Classification
+
         classification = Classification(
             email_type=EmailType.MARKETING,
             action=Action.UNSUB,

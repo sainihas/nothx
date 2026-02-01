@@ -1,25 +1,22 @@
 """Command-line interface for nothx."""
 
-import sys
 from datetime import datetime
-from typing import Optional
 
 import click
 from rich.console import Console
-from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
 
-from . import __version__
-from .config import Config, AccountConfig, get_config_dir
-from .imap import test_account
-from .classifier.ai import test_ai_connection
+from . import __version__, db
 from .classifier import ClassificationEngine
+from .classifier.ai import test_ai_connection
+from .config import AccountConfig, Config, get_config_dir
+from .imap import test_account
+from .models import Action, RunStats, SenderStatus
 from .scanner import scan_inbox
+from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
 from .unsubscriber import unsubscribe
-from .scheduler import install_schedule, uninstall_schedule, get_schedule_status
-from .models import Action, SenderStatus, RunStats
-from . import db
 
 console = Console()
 
@@ -43,11 +40,7 @@ def init():
     config = Config.load()
 
     # Email provider
-    provider = Prompt.ask(
-        "Email provider",
-        choices=["gmail", "outlook"],
-        default="gmail"
-    )
+    provider = Prompt.ask("Email provider", choices=["gmail", "outlook"], default="gmail")
 
     # Email address
     email = Prompt.ask("Email address")
@@ -162,7 +155,9 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
         task = progress.add_task("Scanning inbox...", total=None)
         scan_result = scan_inbox(config)
         sender_stats = scan_result.sender_stats
-        progress.update(task, description=f"Found {len(sender_stats)} senders with marketing emails")
+        progress.update(
+            task, description=f"Found {len(sender_stats)} senders with marketing emails"
+        )
 
     if not sender_stats:
         console.print("No marketing emails found.")
@@ -171,7 +166,9 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
     stats.emails_scanned = sum(s.total_emails for s in sender_stats.values())
     stats.unique_senders = len(sender_stats)
 
-    console.print(f"\nFound [bold]{stats.emails_scanned}[/bold] marketing emails from [bold]{stats.unique_senders}[/bold] senders.\n")
+    console.print(
+        f"\nFound [bold]{stats.emails_scanned}[/bold] marketing emails from [bold]{stats.unique_senders}[/bold] senders.\n"
+    )
 
     # Classify senders
     engine = ClassificationEngine(config)
@@ -203,7 +200,7 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
             to_review.append((sender, classification))
 
     # Summary
-    console.print(f"AI classified:")
+    console.print("AI classified:")
     console.print(f"  [red]• {len(to_unsub)} to unsubscribe[/red]")
     console.print(f"  [blue]• {len(to_block)} to block[/blue]")
     console.print(f"  [green]• {len(to_keep)} to keep[/green]")
@@ -216,7 +213,9 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
     if not dry_run and (to_unsub or to_block):
         console.print()
 
-        if auto or Confirm.ask(f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True):
+        if auto or Confirm.ask(
+            f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
+        ):
             account = config.get_account()
 
             with Progress(
@@ -273,7 +272,7 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
                 sender.domain,
                 str(sender.total_emails),
                 f"{sender.open_rate:.0f}%",
-                classification.reasoning[:50]
+                classification.reasoning[:50],
             )
         console.print(table)
 
@@ -289,7 +288,7 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
                 sender.domain,
                 str(sender.total_emails),
                 f"{sender.open_rate:.0f}%",
-                classification.reasoning[:50]
+                classification.reasoning[:50],
             )
         console.print(table)
 
@@ -323,19 +322,19 @@ def status():
 
     # Stats
     stats = db.get_stats()
-    console.print(f"\n[bold]Statistics[/bold]")
+    console.print("\n[bold]Statistics[/bold]")
     console.print(f"  Total senders tracked: {stats['total_senders']}")
     console.print(f"  Unsubscribed: {stats['unsubscribed']}")
     console.print(f"  Kept: {stats['kept']}")
     console.print(f"  Pending review: {stats['pending_review']}")
     console.print(f"  Total runs: {stats['total_runs']}")
-    if stats['last_run']:
+    if stats["last_run"]:
         console.print(f"  Last run: {stats['last_run']}")
 
     # Schedule status
     schedule = get_schedule_status()
     if schedule:
-        console.print(f"\n[bold]Schedule[/bold]")
+        console.print("\n[bold]Schedule[/bold]")
         console.print(f"  Type: {schedule['type']}")
         console.print(f"  Frequency: {schedule['frequency']}")
     else:
@@ -365,45 +364,42 @@ def review():
     console.print(f"\n[bold]{len(senders)} senders need your decision:[/bold]\n")
 
     for sender in senders:
-        domain = sender['domain']
-        total = sender['total_emails']
-        subjects = sender.get('sample_subjects', '').split('|')[:3]
+        domain = sender["domain"]
+        total = sender["total_emails"]
+        subjects = sender.get("sample_subjects", "").split("|")[:3]
 
         console.print(f"[bold][{total} emails] {domain}[/bold]")
-        if sender.get('ai_classification'):
-            console.print(f"  AI says: {sender['ai_classification']} ({sender.get('ai_confidence', 0):.0%} confident)")
+        if sender.get("ai_classification"):
+            console.print(
+                f"  AI says: {sender['ai_classification']} ({sender.get('ai_confidence', 0):.0%} confident)"
+            )
         if subjects:
             console.print(f"  Subjects: {', '.join(subjects)}")
 
-        choice = Prompt.ask(
-            "  Decision",
-            choices=["u", "k", "b", "s"],
-            default="s"
-        )
+        choice = Prompt.ask("  Decision", choices=["u", "k", "b", "s"], default="s")
 
         if choice == "u":
             db.set_user_override(domain, "unsub")
             db.update_sender_status(domain, SenderStatus.UNSUBSCRIBED)
-            console.print(f"  [red]→ Will unsubscribe[/red]")
+            console.print("  [red]→ Will unsubscribe[/red]")
         elif choice == "k":
             db.set_user_override(domain, "keep")
             db.update_sender_status(domain, SenderStatus.KEEP)
-            console.print(f"  [green]→ Will keep[/green]")
+            console.print("  [green]→ Will keep[/green]")
         elif choice == "b":
             db.set_user_override(domain, "block")
             db.update_sender_status(domain, SenderStatus.BLOCKED)
-            console.print(f"  [blue]→ Will block[/blue]")
+            console.print("  [blue]→ Will block[/blue]")
         else:
-            console.print(f"  [yellow]→ Skipped[/yellow]")
+            console.print("  [yellow]→ Skipped[/yellow]")
 
         console.print()
 
 
 @main.command()
 @click.argument("domain", required=False)
-def undo(domain: Optional[str]):
+def undo(domain: str | None):
     """Undo recent unsubscribes."""
-    config = Config.load()
     db.init_db()
 
     if domain:
@@ -425,7 +421,9 @@ def undo(domain: Optional[str]):
     console.print("\n[bold]Recent unsubscribes (last 30 days):[/bold]\n")
 
     for i, item in enumerate(recent[:20], 1):
-        console.print(f"  {i}. {item['domain']} ({item['total_emails']} emails) - {item['attempted_at'][:10]}")
+        console.print(
+            f"  {i}. {item['domain']} ({item['total_emails']} emails) - {item['attempted_at'][:10]}"
+        )
 
     console.print("\nTo undo, run: [bold]nothx undo <domain>[/bold]")
 
@@ -440,7 +438,7 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
     if show_status or (not monthly and not weekly and not off):
         status = get_schedule_status()
         if status:
-            console.print(f"\n[bold]Current Schedule[/bold]")
+            console.print("\n[bold]Current Schedule[/bold]")
             console.print(f"  Type: {status['type']}")
             console.print(f"  Frequency: {status['frequency']}")
             console.print(f"  Path: {status['path']}")
@@ -468,13 +466,15 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
 @main.command("config")
 @click.option("--show", is_flag=True, help="Show current config")
 @click.option("--ai", type=click.Choice(["on", "off"]), help="Enable/disable AI")
-@click.option("--mode", type=click.Choice(["hands_off", "notify", "confirm"]), help="Set operation mode")
-def config_cmd(show: bool, ai: Optional[str], mode: Optional[str]):
+@click.option(
+    "--mode", type=click.Choice(["hands_off", "notify", "confirm"]), help="Set operation mode"
+)
+def config_cmd(show: bool, ai: str | None, mode: str | None):
     """View or modify configuration."""
     config = Config.load()
 
     if ai:
-        config.ai.enabled = (ai == "on")
+        config.ai.enabled = ai == "on"
         config.save()
         console.print(f"AI: {'enabled' if config.ai.enabled else 'disabled'}")
 
@@ -524,7 +524,7 @@ def rules():
     table.add_column("Created")
 
     for rule in rules_list:
-        table.add_row(rule['pattern'], rule['action'], rule['created_at'][:10])
+        table.add_row(rule["pattern"], rule["action"], rule["created_at"][:10])
 
     console.print(table)
 

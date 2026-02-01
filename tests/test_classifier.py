@@ -1,11 +1,10 @@
 """Tests for the classification system."""
 
-import pytest
 from datetime import datetime
 
-from nothx.models import SenderStats, Action, EmailType
-from nothx.classifier.patterns import PatternMatcher
 from nothx.classifier.heuristics import HeuristicScorer
+from nothx.classifier.patterns import PatternMatcher
+from nothx.models import Action, SenderStats
 
 
 class TestPatternMatcher:

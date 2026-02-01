@@ -1,27 +1,23 @@
 """Email scanning and sender aggregation for nothx."""
 
 from collections import defaultdict
-from datetime import datetime
-from typing import Optional
 
+from . import db
 from .config import Config
 from .imap import IMAPConnection
 from .models import EmailHeader, SenderStats
-from . import db
 
 
 class ScanResult:
     """Result of scanning inbox, containing stats and cached email headers."""
 
     def __init__(
-        self,
-        sender_stats: dict[str, SenderStats],
-        domain_emails: dict[str, list[EmailHeader]]
+        self, sender_stats: dict[str, SenderStats], domain_emails: dict[str, list[EmailHeader]]
     ):
         self.sender_stats = sender_stats
         self.domain_emails = domain_emails
 
-    def get_email_for_domain(self, domain: str) -> Optional[EmailHeader]:
+    def get_email_for_domain(self, domain: str) -> EmailHeader | None:
         """Get a sample email with unsubscribe header for a domain."""
         emails = self.domain_emails.get(domain, [])
         # Prefer emails with unsubscribe links
@@ -31,10 +27,7 @@ class ScanResult:
         return emails[0] if emails else None
 
 
-def scan_inbox(
-    config: Config,
-    account_name: Optional[str] = None
-) -> ScanResult:
+def scan_inbox(config: Config, account_name: str | None = None) -> ScanResult:
     """
     Scan inbox for marketing emails and aggregate by sender domain.
     Returns a ScanResult containing sender stats and cached email headers.
@@ -95,9 +88,7 @@ def scan_inbox(
 
 
 def get_emails_for_domain(
-    config: Config,
-    domain: str,
-    account_name: Optional[str] = None
+    config: Config, domain: str, account_name: str | None = None
 ) -> list[EmailHeader]:
     """Get all marketing emails for a specific domain."""
     account = config.get_account(account_name)

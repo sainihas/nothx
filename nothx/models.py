@@ -3,11 +3,11 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 
 class EmailType(Enum):
     """Types of emails that can be classified."""
+
     MARKETING = "marketing"
     TRANSACTIONAL = "transactional"
     SECURITY = "security"
@@ -18,6 +18,7 @@ class EmailType(Enum):
 
 class Action(Enum):
     """Actions that can be taken on an email sender."""
+
     KEEP = "keep"
     UNSUB = "unsub"
     BLOCK = "block"
@@ -26,6 +27,7 @@ class Action(Enum):
 
 class SenderStatus(Enum):
     """Status of a sender in the database."""
+
     UNKNOWN = "unknown"
     KEEP = "keep"
     UNSUBSCRIBED = "unsubscribed"
@@ -35,6 +37,7 @@ class SenderStatus(Enum):
 
 class UnsubMethod(Enum):
     """Methods for unsubscribing."""
+
     ONE_CLICK = "one-click"
     GET = "get"
     MAILTO = "mailto"
@@ -43,13 +46,14 @@ class UnsubMethod(Enum):
 @dataclass
 class EmailHeader:
     """Represents email header information."""
+
     sender: str
     subject: str
     date: datetime
     message_id: str
-    list_unsubscribe: Optional[str] = None
-    list_unsubscribe_post: Optional[str] = None
-    x_mailer: Optional[str] = None
+    list_unsubscribe: str | None = None
+    list_unsubscribe_post: str | None = None
+    x_mailer: str | None = None
     is_seen: bool = False
 
     @property
@@ -62,7 +66,7 @@ class EmailHeader:
         return email.split("@")[-1].lower()
 
     @property
-    def list_unsubscribe_url(self) -> Optional[str]:
+    def list_unsubscribe_url(self) -> str | None:
         """Extract HTTPS URL from List-Unsubscribe header."""
         if not self.list_unsubscribe:
             return None
@@ -73,7 +77,7 @@ class EmailHeader:
         return None
 
     @property
-    def list_unsubscribe_mailto(self) -> Optional[str]:
+    def list_unsubscribe_mailto(self) -> str | None:
         """Extract mailto from List-Unsubscribe header."""
         if not self.list_unsubscribe:
             return None
@@ -87,11 +91,12 @@ class EmailHeader:
 @dataclass
 class SenderStats:
     """Statistics about a sender."""
+
     domain: str
     total_emails: int = 0
     seen_emails: int = 0
-    first_seen: Optional[datetime] = None
-    last_seen: Optional[datetime] = None
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
     sample_subjects: list[str] = field(default_factory=list)
     has_unsubscribe: bool = False
 
@@ -106,6 +111,7 @@ class SenderStats:
 @dataclass
 class Classification:
     """Result of classifying an email/sender."""
+
     email_type: EmailType
     action: Action
     confidence: float
@@ -116,16 +122,18 @@ class Classification:
 @dataclass
 class UnsubResult:
     """Result of an unsubscribe attempt."""
+
     success: bool
-    method: Optional[UnsubMethod]
-    http_status: Optional[int] = None
-    error: Optional[str] = None
-    response_snippet: Optional[str] = None
+    method: UnsubMethod | None
+    http_status: int | None = None
+    error: str | None = None
+    response_snippet: str | None = None
 
 
 @dataclass
 class RunStats:
     """Statistics from a single run."""
+
     ran_at: datetime
     mode: str
     emails_scanned: int = 0

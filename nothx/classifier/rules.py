@@ -1,9 +1,7 @@
 """Layer 1: User-defined rules for classification."""
 
-from typing import Optional
-
-from ..models import SenderStats, Classification, Action, EmailType
 from .. import db
+from ..models import Action, Classification, EmailType, SenderStats
 from .utils import matches_pattern
 
 
@@ -11,7 +9,7 @@ class RulesMatcher:
     """Matches senders against user-defined rules."""
 
     def __init__(self):
-        self._rules: Optional[list[dict]] = None
+        self._rules: list[dict] | None = None
 
     def _load_rules(self) -> list[dict]:
         """Load rules from database."""
@@ -23,7 +21,7 @@ class RulesMatcher:
         """Force reload of rules from database."""
         self._rules = None
 
-    def match(self, sender: SenderStats) -> Optional[Classification]:
+    def match(self, sender: SenderStats) -> Classification | None:
         """
         Check if sender matches any user rule.
         Returns Classification if match found, None otherwise.

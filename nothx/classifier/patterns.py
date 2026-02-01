@@ -2,11 +2,9 @@
 
 import json
 from pathlib import Path
-from typing import Optional
 
-from ..models import SenderStats, Classification, Action, EmailType
+from ..models import Action, Classification, EmailType, SenderStats
 from .utils import matches_pattern
-
 
 # Default patterns shipped with nothx
 DEFAULT_PATTERNS = {
@@ -80,24 +78,24 @@ DEFAULT_PATTERNS = {
         # Known spam domains (examples)
         "*.spam.com",
         "*.junk.com",
-    ]
+    ],
 }
 
 
 class PatternMatcher:
     """Matches senders against preset patterns."""
 
-    def __init__(self, patterns_file: Optional[Path] = None):
+    def __init__(self, patterns_file: Path | None = None):
         self.patterns = self._load_patterns(patterns_file)
 
-    def _load_patterns(self, patterns_file: Optional[Path]) -> dict:
+    def _load_patterns(self, patterns_file: Path | None) -> dict:
         """Load patterns from file or use defaults."""
         if patterns_file and patterns_file.exists():
             with open(patterns_file) as f:
                 return json.load(f)
         return DEFAULT_PATTERNS
 
-    def match(self, sender: SenderStats) -> Optional[Classification]:
+    def match(self, sender: SenderStats) -> Classification | None:
         """
         Check if sender matches any preset pattern.
         Returns Classification if match found, None otherwise.

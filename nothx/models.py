@@ -59,12 +59,28 @@ class EmailHeader:
 
     @property
     def domain(self) -> str:
-        """Extract domain from sender email."""
-        if "<" in self.sender:
-            email = self.sender.split("<")[1].rstrip(">")
-        else:
-            email = self.sender
-        return email.split("@")[-1].lower()
+        """Extract domain from sender email.
+
+        Returns the domain part of the email address, or 'unknown' if invalid.
+        """
+        try:
+            if "<" in self.sender:
+                email = self.sender.split("<")[1].rstrip(">")
+            else:
+                email = self.sender
+
+            if "@" not in email:
+                return "unknown"
+
+            domain = email.split("@")[-1].lower().strip()
+
+            # Basic validation: domain must have at least one dot and no spaces
+            if not domain or " " in domain or "." not in domain:
+                return "unknown"
+
+            return domain
+        except (IndexError, AttributeError):
+            return "unknown"
 
     @property
     def list_unsubscribe_url(self) -> str | None:

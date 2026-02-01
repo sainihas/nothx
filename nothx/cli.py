@@ -2,6 +2,7 @@
 
 import csv
 import json
+import re
 from datetime import datetime
 
 import click
@@ -25,6 +26,17 @@ from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
 from .theme import console, print_animated_banner, print_banner
 from .unsubscriber import unsubscribe
+
+# Simple email validation regex
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+
+def _is_valid_email(email: str) -> bool:
+    """Validate email address format."""
+    if not email:
+        return False
+    return bool(EMAIL_REGEX.match(email.strip()))
+
 
 # Provider-specific app password instructions
 APP_PASSWORD_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
@@ -262,10 +274,14 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
     if provider is None:  # User cancelled
         return None
 
-    # Email address
-    email = questionary.text("Email address:").ask()
-    if not email:
-        return None
+    # Email address with validation
+    while True:
+        email = questionary.text("Email address:").ask()
+        if not email:
+            return None
+        if _is_valid_email(email):
+            break
+        console.print("[error]Invalid email format. Please enter a valid email address.[/error]")
 
     # App password instructions
     if instructions := APP_PASSWORD_INSTRUCTIONS.get(provider):

@@ -1,10 +1,16 @@
 """Configuration management for nothx."""
 
+from __future__ import annotations
+
 import json
+import logging
 import os
 import stat
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
+
+logger = logging.getLogger("nothx.config")
 
 
 def get_config_dir() -> Path:
@@ -33,6 +39,50 @@ class AccountConfig:
     password: str  # App password for Gmail
 
 
+def validate_api_base(api_base: str | None) -> str | None:
+    """Validate and sanitize API base URL.
+
+    - Requires valid URL format
+    - Enforces HTTPS for non-localhost URLs
+    - Returns normalized URL or None
+
+    Raises:
+        ValueError: If URL is invalid or insecure.
+    """
+    if api_base is None:
+        return None
+
+    api_base = api_base.strip()
+    if not api_base:
+        return None
+
+    try:
+        parsed = urlparse(api_base)
+    except ValueError as e:
+        raise ValueError(f"Invalid API base URL: {e}") from e
+
+    # Must have a scheme
+    if not parsed.scheme:
+        raise ValueError("API base URL must include scheme (http:// or https://)")
+
+    # Must be http or https
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"API base URL must use http or https, not {parsed.scheme}")
+
+    # Must have a host
+    if not parsed.netloc:
+        raise ValueError("API base URL must include a host")
+
+    # For non-localhost, require HTTPS
+    is_localhost = parsed.hostname in ("localhost", "127.0.0.1", "::1") or (
+        parsed.hostname and parsed.hostname.endswith(".local")
+    )
+    if not is_localhost and parsed.scheme != "https":
+        raise ValueError(f"API base URL must use HTTPS for non-localhost hosts. Got: {api_base}")
+
+    return api_base
+
+
 @dataclass
 class AIConfig:
     """Configuration for AI features."""
@@ -43,6 +93,15 @@ class AIConfig:
     model: str = "claude-sonnet-4-20250514"
     confidence_threshold: float = 0.80
     api_base: str | None = None  # Custom API endpoint (for Ollama or proxies)
+
+    def __post_init__(self):
+        """Validate configuration after initialization."""
+        if self.api_base is not None:
+            try:
+                self.api_base = validate_api_base(self.api_base)
+            except ValueError as e:
+                logger.warning("Invalid api_base, ignoring: %s", e)
+                self.api_base = None
 
 
 @dataclass
@@ -160,7 +219,7 @@ class Config:
         }
 
     @classmethod
-    def load(cls) -> "Config":
+    def load(cls) -> Config:
         """Load configuration from disk."""
         config_path = get_config_path()
         if not config_path.exists():
@@ -171,9 +230,16 @@ class Config:
 
         config = cls()
 
-        # Load accounts
+        # Load accounts with validation
         for name, acc_data in data.get("accounts", {}).items():
-            config.accounts[name] = AccountConfig(**acc_data)
+            try:
+                config.accounts[name] = AccountConfig(**acc_data)
+            except (TypeError, KeyError) as e:
+                logger.warning(
+                    "Failed to load account '%s': %s. Skipping.",
+                    name,
+                    e,
+                )
 
         config.default_account = data.get("default_account")
 

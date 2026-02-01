@@ -3,9 +3,21 @@
 import logging
 from typing import Any
 
-from .base import BaseAIProvider, ProviderResponse
+from .base import BaseAIProvider, ProviderError, ProviderErrorType, ProviderResponse
 
 logger = logging.getLogger("nothx.providers.anthropic")
+
+
+def _sanitize_error_message(error: Exception) -> str:
+    """Sanitize error message to avoid exposing API keys."""
+    msg = str(error)
+    # Common patterns that might contain API keys
+    sensitive_patterns = ["api_key=", "api-key=", "authorization:", "bearer ", "sk-"]
+    msg_lower = msg.lower()
+    for pattern in sensitive_patterns:
+        if pattern in msg_lower:
+            return "API error (details redacted for security)"
+    return msg
 
 
 class AnthropicProvider(BaseAIProvider):
@@ -51,21 +63,50 @@ class AnthropicProvider(BaseAIProvider):
 
     def complete(self, prompt: str, max_tokens: int = 4096) -> ProviderResponse:
         """Send prompt to Claude and get response."""
-        client = self._get_client()
-        response = client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            client = self._get_client()
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
-        return ProviderResponse(
-            text=response.content[0].text,
-            model=self.model,
-            usage={
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-            },
-        )
+            return ProviderResponse(
+                text=response.content[0].text,
+                model=self.model,
+                usage={
+                    "input_tokens": response.usage.input_tokens,
+                    "output_tokens": response.usage.output_tokens,
+                },
+            )
+        except ImportError:
+            raise
+        except Exception as e:
+            error_msg = _sanitize_error_message(e)
+            error_type = ProviderErrorType.UNKNOWN
+            retryable = False
+
+            # Detect specific error types
+            error_str = str(e).lower()
+            if "rate" in error_str or "limit" in error_str:
+                error_type = ProviderErrorType.RATE_LIMIT_ERROR
+                retryable = True
+            elif "auth" in error_str or "key" in error_str or "401" in error_str:
+                error_type = ProviderErrorType.AUTHENTICATION_ERROR
+            elif "timeout" in error_str:
+                error_type = ProviderErrorType.TIMEOUT_ERROR
+                retryable = True
+            elif "connect" in error_str:
+                error_type = ProviderErrorType.CONNECTION_ERROR
+                retryable = True
+
+            raise ProviderError(
+                error_type=error_type,
+                message=error_msg,
+                provider=self.name,
+                retryable=retryable,
+                cause=e,
+            ) from e
 
     def test_connection(self) -> tuple[bool, str]:
         """Test Anthropic API connection."""
@@ -83,4 +124,4 @@ class AnthropicProvider(BaseAIProvider):
         except ImportError:
             return False, "Anthropic SDK not installed. Run: pip install anthropic"
         except Exception as e:
-            return False, str(e)
+            return False, _sanitize_error_message(e)

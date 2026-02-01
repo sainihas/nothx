@@ -189,7 +189,9 @@ def init():
         result = _add_email_account(config)
         if result is None:
             if account_count == 0:
-                console.print("[warning]No accounts configured. Run 'nothx init' to try again.[/warning]")
+                console.print(
+                    "[warning]No accounts configured. Run 'nothx init' to try again.[/warning]"
+                )
                 return
             break
 
@@ -1044,7 +1046,10 @@ def search(pattern: str, as_json: bool):
                 last_seen = last_seen[:10] if last_seen else ""
 
         console.print(f"  [domain]{domain}[/domain]")
-        console.print(f"    Status: [{style}]{status.title()}[/{style}]" + (f" ({last_seen})" if last_seen else ""))
+        console.print(
+            f"    Status: [{style}]{status.title()}[/{style}]"
+            + (f" ({last_seen})" if last_seen else "")
+        )
         console.print(f"    Emails: [count]{total}[/count] total")
         if subjects and subjects[0]:
             console.print(f"    Subjects: {', '.join(s for s in subjects[:3] if s)}")
@@ -1087,15 +1092,22 @@ def history(limit: int, failures: bool, as_json: bool):
             senders = entry.get("unique_senders", 0)
             unsubbed = entry.get("auto_unsubbed", 0)
             failed = entry.get("failed", 0)
-            console.print(f"[muted]{date_str}[/muted]  ◉ Scan completed: {scanned} emails, {senders} senders, {unsubbed} unsubscribed" + (f", {failed} failed" if failed else ""))
+            console.print(
+                f"[muted]{date_str}[/muted]  ◉ Scan completed: {scanned} emails, {senders} senders, {unsubbed} unsubscribed"
+                + (f", {failed} failed" if failed else "")
+            )
         else:
             domain = entry.get("domain", "unknown")
             success = entry.get("success", False)
             if success:
-                console.print(f"[muted]{date_str}[/muted]  [success]✓[/success] Unsubscribed from [domain]{domain}[/domain]")
+                console.print(
+                    f"[muted]{date_str}[/muted]  [success]✓[/success] Unsubscribed from [domain]{domain}[/domain]"
+                )
             else:
                 error = entry.get("error", "unknown error")
-                console.print(f"[muted]{date_str}[/muted]  [error]✗[/error] Failed to unsubscribe from [domain]{domain}[/domain] ({error[:30]})")
+                console.print(
+                    f"[muted]{date_str}[/muted]  [error]✗[/error] Failed to unsubscribe from [domain]{domain}[/domain] ({error[:30]})"
+                )
 
 
 @main.command()
@@ -1115,13 +1127,34 @@ def export(type_: str, output: str):
         if not data:
             console.print("[warning]No senders to export.[/warning]")
             return
-        fieldnames = ["domain", "total_emails", "seen_emails", "status", "first_seen", "last_seen", "has_unsubscribe", "sample_subjects"]
+        fieldnames = [
+            "domain",
+            "total_emails",
+            "seen_emails",
+            "status",
+            "first_seen",
+            "last_seen",
+            "has_unsubscribe",
+            "sample_subjects",
+        ]
     else:
         data = db.get_activity_log(limit=1000)
         if not data:
             console.print("[warning]No history to export.[/warning]")
             return
-        fieldnames = ["type", "timestamp", "domain", "success", "method", "error", "emails_scanned", "unique_senders", "auto_unsubbed", "failed", "mode"]
+        fieldnames = [
+            "type",
+            "timestamp",
+            "domain",
+            "success",
+            "method",
+            "error",
+            "emails_scanned",
+            "unique_senders",
+            "auto_unsubbed",
+            "failed",
+            "mode",
+        ]
 
     try:
         with open(output, "w", newline="") as f:
@@ -1198,7 +1231,9 @@ def reset(keep_config: bool):
             config_path.unlink()
             console.print("[success]✓ Configuration file deleted[/success]")
 
-    console.print(f"[success]✓ Cleared {senders_deleted} senders and {unsubs_deleted} unsubscribe logs[/success]")
+    console.print(
+        f"[success]✓ Cleared {senders_deleted} senders and {unsubs_deleted} unsubscribe logs[/success]"
+    )
     console.print("\nRun [bold]nothx init[/bold] to start fresh.")
 
 
@@ -1220,7 +1255,7 @@ def completion(shell: str):
 
     if shell == "bash":
         # Bash completion script
-        script = f'''
+        script = f"""
 _nothx_completion() {{
     local IFS=$'\\n'
     COMPREPLY=( $(env COMP_WORDS="${{COMP_WORDS[*]}}" \\
@@ -1229,10 +1264,10 @@ _nothx_completion() {{
     return 0
 }}
 complete -o default -F _nothx_completion {prog_name}
-'''
+"""
     elif shell == "zsh":
         # Zsh completion script
-        script = f'''
+        script = f"""
 #compdef {prog_name}
 
 _nothx_completion() {{
@@ -1263,10 +1298,10 @@ _nothx_completion() {{
 }}
 
 compdef _nothx_completion {prog_name}
-'''
+"""
     else:  # fish
         # Fish completion script
-        script = f'''
+        script = f"""
 function _nothx_completion;
     set -l response (env _{prog_name.upper()}_COMPLETE=fish_complete COMP_WORDS=(commandline -cp) COMP_CWORD=(commandline -t) {prog_name});
 
@@ -1284,7 +1319,7 @@ function _nothx_completion;
 end;
 
 complete --no-files --command {prog_name} --arguments "(_nothx_completion)";
-'''
+"""
 
     click.echo(script.strip())
 

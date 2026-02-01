@@ -4,29 +4,28 @@ from rich.console import Console
 from rich.theme import Theme
 
 # Semantic color theme for consistent UI
-NOTHX_THEME = Theme({
-    # Actions
-    "success": "green",
-    "error": "bold red",
-    "warning": "yellow",
-    "info": "cyan",
-
-    # Email actions (grouped by meaning)
-    "unsubscribe": "red",
-    "keep": "green",
-    "block": "bold red",
-    "review": "yellow",
-
-    # UI elements
-    "header": "bold white",
-    "muted": "dim",
-    "highlight": "bold cyan",
-    "domain": "cyan",
-    "count": "magenta",
-
-    # Banner
-    "logo": "orange1",
-})
+NOTHX_THEME = Theme(
+    {
+        # Actions
+        "success": "green",
+        "error": "bold red",
+        "warning": "yellow",
+        "info": "cyan",
+        # Email actions (grouped by meaning)
+        "unsubscribe": "red",
+        "keep": "green",
+        "block": "bold red",
+        "review": "yellow",
+        # UI elements
+        "header": "bold white",
+        "muted": "dim",
+        "highlight": "bold cyan",
+        "domain": "cyan",
+        "count": "magenta",
+        # Banner
+        "logo": "orange1",
+    }
+)
 
 # Shared console instance with theme applied
 console = Console(theme=NOTHX_THEME)

@@ -346,9 +346,7 @@ def get_stats() -> dict:
         }
 
 
-def get_all_senders(
-    status_filter: str | None = None, sort_by: str = "last_seen"
-) -> list[dict]:
+def get_all_senders(status_filter: str | None = None, sort_by: str = "last_seen") -> list[dict]:
     """Get all senders with optional filtering and sorting.
 
     Args:

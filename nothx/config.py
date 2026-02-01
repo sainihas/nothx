@@ -37,10 +37,11 @@ class AIConfig:
     """Configuration for AI features."""
 
     enabled: bool = True
-    provider: str = "anthropic"  # "anthropic", "ollama", or "none"
+    provider: str = "anthropic"  # "anthropic", "openai", "gemini", "ollama", or "none"
     api_key: str | None = None
     model: str = "claude-sonnet-4-20250514"
     confidence_threshold: float = 0.80
+    api_base: str | None = None  # Custom API endpoint (for Ollama or proxies)
 
 
 @dataclass

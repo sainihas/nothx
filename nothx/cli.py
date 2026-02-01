@@ -12,11 +12,11 @@ from rich.prompt import Confirm
 from rich.table import Table
 
 from . import __version__, db
-from .classifier import ClassificationEngine
+from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
 from .config import AccountConfig, Config, get_config_dir
 from .imap import test_account
-from .models import Action, RunStats, SenderStatus
+from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
 from .theme import console, print_banner
@@ -105,13 +105,77 @@ def _show_welcome_screen() -> None:
     elif selected == "run":
         ctx.invoke(run, auto=False, dry_run=False, verbose=False, account=())
     elif selected == "status":
-        ctx.invoke(status)
+        ctx.invoke(status, learning=False)
     elif selected == "review":
         ctx.invoke(review, show_all=False, show_keep=False, show_unsub=False)
     elif selected == "senders":
         ctx.invoke(senders, status=None, sort="date", as_json=False)
     elif selected == "help":
         console.print(ctx.get_help())
+
+
+def _show_learning_status(config: Config) -> None:
+    """Show learning system status and insights."""
+    learner = get_learner()
+    summary = learner.get_learning_summary()
+
+    console.print("\n[header]Learning Status[/header]")
+    console.print("=" * 40)
+
+    # Overall stats
+    console.print("\n[header]Training Data[/header]")
+    console.print(f"  Total decisions learned from: [count]{summary['total_actions']}[/count]")
+    console.print(f"  Corrections (overrode AI): [count]{summary['total_corrections']}[/count]")
+
+    # Learned preferences
+    console.print("\n[header]Your Preferences[/header]")
+
+    # Open rate importance
+    open_rate_desc = {
+        "low": "Low (you often keep unread emails)",
+        "high": "High (you rely heavily on open rates)",
+        "normal": "Normal (default behavior)",
+    }
+    importance = summary.get("open_rate_importance", "normal")
+    console.print(f"  Open rate importance: {open_rate_desc.get(importance, importance)}")
+
+    # Volume sensitivity
+    volume_desc = {
+        "low": "Low (you tolerate high-volume senders)",
+        "high": "High (you unsub from frequent senders)",
+        "normal": "Normal (default behavior)",
+    }
+    sensitivity = summary.get("volume_sensitivity", "normal")
+    console.print(f"  Volume sensitivity: {volume_desc.get(sensitivity, sensitivity)}")
+
+    # Keyword patterns
+    keyword_patterns = summary.get("keyword_patterns", [])
+    if keyword_patterns:
+        console.print(f"\n[header]Learned Patterns ({len(keyword_patterns)})[/header]")
+        for pattern in keyword_patterns[:10]:  # Show top 10
+            keyword = pattern["keyword"]
+            tendency = pattern["tendency"]
+            strength = pattern["strength"]
+            count = pattern["sample_count"]
+
+            if tendency == "keep":
+                console.print(f'  [keep]●[/keep] "{keyword}" → {strength} keep ({count} examples)')
+            else:
+                console.print(
+                    f'  [unsubscribe]●[/unsubscribe] "{keyword}" → {strength} unsub ({count} examples)'
+                )
+    else:
+        console.print(
+            "\n[muted]No keyword patterns learned yet. Make more decisions to build patterns.[/muted]"
+        )
+
+    # AI analysis prompt
+    if summary["total_actions"] >= 10 and config.ai.enabled:
+        console.print(
+            f"\n[muted]Tip: AI pattern analysis is available with {summary['total_actions']} decisions.[/muted]"
+        )
+
+    console.print()
 
 
 @click.group(invoke_without_command=True)
@@ -717,7 +781,8 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
 
 
 @main.command()
-def status():
+@click.option("--learning", is_flag=True, help="Show learning insights and preferences")
+def status(learning: bool):
     """Show current nothx status."""
     config = Config.load()
 
@@ -726,6 +791,11 @@ def status():
         return
 
     db.init_db()
+
+    # If --learning flag, show learning status instead
+    if learning:
+        _show_learning_status(config)
+        return
 
     console.print("\n[header]nothx Status[/header]")
     console.print("=" * 40)
@@ -862,16 +932,53 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
             db.set_user_override(domain, "unsub")
             db.update_sender_status(domain, SenderStatus.UNSUBSCRIBED)
             console.print("  [unsubscribe]→ Will unsubscribe[/unsubscribe]")
+            user_action = Action.UNSUB
         elif choice == "keep":
             db.set_user_override(domain, "keep")
             db.update_sender_status(domain, SenderStatus.KEEP)
             console.print("  [keep]→ Will keep[/keep]")
+            user_action = Action.KEEP
         elif choice == "block":
             db.set_user_override(domain, "block")
             db.update_sender_status(domain, SenderStatus.BLOCKED)
             console.print("  [block]→ Will block[/block]")
+            user_action = Action.BLOCK
         else:
             console.print("  [review]→ Skipped[/review]")
+            user_action = None
+
+        # Log user action for learning (if not skipped)
+        if user_action is not None:
+            # Get AI recommendation if available
+            ai_rec = None
+            if ai_class_str := sender.get("ai_classification"):
+                # Normalize 'unsubscribe' to 'unsub' for enum matching
+                if ai_class_str == "unsubscribe":
+                    ai_class_str = "unsub"
+                try:
+                    ai_rec = Action(ai_class_str)
+                except ValueError:
+                    pass  # ai_rec remains None for unknown values
+
+            # Calculate open rate
+            seen = sender.get("seen_emails", 0)
+            open_rate = (seen / total * 100) if total > 0 else 0
+
+            # Log the action
+            action_record = UserAction(
+                domain=domain,
+                action=user_action,
+                timestamp=datetime.now(),
+                ai_recommendation=ai_rec,
+                heuristic_score=None,  # Not available in review context
+                open_rate=open_rate,
+                email_count=total,
+            )
+            db.log_user_action(action_record)
+
+            # Update learner with this action
+            learner = get_learner()
+            learner.update_from_action(action_record)
 
         console.print()
 
@@ -883,12 +990,36 @@ def undo(domain: str | None):
     db.init_db()
 
     if domain:
-        # Undo specific domain
+        # Undo specific domain - this is a correction (user changed their mind)
         db.set_user_override(domain, "keep")
         db.update_sender_status(domain, SenderStatus.KEEP)
         db.log_correction(domain, "unsub", "keep")
+
+        # Get sender info for learning
+        sender = db.get_sender(domain)
+        if sender:
+            seen = sender.get("seen_emails", 0)
+            total = sender.get("total_emails", 0)
+            open_rate = (seen / total * 100) if total > 0 else 0
+
+            # Log the action for learning
+            action_record = UserAction(
+                domain=domain,
+                action=Action.KEEP,
+                timestamp=datetime.now(),
+                ai_recommendation=Action.UNSUB,  # Undo means AI/system said unsub
+                heuristic_score=None,
+                open_rate=open_rate,
+                email_count=total,
+            )
+            db.log_user_action(action_record)
+
+            # Update learner
+            learner = get_learner()
+            learner.update_from_action(action_record)
+
         console.print(f"[success]✓ Marked {domain} as 'keep'[/success]")
-        console.print("[muted]AI will learn from this correction.[/muted]")
+        console.print("[muted]Learning from this correction.[/muted]")
         return
 
     # Show recent unsubscribes

@@ -1,10 +1,29 @@
 """Tests for the classification system."""
 
+import tempfile
 from datetime import datetime
+from pathlib import Path
+from unittest.mock import patch
 
+import pytest
+
+from nothx import db
+from nothx.classifier import reset_learner
 from nothx.classifier.heuristics import HeuristicScorer
 from nothx.classifier.patterns import PatternMatcher
 from nothx.models import Action, SenderStats
+
+
+@pytest.fixture
+def temp_db():
+    """Create a temporary database for testing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        with patch("nothx.db.get_db_path", return_value=db_path):
+            db.init_db()
+            reset_learner()  # Reset learner to use fresh DB
+            yield db_path
+            reset_learner()  # Clean up after test
 
 
 class TestPatternMatcher:
@@ -56,51 +75,52 @@ class TestPatternMatcher:
 class TestHeuristicScorer:
     """Tests for heuristic scoring."""
 
-    def setup_method(self):
-        self.scorer = HeuristicScorer()
-
-    def test_never_opened_high_score(self):
+    def test_never_opened_high_score(self, temp_db):
         """Test that never-opened emails get high spam score."""
+        scorer = HeuristicScorer()
         sender = SenderStats(
             domain="promo.store.com",
             total_emails=20,
             seen_emails=0,
             sample_subjects=["50% OFF SALE!", "Limited Time Offer"],
         )
-        score = self.scorer.score(sender)
+        score = scorer.score(sender)
         assert score >= 70  # High spam score
 
-    def test_high_engagement_low_score(self):
+    def test_high_engagement_low_score(self, temp_db):
         """Test that high engagement leads to low spam score."""
+        scorer = HeuristicScorer()
         sender = SenderStats(
             domain="newsletter.goodsite.com",
             total_emails=10,
             seen_emails=8,  # 80% open rate
             sample_subjects=["Weekly Update", "New Article Published"],
         )
-        score = self.scorer.score(sender)
+        score = scorer.score(sender)
         assert score <= 40  # Low spam score
 
-    def test_transactional_subjects_low_score(self):
+    def test_transactional_subjects_low_score(self, temp_db):
         """Test that transactional subject lines lower spam score."""
+        scorer = HeuristicScorer()
         sender = SenderStats(
             domain="notifications.store.com",
             total_emails=5,
             seen_emails=3,
             sample_subjects=["Your order #12345 has shipped", "Receipt for your purchase"],
         )
-        score = self.scorer.score(sender)
+        score = scorer.score(sender)
         assert score <= 50
 
-    def test_cold_outreach_detected(self):
+    def test_cold_outreach_detected(self, temp_db):
         """Test that cold outreach patterns are detected."""
+        scorer = HeuristicScorer()
         sender = SenderStats(
             domain="sales.company.io",
             total_emails=3,
             seen_emails=0,
             sample_subjects=["Quick question about your company", "Following up on my last email"],
         )
-        result = self.scorer.classify(sender)
+        result = scorer.classify(sender)
         # Should either be high score or detected as cold outreach
         assert result is None or result.action in (Action.UNSUB, Action.BLOCK)
 

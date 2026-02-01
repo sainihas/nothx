@@ -143,3 +143,33 @@ class RunStats:
     kept: int = 0
     review_queued: int = 0
     failed: int = 0
+
+
+@dataclass
+class UserAction:
+    """A user's decision on a sender, used for learning."""
+
+    domain: str
+    action: Action
+    timestamp: datetime
+    ai_recommendation: Action | None = None
+    heuristic_score: int | None = None
+    open_rate: float | None = None
+    email_count: int | None = None
+
+    @property
+    def was_correction(self) -> bool:
+        """Check if this action differed from AI recommendation."""
+        return self.ai_recommendation is not None and self.action != self.ai_recommendation
+
+
+@dataclass
+class UserPreference:
+    """A learned user preference for classification."""
+
+    feature: str  # e.g., "open_rate_weight", "keyword:bank", "volume_threshold"
+    value: float
+    confidence: float
+    sample_count: int
+    last_updated: datetime
+    source: str = "learned"  # "learned", "ai", "default"

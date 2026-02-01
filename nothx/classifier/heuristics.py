@@ -3,6 +3,7 @@
 import re
 
 from ..models import Action, Classification, EmailType, SenderStats
+from .learner import get_learner
 
 # Spam signal patterns
 SPAM_SUBJECT_PATTERNS = [
@@ -46,32 +47,55 @@ COLD_OUTREACH_PATTERNS = [
 
 
 class HeuristicScorer:
-    """Scores senders using rule-based heuristics."""
+    """Scores senders using rule-based heuristics with learned preferences."""
+
+    def __init__(self) -> None:
+        """Initialize the scorer with access to the learner."""
+        self._learner = get_learner()
 
     def score(self, sender: SenderStats) -> int:
         """
         Calculate a spam score for a sender (0-100).
         Higher score = more likely to be unwanted marketing.
+
+        Now includes learned preference adjustments.
         """
+        # Get learned preference adjustments
+        adjustments = self._learner.get_preference_adjustments(sender)
+        open_rate_weight = adjustments.get("open_rate_weight", 1.0)
+        volume_weight = adjustments.get("volume_weight", 1.0)
+        keyword_boost = adjustments.get("keyword_boost", 0)
+
         score = 50  # Start neutral
 
-        # Open rate is a strong signal
-        if sender.open_rate == 0 and sender.total_emails >= 5:
-            score += 25  # Never opened = probably spam
-        elif sender.open_rate < 10:
-            score += 15
-        elif sender.open_rate < 25:
-            score += 5
-        elif sender.open_rate > 75:
-            score -= 30  # Very high engagement = definitely keep
-        elif sender.open_rate > 50:
-            score -= 20  # High engagement = keep
+        # Apply keyword boost from learned patterns
+        score += keyword_boost
 
-        # High volume is a signal
+        # Open rate scoring (now with learned weight)
+        open_rate_adjustment = 0
+        if sender.open_rate == 0 and sender.total_emails >= 5:
+            open_rate_adjustment = 25  # Never opened = probably spam
+        elif sender.open_rate < 10:
+            open_rate_adjustment = 15
+        elif sender.open_rate < 25:
+            open_rate_adjustment = 5
+        elif sender.open_rate > 75:
+            open_rate_adjustment = -30  # Very high engagement = definitely keep
+        elif sender.open_rate > 50:
+            open_rate_adjustment = -20  # High engagement = keep
+
+        # Apply learned open rate weight
+        score += int(open_rate_adjustment * open_rate_weight)
+
+        # Volume scoring (now with learned weight)
+        volume_adjustment = 0
         if sender.total_emails > 50:
-            score += 10
+            volume_adjustment = 10
         elif sender.total_emails > 20:
-            score += 5
+            volume_adjustment = 5
+
+        # Apply learned volume weight
+        score += int(volume_adjustment * volume_weight)
 
         # Check subject patterns
         for subject in sender.sample_subjects:

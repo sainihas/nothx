@@ -301,7 +301,9 @@ def init():
     # AI Provider setup
     console.print("\n[header]AI Classification Setup[/header]")
     console.print("nothx can use AI to classify your emails more accurately.")
-    console.print("Your email [bold]headers only[/bold] (never bodies) are sent to the AI provider.\n")
+    console.print(
+        "Your email [bold]headers only[/bold] (never bodies) are sent to the AI provider.\n"
+    )
 
     from .classifier.providers import SUPPORTED_PROVIDERS
 

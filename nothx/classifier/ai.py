@@ -350,9 +350,7 @@ class AIPatternAnalyzer:
             action_descriptions.append(desc)
 
         # Build prompt
-        prompt = PATTERN_ANALYSIS_PROMPT.format(
-            actions=json.dumps(action_descriptions, indent=2)
-        )
+        prompt = PATTERN_ANALYSIS_PROMPT.format(actions=json.dumps(action_descriptions, indent=2))
 
         try:
             response = provider.complete(prompt, max_tokens=2048)

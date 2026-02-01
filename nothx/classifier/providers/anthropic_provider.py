@@ -40,9 +40,7 @@ class AnthropicProvider(BaseAIProvider):
 
                 self._client = anthropic.Anthropic(api_key=self.api_key)
             except ImportError:
-                raise ImportError(
-                    "Anthropic SDK not installed. Run: pip install anthropic"
-                )
+                raise ImportError("Anthropic SDK not installed. Run: pip install anthropic")
         return self._client
 
     def is_available(self) -> bool:

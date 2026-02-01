@@ -63,12 +63,8 @@ class GeminiProvider(BaseAIProvider):
         usage = None
         if hasattr(response, "usage_metadata") and response.usage_metadata:
             usage = {
-                "input_tokens": getattr(
-                    response.usage_metadata, "prompt_token_count", 0
-                ),
-                "output_tokens": getattr(
-                    response.usage_metadata, "candidates_token_count", 0
-                ),
+                "input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
+                "output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
             }
 
         return ProviderResponse(
@@ -90,6 +86,9 @@ class GeminiProvider(BaseAIProvider):
             )
             return True, "Connection successful"
         except ImportError:
-            return False, "Google Generative AI SDK not installed. Run: pip install google-generativeai"
+            return (
+                False,
+                "Google Generative AI SDK not installed. Run: pip install google-generativeai",
+            )
         except Exception as e:
             return False, str(e)

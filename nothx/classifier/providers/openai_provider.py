@@ -44,15 +44,12 @@ class OpenAIProvider(BaseAIProvider):
             try:
                 from openai import OpenAI
 
-                kwargs = {"api_key": self.api_key}
                 if self.api_base:
-                    kwargs["base_url"] = self.api_base
-
-                self._client = OpenAI(**kwargs)
+                    self._client = OpenAI(api_key=self.api_key, base_url=self.api_base)
+                else:
+                    self._client = OpenAI(api_key=self.api_key)
             except ImportError:
-                raise ImportError(
-                    "OpenAI SDK not installed. Run: pip install openai"
-                )
+                raise ImportError("OpenAI SDK not installed. Run: pip install openai")
         return self._client
 
     def is_available(self) -> bool:

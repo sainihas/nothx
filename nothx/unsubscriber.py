@@ -1,5 +1,6 @@
 """Unsubscribe execution for nothx."""
 
+import fnmatch
 import logging
 import smtplib
 import urllib.parse
@@ -10,6 +11,19 @@ from . import db
 from .config import AccountConfig, Config
 from .errors import RateLimiter, safe_truncate
 from .models import EmailHeader, SenderStatus, UnsubMethod, UnsubResult
+
+
+class UnsafeUnsubscribeError(Exception):
+    """Raised when attempting to unsubscribe from a protected domain."""
+
+    pass
+
+
+class InvalidProviderError(Exception):
+    """Raised when an invalid email provider is specified."""
+
+    pass
+
 
 logger = logging.getLogger("nothx.unsubscriber")
 
@@ -25,13 +39,33 @@ REQUEST_TIMEOUT = 30
 _http_rate_limiter = RateLimiter(requests_per_second=2.0, burst_size=5)
 
 
+def _is_protected_domain(domain: str, safety_config) -> bool:
+    """Check if a domain matches any protected pattern."""
+    domain_lower = domain.lower()
+    for pattern in safety_config.never_unsub_domains:
+        pattern_lower = pattern.lower()
+        if fnmatch.fnmatch(domain_lower, pattern_lower):
+            return True
+    return False
+
+
 def unsubscribe(
     email_header: EmailHeader, config: Config, account: AccountConfig | None = None
 ) -> UnsubResult:
     """
     Attempt to unsubscribe from a sender.
     Tries methods in order: one-click POST > GET > mailto.
+
+    Raises:
+        UnsafeUnsubscribeError: If the domain matches a protected pattern.
     """
+    # Safety check: Never unsubscribe from protected domains
+    if _is_protected_domain(email_header.domain, config.safety):
+        raise UnsafeUnsubscribeError(
+            f"Cannot unsubscribe from protected domain: {email_header.domain}. "
+            "This domain matches a pattern in your safety configuration."
+        )
+
     # Method 1: RFC 8058 One-Click POST (best method)
     if email_header.list_unsubscribe_post and email_header.list_unsubscribe_url:
         result = _execute_one_click(email_header.list_unsubscribe_url)
@@ -200,15 +234,27 @@ def _execute_mailto(mailto: str, account: AccountConfig, config: Config) -> Unsu
         )
 
 
+# Valid SMTP providers - reject any provider not in this whitelist
+SMTP_CONFIGS = {
+    "gmail": ("smtp.gmail.com", 465, False),
+    "outlook": ("smtp-mail.outlook.com", 465, False),
+    "yahoo": ("smtp.mail.yahoo.com", 465, False),
+    "icloud": ("smtp.mail.me.com", 587, True),  # STARTTLS
+}
+
+
 def _get_smtp_config(provider: str) -> tuple[str, int, bool]:
-    """Get SMTP config for email provider. Returns (server, port, use_starttls)."""
-    configs = {
-        "gmail": ("smtp.gmail.com", 465, False),
-        "outlook": ("smtp-mail.outlook.com", 465, False),
-        "yahoo": ("smtp.mail.yahoo.com", 465, False),
-        "icloud": ("smtp.mail.me.com", 587, True),  # STARTTLS
-    }
-    return configs.get(provider, (provider, 465, False))
+    """Get SMTP config for email provider. Returns (server, port, use_starttls).
+
+    Raises:
+        InvalidProviderError: If the provider is not in the whitelist.
+    """
+    if provider not in SMTP_CONFIGS:
+        valid_providers = ", ".join(sorted(SMTP_CONFIGS.keys()))
+        raise InvalidProviderError(
+            f"Unknown email provider: '{provider}'. Valid providers are: {valid_providers}"
+        )
+    return SMTP_CONFIGS[provider]
 
 
 def _check_success_indicators(body: str) -> bool:

@@ -3,9 +3,21 @@
 import logging
 from typing import Any
 
-from .base import BaseAIProvider, ProviderResponse
+from .base import BaseAIProvider, ProviderError, ProviderErrorType, ProviderResponse
 
 logger = logging.getLogger("nothx.providers.openai")
+
+
+def _sanitize_error_message(error: Exception) -> str:
+    """Sanitize error message to avoid exposing API keys."""
+    msg = str(error)
+    # Common patterns that might contain API keys
+    sensitive_patterns = ["api_key=", "api-key=", "authorization:", "bearer ", "sk-"]
+    msg_lower = msg.lower()
+    for pattern in sensitive_patterns:
+        if pattern in msg_lower:
+            return "API error (details redacted for security)"
+    return msg
 
 
 class OpenAIProvider(BaseAIProvider):
@@ -58,25 +70,75 @@ class OpenAIProvider(BaseAIProvider):
 
     def complete(self, prompt: str, max_tokens: int = 4096) -> ProviderResponse:
         """Send prompt to GPT and get response."""
-        client = self._get_client()
-        response = client.chat.completions.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            from openai import (
+                APIConnectionError,
+                APITimeoutError,
+                AuthenticationError,
+                RateLimitError,
+            )
 
-        usage = None
-        if response.usage:
-            usage = {
-                "input_tokens": response.usage.prompt_tokens,
-                "output_tokens": response.usage.completion_tokens,
-            }
+            client = self._get_client()
+            response = client.chat.completions.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
-        return ProviderResponse(
-            text=response.choices[0].message.content or "",
-            model=self.model,
-            usage=usage,
-        )
+            usage = None
+            if response.usage:
+                usage = {
+                    "input_tokens": response.usage.prompt_tokens,
+                    "output_tokens": response.usage.completion_tokens,
+                }
+
+            return ProviderResponse(
+                text=response.choices[0].message.content or "",
+                model=self.model,
+                usage=usage,
+            )
+        except ImportError:
+            raise
+        except RateLimitError as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.RATE_LIMIT_ERROR,
+                message=str(e),
+                provider=self.name,
+                retryable=True,
+                cause=e,
+            ) from e
+        except AuthenticationError as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.AUTHENTICATION_ERROR,
+                message=_sanitize_error_message(e),
+                provider=self.name,
+                retryable=False,
+                cause=e,
+            ) from e
+        except APITimeoutError as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.TIMEOUT_ERROR,
+                message=str(e),
+                provider=self.name,
+                retryable=True,
+                cause=e,
+            ) from e
+        except APIConnectionError as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.CONNECTION_ERROR,
+                message=str(e),
+                provider=self.name,
+                retryable=True,
+                cause=e,
+            ) from e
+        except Exception as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.UNKNOWN,
+                message=_sanitize_error_message(e),
+                provider=self.name,
+                retryable=False,
+                cause=e,
+            ) from e
 
     def test_connection(self) -> tuple[bool, str]:
         """Test OpenAI API connection."""
@@ -94,4 +156,4 @@ class OpenAIProvider(BaseAIProvider):
         except ImportError:
             return False, "OpenAI SDK not installed. Run: pip install openai"
         except Exception as e:
-            return False, str(e)
+            return False, _sanitize_error_message(e)

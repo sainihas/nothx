@@ -62,13 +62,13 @@ def _show_welcome_screen() -> None:
         # Database not initialized or inaccessible - skip stats
         pass
 
-    console.print(f"[muted]{' · '.join(status_parts)}[/muted]")
+    console.print(f"[dim]{' · '.join(status_parts)}[/dim]")
 
     # Separator
-    console.print("\n[muted]" + "─" * 50 + "[/muted]")
+    console.print("\n[dim]" + "─" * 50 + "[/dim]")
 
     # Get started section with interactive selector
-    console.print("\n[header]Get started[/header]\n")
+    console.print("\n[bold]Get started[/bold]\n")
 
     # Build command choices based on configuration state
     if not config.accounts:

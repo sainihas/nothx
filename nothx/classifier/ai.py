@@ -2,6 +2,7 @@
 
 import json
 import logging
+from typing import Any
 
 from .. import db
 from ..config import Config
@@ -64,7 +65,7 @@ class AIClassifier:
 
     def __init__(self, config: Config):
         self.config = config
-        self._client = None
+        self._client: Any = None
 
     def _get_client(self):
         """Get or create Anthropic client."""

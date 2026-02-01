@@ -390,26 +390,34 @@ def search_senders(pattern: str) -> list[dict]:
 def get_activity_log(limit: int = 50, failures_only: bool = False) -> list[dict]:
     """Get recent activity log combining runs and unsubscribe attempts.
 
+    Args:
+        limit: Maximum number of entries to return
+        failures_only: If True, only return failed unsubscribe attempts (skips runs)
+
     Returns a unified log of activity sorted by timestamp.
     """
     with get_db() as conn:
-        # Get runs
-        runs = conn.execute(
-            """
-            SELECT
-                'run' as type,
-                ran_at as timestamp,
-                emails_scanned,
-                unique_senders,
-                auto_unsubbed,
-                failed,
-                mode
-            FROM runs
-            ORDER BY ran_at DESC
-            LIMIT ?
-        """,
-            (limit,),
-        ).fetchall()
+        all_activity: list[dict] = []
+
+        # Get runs (skip when showing failures only, since runs aren't "failures")
+        if not failures_only:
+            runs = conn.execute(
+                """
+                SELECT
+                    'run' as type,
+                    ran_at as timestamp,
+                    emails_scanned,
+                    unique_senders,
+                    auto_unsubbed,
+                    failed,
+                    mode
+                FROM runs
+                ORDER BY ran_at DESC
+                LIMIT ?
+            """,
+                (limit,),
+            ).fetchall()
+            all_activity.extend(dict(row) for row in runs)
 
         # Get unsubscribe attempts
         unsub_query = """
@@ -427,9 +435,9 @@ def get_activity_log(limit: int = 50, failures_only: bool = False) -> list[dict]
         unsub_query += " ORDER BY attempted_at DESC LIMIT ?"
 
         unsubs = conn.execute(unsub_query, (limit,)).fetchall()
+        all_activity.extend(dict(row) for row in unsubs)
 
         # Combine and sort
-        all_activity = [dict(row) for row in runs] + [dict(row) for row in unsubs]
         all_activity.sort(key=lambda x: x["timestamp"], reverse=True)
 
         return all_activity[:limit]

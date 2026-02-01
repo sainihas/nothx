@@ -1,8 +1,11 @@
 """Command-line interface for nothx."""
 
+import csv
+import json
 from datetime import datetime
 
 import click
+import humanize
 import questionary
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.prompt import Confirm
@@ -22,6 +25,8 @@ from .unsubscriber import unsubscribe
 
 def _show_welcome_screen() -> None:
     """Show welcome screen with status and interactive command selector."""
+    import sqlite3
+
     from .theme import BANNER
 
     config = Config.load()
@@ -43,8 +48,6 @@ def _show_welcome_screen() -> None:
 
     # Get last scan time if DB exists
     try:
-        import humanize
-
         db.init_db()
         stats = db.get_stats()
         if stats.get("last_run"):
@@ -55,7 +58,8 @@ def _show_welcome_screen() -> None:
                 pass
         if stats.get("pending_review", 0) > 0:
             status_parts.append(f"{stats['pending_review']} pending")
-    except Exception:
+    except (sqlite3.Error, OSError):
+        # Database not initialized or inaccessible - skip stats
         pass
 
     console.print(f"[muted]{' · '.join(status_parts)}[/muted]")
@@ -629,8 +633,6 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
 @main.command()
 def status():
     """Show current nothx status."""
-    import humanize
-
     config = Config.load()
 
     if not config.is_configured():
@@ -936,10 +938,6 @@ def rules():
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def senders(status: str | None, sort: str, as_json: bool):
     """List all tracked senders."""
-    import json
-
-    import humanize
-
     db.init_db()
 
     # Map CLI options to db function params
@@ -1004,10 +1002,6 @@ def senders(status: str | None, sort: str, as_json: bool):
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def search(pattern: str, as_json: bool):
     """Search for a sender by domain pattern."""
-    import json
-
-    import humanize
-
     db.init_db()
 
     results = db.search_senders(pattern)
@@ -1061,8 +1055,6 @@ def search(pattern: str, as_json: bool):
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def history(limit: int, failures: bool, as_json: bool):
     """Show recent activity log."""
-    import json
-
     db.init_db()
 
     activity = db.get_activity_log(limit=limit, failures_only=failures)
@@ -1117,8 +1109,6 @@ def export(type_: str, output: str):
 
     TYPE is either 'senders' or 'history'.
     """
-    import csv
-
     db.init_db()
 
     if type_ == "senders":
@@ -1332,32 +1322,19 @@ def update(check: bool):
     """
     import subprocess
     import sys
+    import urllib.error
+    import urllib.request
 
     console.print(f"\n[header]Current version:[/header] {__version__}")
 
-    # Check for latest version on PyPI
+    # Check for latest version on PyPI using the JSON API
     with console.status("Checking for updates..."):
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "index", "versions", "nothx"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            # Parse output to find latest version
-            if result.returncode == 0 and "versions:" in result.stdout.lower():
-                # pip index versions output format varies
-                lines = result.stdout.strip().split("\n")
-                for line in lines:
-                    if "versions:" in line.lower():
-                        versions = line.split(":")[-1].strip()
-                        latest = versions.split(",")[0].strip()
-                        break
-                else:
-                    latest = None
-            else:
-                latest = None
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+            url = "https://pypi.org/pypi/nothx/json"
+            with urllib.request.urlopen(url, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                latest = data.get("info", {}).get("version")
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
             latest = None
 
     if latest:

@@ -7,9 +7,13 @@ from datetime import datetime
 import click
 import humanize
 import questionary
+from rich.columns import Columns
+from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.prompt import Confirm
+from rich.rule import Rule
 from rich.table import Table
+from rich.tree import Tree
 
 from . import __version__, db
 from .classifier import ClassificationEngine, get_learner
@@ -19,7 +23,7 @@ from .imap import test_account
 from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
-from .theme import console, print_banner
+from .theme import console, print_animated_banner, print_banner
 from .unsubscriber import unsubscribe
 
 
@@ -27,13 +31,11 @@ def _show_welcome_screen() -> None:
     """Show welcome screen with status and interactive command selector."""
     import sqlite3
 
-    from .theme import BANNER
-
     config = Config.load()
 
     # Header: Brand + tagline
     console.print()
-    console.print(BANNER)
+    print_animated_banner()
     console.print("[logo]nothx[/logo]")
     console.print("AI-powered email unsubscribe tool")
 
@@ -65,7 +67,8 @@ def _show_welcome_screen() -> None:
     console.print(f"[dim]{' · '.join(status_parts)}[/dim]")
 
     # Separator
-    console.print("\n[dim]" + "─" * 50 + "[/dim]")
+    console.print()
+    console.print(Rule(style="dim"))
 
     # Get started section with interactive selector
     console.print("\n[header]Get started[/header]\n")
@@ -120,7 +123,7 @@ def _show_learning_status(config: Config) -> None:
     summary = learner.get_learning_summary()
 
     console.print("\n[header]Learning Status[/header]")
-    console.print("=" * 40)
+    console.print(Rule(style="dim"))
 
     # Overall stats
     console.print("\n[header]Training Data[/header]")
@@ -148,22 +151,27 @@ def _show_learning_status(config: Config) -> None:
     sensitivity = summary.get("volume_sensitivity", "normal")
     console.print(f"  Volume sensitivity: {volume_desc.get(sensitivity, sensitivity)}")
 
-    # Keyword patterns
+    # Keyword patterns as tree
     keyword_patterns = summary.get("keyword_patterns", [])
     if keyword_patterns:
-        console.print(f"\n[header]Learned Patterns ({len(keyword_patterns)})[/header]")
+        tree = Tree(f"[header]Learned Patterns ({len(keyword_patterns)})[/header]")
+        keep_branch = tree.add("[keep]Keep patterns[/keep]")
+        unsub_branch = tree.add("[unsubscribe]Unsub patterns[/unsubscribe]")
+
         for pattern in keyword_patterns[:10]:  # Show top 10
             keyword = pattern["keyword"]
             tendency = pattern["tendency"]
             strength = pattern["strength"]
             count = pattern["sample_count"]
 
+            label = f'"{keyword}" ({strength}, {count} examples)'
             if tendency == "keep":
-                console.print(f'  [keep]●[/keep] "{keyword}" → {strength} keep ({count} examples)')
+                keep_branch.add(f"[keep]{label}[/keep]")
             else:
-                console.print(
-                    f'  [unsubscribe]●[/unsubscribe] "{keyword}" → {strength} unsub ({count} examples)'
-                )
+                unsub_branch.add(f"[unsubscribe]{label}[/unsubscribe]")
+
+        console.print()
+        console.print(tree)
     else:
         console.print(
             "\n[muted]No keyword patterns learned yet. Make more decisions to build patterns.[/muted]"
@@ -608,12 +616,13 @@ def _run_scan(
         else:
             to_review.append((sender, classification))
 
-    # Summary
-    console.print("[success]✓ Classification complete[/success]")
-    console.print(f"  [unsubscribe]• {len(to_unsub)} to unsubscribe[/unsubscribe]")
-    console.print(f"  [block]• {len(to_block)} to block[/block]")
-    console.print(f"  [keep]• {len(to_keep)} to keep[/keep]")
-    console.print(f"  [review]• {len(to_review)} need review[/review]")
+    # Summary as tree
+    tree = Tree("[success]✓ Classification complete[/success]")
+    tree.add(f"[unsubscribe]{len(to_unsub)} to unsubscribe[/unsubscribe]")
+    tree.add(f"[block]{len(to_block)} to block[/block]")
+    tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
+    tree.add(f"[review]{len(to_review)} need review[/review]")
+    console.print(tree)
 
     if verbose:
         _show_details(to_unsub, to_keep, to_review, to_block)
@@ -684,10 +693,13 @@ def _run_scan(
                         console.print("  [review]→ Moved to review[/review]")
 
             # Updated summary
-            console.print("\n[header]Updated decisions:[/header]")
-            console.print(f"  [unsubscribe]• {len(to_unsub)} to unsubscribe[/unsubscribe]")
-            console.print(f"  [keep]• {len(to_keep)} to keep[/keep]")
-            console.print(f"  [review]• {len(to_review)} need review[/review]")
+            # Updated summary as tree
+            updated_tree = Tree("[header]Updated decisions[/header]")
+            updated_tree.add(f"[unsubscribe]{len(to_unsub)} to unsubscribe[/unsubscribe]")
+            updated_tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
+            updated_tree.add(f"[review]{len(to_review)} need review[/review]")
+            console.print()
+            console.print(updated_tree)
 
     # Phase 3: Execute unsubscribes (if not dry run)
     if not dry_run and (to_unsub or to_block):
@@ -798,7 +810,37 @@ def status(learning: bool):
         return
 
     console.print("\n[header]nothx Status[/header]")
-    console.print("=" * 40)
+    console.print(Rule(style="dim"))
+
+    # Stats summary as columns
+    stats = db.get_stats()
+    successful, failed = db.get_unsub_success_rate()
+    total_unsub_attempts = successful + failed
+    success_rate = (successful / total_unsub_attempts * 100) if total_unsub_attempts > 0 else 0
+
+    stat_panels = [
+        Panel(
+            f"[count]{stats['total_senders']}[/count]\n[muted]Senders[/muted]",
+            expand=True,
+            border_style="dim",
+        ),
+        Panel(
+            f"[count]{stats['unsubscribed']}[/count]\n[muted]Unsubbed[/muted]",
+            expand=True,
+            border_style="dim",
+        ),
+        Panel(
+            f"[count]{stats['kept']}[/count]\n[muted]Kept[/muted]",
+            expand=True,
+            border_style="dim",
+        ),
+        Panel(
+            f"[count]{success_rate:.0f}%[/count]\n[muted]Success[/muted]",
+            expand=True,
+            border_style="dim",
+        ),
+    ]
+    console.print(Columns(stat_panels, equal=True, expand=True))
 
     # Account info
     console.print("\n[header]Accounts[/header]")
@@ -815,26 +857,14 @@ def status(learning: bool):
     console.print(f"  Mode: {config.operation_mode}")
     console.print(f"  Scan days: {config.scan_days}")
 
-    # Stats
-    stats = db.get_stats()
-    successful, failed = db.get_unsub_success_rate()
-    total_unsub_attempts = successful + failed
-
-    console.print("\n[header]Statistics[/header]")
-    console.print(f"  Total senders tracked: [count]{stats['total_senders']}[/count]")
-
-    # Show unsubscribe breakdown with success rate
+    # Detailed stats
+    console.print("\n[header]Details[/header]")
     if total_unsub_attempts > 0:
-        success_rate = (successful / total_unsub_attempts) * 100
         console.print(
-            f"  Unsubscribed: [count]{stats['unsubscribed']}[/count] "
-            f"([success]{successful} successful[/success], [error]{failed} failed[/error])"
+            f"  Unsubscribe results: [success]{successful} successful[/success], "
+            f"[error]{failed} failed[/error]"
         )
-        console.print(f"  Success rate: [count]{success_rate:.0f}%[/count]")
-    else:
-        console.print(f"  Unsubscribed: [count]{stats['unsubscribed']}[/count]")
 
-    console.print(f"  Kept: [count]{stats['kept']}[/count]")
     console.print(f"  Pending review: [count]{stats['pending_review']}[/count]")
     console.print(f"  Total runs: [count]{stats['total_runs']}[/count]")
 

@@ -1,5 +1,5 @@
 """
-nothx - AI-powered email unsubscribe tool.
+nothx - Smart enough to say no.
 
 Set it up once. AI handles your inbox forever.
 """

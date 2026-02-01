@@ -39,10 +39,10 @@ class GeminiProvider(BaseAIProvider):
 
                 genai.configure(api_key=self.api_key)
                 self._client = genai.GenerativeModel(self.model)
-            except ImportError:
+            except ImportError as err:
                 raise ImportError(
                     "Google Generative AI SDK not installed. Run: pip install google-generativeai"
-                )
+                ) from err
         return self._client
 
     def is_available(self) -> bool:

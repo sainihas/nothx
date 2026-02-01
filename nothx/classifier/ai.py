@@ -3,12 +3,11 @@
 import json
 import logging
 from datetime import datetime
-from typing import Any
 
 from .. import db
 from ..config import Config
 from ..models import Action, Classification, EmailType, SenderStats, UserPreference
-from .providers import get_provider, SUPPORTED_PROVIDERS
+from .providers import get_provider
 from .providers.base import BaseAIProvider
 
 logger = logging.getLogger("nothx.classifier.ai")

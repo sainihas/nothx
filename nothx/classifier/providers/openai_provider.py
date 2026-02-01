@@ -48,8 +48,8 @@ class OpenAIProvider(BaseAIProvider):
                     self._client = OpenAI(api_key=self.api_key, base_url=self.api_base)
                 else:
                     self._client = OpenAI(api_key=self.api_key)
-            except ImportError:
-                raise ImportError("OpenAI SDK not installed. Run: pip install openai")
+            except ImportError as err:
+                raise ImportError("OpenAI SDK not installed. Run: pip install openai") from err
         return self._client
 
     def is_available(self) -> bool:

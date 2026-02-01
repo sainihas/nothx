@@ -26,6 +26,54 @@ from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
 from .theme import console, print_animated_banner, print_banner
 from .unsubscriber import unsubscribe
 
+# Provider-specific app password instructions
+APP_PASSWORD_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
+    "gmail": (
+        "[warning]For Gmail, you need an App Password:[/warning]",
+        "  1. Go to [link=https://myaccount.google.com/apppasswords]myaccount.google.com/apppasswords[/link]",
+        "  2. Generate a new password for 'nothx'",
+        "  3. Copy the 16-character code\n",
+    ),
+    "outlook": (
+        "[warning]For Outlook/Live/Hotmail, you need an App Password:[/warning]",
+        "  1. Go to [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]",
+        "  2. You may need to enable 2FA first at account.microsoft.com/security",
+        "  3. Generate a new app password and copy it\n",
+    ),
+    "yahoo": (
+        "[warning]For Yahoo Mail, you need an App Password:[/warning]",
+        "  1. Go to [link=https://login.yahoo.com/account/security]login.yahoo.com/account/security[/link]",
+        "  2. Enable 2-Step Verification if not already enabled",
+        "  3. Click 'Generate app password' and select 'Other App'",
+        "  4. Copy the generated password\n",
+    ),
+    "icloud": (
+        "[warning]For iCloud Mail, you need an App-Specific Password:[/warning]",
+        "  1. Go to [link=https://appleid.apple.com/account/manage]appleid.apple.com[/link]",
+        "  2. Sign in and go to 'Sign-In and Security' > 'App-Specific Passwords'",
+        "  3. Click '+' to generate a new password for 'nothx'",
+        "  4. Copy the generated password\n",
+    ),
+}
+
+# Provider-specific troubleshooting tips
+TROUBLESHOOTING_TIPS: dict[str, tuple[str, ...]] = {
+    "gmail": (
+        "  • Verify your app password at [link=https://myaccount.google.com/apppasswords]myaccount.google.com/apppasswords[/link]",
+    ),
+    "outlook": (
+        "  • Verify your app password at [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]",
+    ),
+    "yahoo": (
+        "  • Verify your app password at [link=https://login.yahoo.com/account/security]login.yahoo.com/account/security[/link]",
+        "  • Make sure 2-Step Verification is enabled",
+    ),
+    "icloud": (
+        "  • Verify your app password at [link=https://appleid.apple.com/account/manage]appleid.apple.com[/link]",
+        "  • Go to 'Sign-In and Security' > 'App-Specific Passwords'",
+    ),
+}
+
 
 def _show_welcome_screen() -> None:
     """Show welcome screen with status and interactive command selector."""
@@ -205,7 +253,9 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
         "Select your email provider:",
         choices=[
             questionary.Choice("Gmail", value="gmail"),
-            questionary.Choice("Outlook", value="outlook"),
+            questionary.Choice("Outlook / Live / Hotmail", value="outlook"),
+            questionary.Choice("Yahoo Mail", value="yahoo"),
+            questionary.Choice("iCloud Mail", value="icloud"),
         ],
     ).ask()
 
@@ -218,20 +268,10 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
         return None
 
     # App password instructions
-    if provider == "gmail":
-        console.print("\n[warning]For Gmail, you need an App Password:[/warning]")
-        console.print(
-            "  1. Go to [link=https://myaccount.google.com/apppasswords]myaccount.google.com/apppasswords[/link]"
-        )
-        console.print("  2. Generate a new password for 'nothx'")
-        console.print("  3. Copy the 16-character code\n")
-    elif provider == "outlook":
-        console.print("\n[warning]For Outlook/Live/Hotmail, you need an App Password:[/warning]")
-        console.print(
-            "  1. Go to [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]"
-        )
-        console.print("  2. You may need to enable 2FA first at account.microsoft.com/security")
-        console.print("  3. Generate a new app password and copy it\n")
+    if instructions := APP_PASSWORD_INSTRUCTIONS.get(provider):
+        console.print()
+        for line in instructions:
+            console.print(line)
     else:
         console.print("\n[warning]Enter your email password or app password.[/warning]\n")
 
@@ -1486,14 +1526,9 @@ def test_connection():
             console.print(f"[error]✗ Connection failed: {msg}[/error]")
             console.print("\n[muted]Suggestions:[/muted]")
             console.print("  • Check your internet connection")
-            if account.provider == "gmail":
-                console.print(
-                    "  • Verify your app password at [link=https://myaccount.google.com/apppasswords]myaccount.google.com/apppasswords[/link]"
-                )
-            elif account.provider == "outlook":
-                console.print(
-                    "  • Verify your app password at [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]"
-                )
+            if tips := TROUBLESHOOTING_TIPS.get(account.provider):
+                for tip in tips:
+                    console.print(tip)
             console.print("  • Make sure IMAP is enabled in your email settings")
 
 

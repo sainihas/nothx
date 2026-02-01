@@ -150,10 +150,14 @@ def _execute_mailto(mailto: str, account: AccountConfig, config: Config) -> Unsu
         msg["To"] = to_address
 
         # Send via SMTP
-        smtp_server = _get_smtp_server(account.provider)
-        with smtplib.SMTP_SSL(smtp_server, 465) as server:
-            server.login(account.email, account.password)
-            server.send_message(msg)
+        server, port, use_starttls = _get_smtp_config(account.provider)
+        smtp_class = smtplib.SMTP if use_starttls else smtplib.SMTP_SSL
+        with smtp_class(server, port) as smtp:
+            if use_starttls:
+                smtp.starttls()
+                smtp.ehlo()  # Required after STARTTLS
+            smtp.login(account.email, account.password)
+            smtp.send_message(msg)
 
         return UnsubResult(
             success=True,
@@ -169,13 +173,15 @@ def _execute_mailto(mailto: str, account: AccountConfig, config: Config) -> Unsu
         )
 
 
-def _get_smtp_server(provider: str) -> str:
-    """Get SMTP server for email provider."""
-    servers = {
-        "gmail": "smtp.gmail.com",
-        "outlook": "smtp-mail.outlook.com",
+def _get_smtp_config(provider: str) -> tuple[str, int, bool]:
+    """Get SMTP config for email provider. Returns (server, port, use_starttls)."""
+    configs = {
+        "gmail": ("smtp.gmail.com", 465, False),
+        "outlook": ("smtp-mail.outlook.com", 465, False),
+        "yahoo": ("smtp.mail.yahoo.com", 465, False),
+        "icloud": ("smtp.mail.me.com", 587, True),  # STARTTLS
     }
-    return servers.get(provider, provider)
+    return configs.get(provider, (provider, 465, False))
 
 
 def _check_success_indicators(body: str) -> bool:

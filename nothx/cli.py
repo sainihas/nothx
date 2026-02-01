@@ -62,10 +62,10 @@ def _show_welcome_screen() -> None:
         # Database not initialized or inaccessible - skip stats
         pass
 
-    console.print(f"[muted]{' · '.join(status_parts)}[/muted]")
+    console.print(f"[dim]{' · '.join(status_parts)}[/dim]")
 
     # Separator
-    console.print("\n[muted]" + "─" * 50 + "[/muted]")
+    console.print("\n[dim]" + "─" * 50 + "[/dim]")
 
     # Get started section with interactive selector
     console.print("\n[header]Get started[/header]\n")
@@ -478,7 +478,16 @@ def _run_scan(
         transient=True,
     ) as progress:
         task = progress.add_task("Connecting to mailbox...", total=None)
-        scan_result = scan_inbox(config, account_names=account_names)
+
+        def on_account_start(email: str, _name: str, current: int, total: int) -> None:
+            if total > 1:
+                progress.update(task, description=f"Scanning {email}... ({current}/{total})")
+            else:
+                progress.update(task, description=f"Scanning {email}...")
+
+        scan_result = scan_inbox(
+            config, account_names=account_names, on_account_start=on_account_start
+        )
         sender_stats = scan_result.sender_stats
 
     if not sender_stats:
@@ -815,7 +824,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         total = sender["total_emails"]
         subjects = sender.get("sample_subjects", "").split("|")[:3]
 
-        console.print(f"[header][{total} emails] [domain]{domain}[/domain][/header]")
+        console.print(f"[bold][{total} emails] [domain]{domain}[/domain][/bold]")
         if sender.get("ai_classification"):
             confidence = sender.get("ai_confidence", 0)
             console.print(
@@ -880,7 +889,7 @@ def undo(domain: str | None):
         console.print("No recent unsubscribes to undo.")
         return
 
-    console.print("\n[bold]Recent unsubscribes (last 30 days):[/bold]\n")
+    console.print("\n[header]Recent unsubscribes (last 30 days):[/header]\n")
 
     for i, item in enumerate(recent[:20], 1):
         console.print(
@@ -900,7 +909,7 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
     if show_status or (not monthly and not weekly and not off):
         status = get_schedule_status()
         if status:
-            console.print("\n[bold]Current Schedule[/bold]")
+            console.print("\n[header]Current Schedule[/header]")
             console.print(f"  Type: {status['type']}")
             console.print(f"  Frequency: {status['frequency']}")
             console.print(f"  Path: {status['path']}")
@@ -946,7 +955,7 @@ def config_cmd(show: bool, ai: str | None, mode: str | None):
         console.print(f"Mode: {mode}")
 
     if show or (not ai and not mode):
-        console.print("\n[bold]Current Configuration[/bold]")
+        console.print("\n[header]Current Configuration[/header]")
         console.print(f"  Config dir: {get_config_dir()}")
         console.print(f"  AI enabled: {config.ai.enabled}")
         console.print(f"  AI provider: {config.ai.provider}")

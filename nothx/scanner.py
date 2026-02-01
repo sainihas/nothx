@@ -27,21 +27,36 @@ class ScanResult:
         return emails[0] if emails else None
 
 
-def scan_inbox(config: Config, account_name: str | None = None) -> ScanResult:
+def scan_inbox(config: Config, account_names: list[str] | None = None) -> ScanResult:
     """
     Scan inbox for marketing emails and aggregate by sender domain.
     Returns a ScanResult containing sender stats and cached email headers.
-    """
-    account = config.get_account(account_name)
-    if not account:
-        raise ValueError("No account configured")
 
-    # Aggregate emails by domain
+    If account_names is provided, scans only those accounts.
+    Otherwise, scans ALL configured accounts.
+    """
+    # Determine which accounts to scan
+    if account_names:
+        accounts_to_scan = []
+        for name in account_names:
+            account = config.get_account(name)
+            if not account:
+                raise ValueError(f"Account not found: {name}")
+            accounts_to_scan.append((name, account))
+    else:
+        if not config.accounts:
+            raise ValueError("No accounts configured")
+        accounts_to_scan = list(config.accounts.items())
+
+    # Aggregate emails by domain across all accounts
     domain_emails: dict[str, list[EmailHeader]] = defaultdict(list)
 
-    with IMAPConnection(account) as conn:
-        for header in conn.fetch_marketing_emails(days=config.scan_days):
-            domain_emails[header.domain].append(header)
+    for account_name, account in accounts_to_scan:
+        with IMAPConnection(account) as conn:
+            for header in conn.fetch_marketing_emails(days=config.scan_days):
+                # Track which account this email came from (for mailto unsubscribes)
+                header.account_name = account_name
+                domain_emails[header.domain].append(header)
 
     # Convert to SenderStats
     sender_stats: dict[str, SenderStats] = {}

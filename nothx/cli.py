@@ -101,7 +101,7 @@ def _show_welcome_screen() -> None:
     if selected == "init":
         ctx.invoke(init)
     elif selected == "run":
-        ctx.invoke(run, auto=False, dry_run=False, verbose=False)
+        ctx.invoke(run, auto=False, dry_run=False, verbose=False, account=())
     elif selected == "status":
         ctx.invoke(status)
     elif selected == "review":
@@ -146,7 +146,9 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
     # App password instructions
     if provider == "gmail":
         console.print("\n[warning]For Gmail, you need an App Password:[/warning]")
-        console.print("  1. Go to myaccount.google.com/apppasswords")
+        console.print(
+            "  1. Go to [link=https://myaccount.google.com/apppasswords]myaccount.google.com/apppasswords[/link]"
+        )
         console.print("  2. Generate a new password for 'nothx'")
         console.print("  3. Copy the 16-character code\n")
     else:
@@ -275,10 +277,34 @@ def init():
     console.print("Run [bold]nothx run[/bold] to process emails.")
 
 
-@main.group()
-def account():
+@main.group(invoke_without_command=True)
+@click.pass_context
+def account(ctx):
     """Manage email accounts."""
-    pass
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # Show interactive selector when no subcommand provided
+    choices = [
+        questionary.Choice("list    List configured accounts", value="list"),
+        questionary.Choice("add     Add a new account", value="add"),
+        questionary.Choice("remove  Remove an account", value="remove"),
+    ]
+
+    selected = questionary.select(
+        "What would you like to do?",
+        choices=choices,
+    ).ask()
+
+    if selected is None:
+        return
+
+    if selected == "list":
+        ctx.invoke(account_list)
+    elif selected == "add":
+        ctx.invoke(account_add)
+    elif selected == "remove":
+        ctx.invoke(account_remove)
 
 
 @account.command("add")
@@ -379,7 +405,13 @@ def account_remove():
 @click.option("--auto", is_flag=True, help="Run in automatic mode (no prompts)")
 @click.option("--dry-run", is_flag=True, help="Show what would happen without taking action")
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed output")
-def run(auto: bool, dry_run: bool, verbose: bool):
+@click.option(
+    "--account",
+    "-a",
+    multiple=True,
+    help="Scan specific account(s) - can be specified multiple times (default: all)",
+)
+def run(auto: bool, dry_run: bool, verbose: bool, account: tuple[str, ...]):
     """Scan inbox and process marketing emails."""
     config = Config.load()
 
@@ -387,15 +419,41 @@ def run(auto: bool, dry_run: bool, verbose: bool):
         console.print("[red]nothx is not configured. Run 'nothx init' first.[/red]")
         return
 
+    # Validate accounts if specified
+    accounts_to_scan: list[str] | None = None
+    if account:
+        # Build email-to-name map for efficient lookup
+        email_to_name = {acc_config.email: name for name, acc_config in config.accounts.items()}
+
+        accounts_to_scan = []
+        for acc in account:
+            # Support both account name and email address
+            if acc in config.accounts:
+                accounts_to_scan.append(acc)
+            elif acc in email_to_name:
+                accounts_to_scan.append(email_to_name[acc])
+            else:
+                console.print(f"[error]Account '{acc}' not found.[/error]")
+                console.print(
+                    f"Available: {', '.join(f'{n} ({a.email})' for n, a in config.accounts.items())}"
+                )
+                return
+
     db.init_db()
 
     if dry_run:
         console.print("[yellow]DRY RUN - no changes will be made[/yellow]\n")
 
-    _run_scan(config, verbose=verbose, dry_run=dry_run, auto=auto)
+    _run_scan(config, verbose=verbose, dry_run=dry_run, auto=auto, account_names=accounts_to_scan)
 
 
-def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto: bool = False):
+def _run_scan(
+    config: Config,
+    verbose: bool = False,
+    dry_run: bool = False,
+    auto: bool = False,
+    account_names: list[str] | None = None,
+):
     """Run the main scan and classification process."""
     stats = RunStats(
         ran_at=datetime.now(),
@@ -403,7 +461,16 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
     )
 
     # Phase 1: Scan inbox
-    console.print("\n[header]Phase 1/3: Scanning inbox[/header]")
+    if account_names:
+        if len(account_names) == 1:
+            label = f"({account_names[0]})"
+        else:
+            label = f"({len(account_names)} accounts)"
+    else:
+        account_count = len(config.accounts)
+        label = f"({account_count} account{'s' if account_count != 1 else ''})"
+    console.print(f"\n[header]Phase 1/3: Scanning inbox {label}[/header]")
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -411,7 +478,7 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
         transient=True,
     ) as progress:
         task = progress.add_task("Connecting to mailbox...", total=None)
-        scan_result = scan_inbox(config)
+        scan_result = scan_inbox(config, account_names=account_names)
         sender_stats = scan_result.sender_stats
 
     if not sender_stats:
@@ -548,7 +615,6 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
             f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
         ):
             console.print("\n[header]Phase 3/3: Unsubscribing[/header]")
-            account = config.get_account()
 
             with Progress(
                 SpinnerColumn(),
@@ -563,6 +629,8 @@ def _run_scan(config: Config, verbose: bool = False, dry_run: bool = False, auto
                     # Get a sample email with unsubscribe header from cache
                     email = scan_result.get_email_for_domain(sender.domain)
                     if email:
+                        # Use the account the email came from (for correct mailto credentials)
+                        account = config.get_account(email.account_name)
                         result = unsubscribe(email, config, account)
                         if result.success:
                             stats.auto_unsubbed += 1
@@ -1179,7 +1247,9 @@ def test_connection():
             console.print("\n[muted]Suggestions:[/muted]")
             console.print("  • Check your internet connection")
             if account.provider == "gmail":
-                console.print("  • Verify your app password at myaccount.google.com/apppasswords")
+                console.print(
+                    "  • Verify your app password at [link=https://myaccount.google.com/apppasswords]myaccount.google.com/apppasswords[/link]"
+                )
             console.print("  • Make sure IMAP is enabled in your email settings")
 
 

@@ -85,7 +85,7 @@ def _show_welcome_screen() -> None:
     console.print()
     print_animated_banner()
     console.print("[logo]nothx[/logo]")
-    console.print("AI-powered email unsubscribe tool")
+    console.print("Smart enough to say no.")
 
     # Version + status in muted text
     status_parts = [f"v{__version__}"]
@@ -238,7 +238,7 @@ def _show_learning_status(config: Config) -> None:
 @click.version_option(version=__version__)
 @click.pass_context
 def main(ctx):
-    """nothx - AI-powered email unsubscribe tool.
+    """nothx - Smart enough to say no.
 
     Set it up once. AI handles your inbox forever.
     """

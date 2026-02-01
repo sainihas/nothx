@@ -346,7 +346,7 @@ def init():
             model = questionary.select(
                 "Select model:",
                 choices=available_models,
-                default=available_models[0] if available_models else "llama3.2",
+                default=available_models[0],
             ).ask()
             config.ai.model = model
         else:
@@ -365,6 +365,7 @@ def init():
     else:
         # Cloud provider - needs API key
         provider_info = SUPPORTED_PROVIDERS[provider]
+        config.ai.api_base = None  # Clear any stale Ollama URL
 
         console.print(f"\nGet your API key from: [link]{provider_info['key_url']}[/link]")
 

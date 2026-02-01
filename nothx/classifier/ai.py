@@ -105,8 +105,6 @@ class AIClassifier:
             return {}
 
         provider = self._get_provider()
-        if provider is None:
-            return {}
 
         # Build sender descriptions
         sender_descriptions = []
@@ -322,8 +320,6 @@ class AIPatternAnalyzer:
             return None
 
         provider = self._get_provider()
-        if provider is None:
-            return None
 
         # Get recent user actions
         actions = db.get_user_actions(days=60, limit=100)

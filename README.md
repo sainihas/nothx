@@ -103,7 +103,7 @@ Email arrives
 └────────┬────────┘
          ↓
 ┌─────────────────┐
-│  AI ANALYSIS    │  Claude examines headers (never bodies)
+│  AI ANALYSIS    │  AI examines headers (never bodies)
 └────────┬────────┘
          ↓
 ┌─────────────────┐
@@ -222,7 +222,7 @@ pip install "nothx[all-ai]"     # All providers
 <summary><strong>AI classification not working</strong></summary>
 
 - Check your API key: `nothx config --show`
-- Verify credits at [console.anthropic.com](https://console.anthropic.com)
+- Verify you have credits/quota with your chosen provider (Anthropic, OpenAI, or Google)
 - nothx falls back to heuristics if AI fails — it still works
 </details>
 

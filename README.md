@@ -78,6 +78,18 @@ Without an API key, nothx uses heuristic scoring (still works, just less smart).
 
 ## Usage
 
+### Quick Reference
+
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `nothx run` | `nothx r` | Scan inbox and process emails |
+| `nothx status` | `nothx s` | Show current stats |
+| `nothx review` | `nothx rv` | Review pending decisions |
+| `nothx history` | `nothx h` | View activity log |
+| `nothx senders` | | List all tracked senders |
+| `nothx search` | | Search for a sender |
+| `nothx account` | | Manage email accounts |
+
 ### Manual Run
 
 ```bash
@@ -89,6 +101,9 @@ nothx run --dry-run
 
 # Show detailed output
 nothx run --verbose
+
+# Automatic mode (no prompts)
+nothx run --auto
 ```
 
 ### Check Status
@@ -97,10 +112,65 @@ nothx run --verbose
 nothx status
 ```
 
+Shows accounts, configuration, statistics with success rates, and schedule status.
+
 ### Review Uncertain Senders
 
 ```bash
+# Review senders that need manual decision (default)
 nothx review
+
+# Review all pending senders
+nothx review --all
+
+# Review only senders marked to keep
+nothx review --keep
+
+# Review only senders marked to unsubscribe
+nothx review --unsub
+```
+
+### View Senders and History
+
+```bash
+# List all tracked senders
+nothx senders
+
+# Filter by status
+nothx senders --status keep
+nothx senders --status unsub
+nothx senders --status blocked
+
+# Sort by different fields
+nothx senders --sort emails
+nothx senders --sort domain
+nothx senders --sort date
+
+# Output as JSON (for scripting)
+nothx senders --json
+
+# Search for a specific sender
+nothx search wise
+nothx search --json gmail
+
+# View activity log
+nothx history
+nothx history --limit 50
+nothx history --failures  # Only show failures
+nothx history --json
+```
+
+### Manage Email Accounts
+
+```bash
+# List configured accounts
+nothx account list
+
+# Add a new account
+nothx account add
+
+# Remove an account
+nothx account remove
 ```
 
 ### Undo an Unsubscribe
@@ -140,6 +210,38 @@ nothx rule "*.spam.com" unsub
 
 # List all rules
 nothx rules
+```
+
+### Export Data
+
+```bash
+# Export senders to CSV
+nothx export senders --output senders.csv
+
+# Export activity history to CSV
+nothx export history --output history.csv
+```
+
+### Utility Commands
+
+```bash
+# Test email connection
+nothx test
+
+# Check for updates
+nothx update --check
+
+# Update to latest version
+nothx update
+
+# Reset all data (start fresh)
+nothx reset
+nothx reset --keep-config  # Keep accounts and API key
+
+# Generate shell completions
+nothx completion bash >> ~/.bashrc
+nothx completion zsh >> ~/.zshrc
+nothx completion fish >> ~/.config/fish/completions/nothx.fish
 ```
 
 ### Configuration

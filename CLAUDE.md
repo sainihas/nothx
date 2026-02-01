@@ -42,6 +42,7 @@ nothx/
 │   ├── db.py                   # SQLite database layer
 │   ├── scheduler.py            # Cross-platform task scheduling
 │   ├── logging.py              # Logging setup
+│   ├── theme.py                # Semantic color theme and UI constants
 │   └── classifier/             # 5-layer classification engine
 │       ├── __init__.py
 │       ├── engine.py           # Classification orchestrator
@@ -120,15 +121,34 @@ SQLite database at `~/.nothx/nothx.db` with tables:
 
 ### CLI Commands (`nothx/cli.py`)
 
-Main commands using Click framework:
-- `nothx init` - Setup wizard
-- `nothx run` - Scan and process (supports `--dry-run`, `--verbose`, `--auto`)
-- `nothx status` - Show statistics
-- `nothx review` - Manual review queue
+Main commands using Click framework with questionary for interactive prompts:
+- `nothx` - Welcome screen with status (when run with no args)
+- `nothx init` - Interactive setup wizard with multi-account support
+- `nothx run` (`r`) - Scan and process (supports `--dry-run`, `--verbose`, `--auto`)
+- `nothx status` (`s`) - Show statistics with success rates
+- `nothx review` (`rv`) - Manual review queue (supports `--all`, `--keep`, `--unsub`)
 - `nothx undo [domain]` - Undo unsubscribes
 - `nothx schedule` - Manage scheduling
 - `nothx rule <pattern> <action>` - Add rules
 - `nothx config` - View/modify settings
+- `nothx account add/list/remove` - Manage email accounts
+- `nothx senders` - List tracked senders (supports `--status`, `--sort`, `--json`)
+- `nothx search <pattern>` - Search senders by domain
+- `nothx history` (`h`) - View activity log (supports `--limit`, `--failures`, `--json`)
+- `nothx export senders/history` - Export data to CSV
+- `nothx test` - Test email connection
+- `nothx reset` - Clear all data (supports `--keep-config`)
+- `nothx update` - Check for and install updates
+- `nothx completion bash/zsh/fish` - Generate shell completions
+
+### Theme System (`nothx/theme.py`)
+
+Semantic color theme for consistent CLI styling:
+- `success`, `error`, `warning`, `info` - Action feedback
+- `unsubscribe`, `keep`, `block`, `review` - Email action colors
+- `header`, `muted`, `domain`, `count` - UI elements
+- Shared `console` instance with theme applied
+- ASCII art banner for branding
 
 ## Coding Conventions
 
@@ -293,11 +313,14 @@ def new_command(flag: bool):
 ### Core
 - `anthropic>=0.40.0` - Claude AI API
 - `click>=8.0` - CLI framework
-- `rich>=13.0` - Terminal formatting
+- `humanize>=4.0.0` - Human-readable relative dates
+- `questionary>=2.0.0` - Interactive CLI prompts (arrow-key selection)
+- `rich>=13.0` - Terminal formatting and theme system
 
 ### Development
 - `pytest>=7.0` - Testing
 - `pytest-cov>=4.0` - Coverage
+- `ruff>=0.4.0` - Linting and formatting
 
 ### Standard Library (heavily used)
 - `sqlite3` - Database

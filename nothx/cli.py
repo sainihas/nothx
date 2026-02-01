@@ -153,6 +153,13 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
         )
         console.print("  2. Generate a new password for 'nothx'")
         console.print("  3. Copy the 16-character code\n")
+    elif provider == "outlook":
+        console.print("\n[warning]For Outlook/Live/Hotmail, you need an App Password:[/warning]")
+        console.print(
+            "  1. Go to [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]"
+        )
+        console.print("  2. You may need to enable 2FA first at account.microsoft.com/security")
+        console.print("  3. Generate a new app password and copy it\n")
     else:
         console.print("\n[warning]Enter your email password or app password.[/warning]\n")
 
@@ -1260,6 +1267,10 @@ def test_connection():
             if account.provider == "gmail":
                 console.print(
                     "  • Verify your app password at [link=https://myaccount.google.com/apppasswords]myaccount.google.com/apppasswords[/link]"
+                )
+            elif account.provider == "outlook":
+                console.print(
+                    "  • Verify your app password at [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]"
                 )
             console.print("  • Make sure IMAP is enabled in your email settings")
 

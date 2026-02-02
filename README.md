@@ -9,9 +9,7 @@
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
 ![Privacy](https://img.shields.io/badge/privacy-100%25%20local-success.svg)
 
-**Stop reading marketing emails. Start reading real ones.**
-
-nothx hunts down marketing emails, uses AI to sort the noise from the signal, and actually clicks unsubscribe for you. It runs on your machine, learns your preferences, and never touches your data.
+nothx (no thanks) hunts down marketing emails, uses AI to sort the noise from the signal, and actually clicks unsubscribe for you. It runs on your machine, learns your preferences, and never touches your data.
 
 Set it. Forget it. Inbox fixed.
 

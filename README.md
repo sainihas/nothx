@@ -1,4 +1,5 @@
-<img width="2218" height="1440" alt="38 copy" src="https://github.com/user-attachments/assets/fdc496a3-ac7c-49c0-ad04-9d6e8915e1d3" />
+<img width="2218" height="1440" alt="nothx" src="https://github.com/user-attachments/assets/36c92fe2-94f6-4a35-80ba-e283f54be78a" />
+
 
 
 # nothx

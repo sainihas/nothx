@@ -41,6 +41,9 @@ Q_STYLE = QStyle(
 Q_POINTER = "›"
 Q_COMMON: dict[str, Any] = {"instruction": " ", "style": Q_STYLE, "pointer": Q_POINTER}
 
+# Vertical line prefix for indented content under section headers
+_L = "[muted]│[/muted]"
+
 
 def _key(k: str) -> str:
     """Render a single keycap with rounded pill shape using half-block edges."""
@@ -73,7 +76,7 @@ def _styled_select(choices: list, **kwargs) -> str | None:
         # matching the gap questionary's blank prompt provided during browsing.
         console.file.write("\033[1A\033[2K\r")
         console.file.flush()
-        console.print(f"\n  [green]✓ {label}[/green]")
+        console.print(f"{_L}\n{_L} [green]✓ {label}[/green]")
     return result
 
 
@@ -298,8 +301,8 @@ def _show_learning_status(config: Config) -> None:
 
     # Overall stats
     console.print("\n[header]Training Data[/header]")
-    console.print(f"  Total decisions learned from: [count]{summary['total_actions']}[/count]")
-    console.print(f"  Corrections (overrode AI): [count]{summary['total_corrections']}[/count]")
+    console.print(f"{_L} Total decisions learned from: [count]{summary['total_actions']}[/count]")
+    console.print(f"{_L} Corrections (overrode AI): [count]{summary['total_corrections']}[/count]")
 
     # Learned preferences
     console.print("\n[header]Your Preferences[/header]")
@@ -311,7 +314,7 @@ def _show_learning_status(config: Config) -> None:
         "normal": "Normal (default behavior)",
     }
     importance = summary.get("open_rate_importance", "normal")
-    console.print(f"  Open rate importance: {open_rate_desc.get(importance, importance)}")
+    console.print(f"{_L} Open rate importance: {open_rate_desc.get(importance, importance)}")
 
     # Volume sensitivity
     volume_desc = {
@@ -320,7 +323,7 @@ def _show_learning_status(config: Config) -> None:
         "normal": "Normal (default behavior)",
     }
     sensitivity = summary.get("volume_sensitivity", "normal")
-    console.print(f"  Volume sensitivity: {volume_desc.get(sensitivity, sensitivity)}")
+    console.print(f"{_L} Volume sensitivity: {volume_desc.get(sensitivity, sensitivity)}")
 
     # Keyword patterns as tree
     keyword_patterns = summary.get("keyword_patterns", [])
@@ -400,7 +403,7 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
     if instructions := APP_PASSWORD_INSTRUCTIONS.get(provider):
         console.print()
         for line in instructions:
-            console.print(line)
+            console.print(f"{_L}{line[1:]}" if line.startswith("  ") else line)
     else:
         console.print("\n[warning]Enter your email password or app password.[/warning]\n")
 
@@ -637,8 +640,8 @@ def account_add():
     config.save()
 
     console.print(f"\n[success]✓ Added account: {acc.email}[/success]")
-    console.print(f"  Name: {account_name}")
-    console.print(f"  Provider: {acc.provider}")
+    console.print(f"{_L} Name: {account_name}")
+    console.print(f"{_L} Provider: {acc.provider}")
 
 
 @account.command("list")
@@ -880,11 +883,11 @@ def _run_scan(
                 if action == "keep":
                     to_unsub.remove((sender, classification))
                     to_keep.append((sender, classification))
-                    console.print("  [keep]→ Changed to keep[/keep]")
+                    console.print(f"{_L} [keep]→ Changed to keep[/keep]")
                 elif action == "skip":
                     to_unsub.remove((sender, classification))
                     to_review.append((sender, classification))
-                    console.print("  [review]→ Moved to review[/review]")
+                    console.print(f"{_L} [review]→ Moved to review[/review]")
 
             # Review items marked to keep (only if not cancelled)
             if not review_cancelled:
@@ -907,11 +910,11 @@ def _run_scan(
                     if action == "unsub":
                         to_keep.remove((sender, classification))
                         to_unsub.append((sender, classification))
-                        console.print("  [unsubscribe]→ Changed to unsubscribe[/unsubscribe]")
+                        console.print(f"{_L} [unsubscribe]→ Changed to unsubscribe[/unsubscribe]")
                     elif action == "skip":
                         to_keep.remove((sender, classification))
                         to_review.append((sender, classification))
-                        console.print("  [review]→ Moved to review[/review]")
+                        console.print(f"{_L} [review]→ Moved to review[/review]")
 
             # Updated summary
             # Updated summary as tree
@@ -1053,42 +1056,42 @@ def status(learning: bool):
     console.print("\n[header]Accounts[/header]")
     for name, acc in config.accounts.items():
         is_default = " [muted](default)[/muted]" if name == config.default_account else ""
-        console.print(f"  {acc.email} ({acc.provider}){is_default}")
+        console.print(f"{_L} {acc.email} ({acc.provider}){is_default}")
 
     # AI status
     console.print("\n[header]Configuration[/header]")
     if config.ai.enabled:
-        console.print(f"  AI: [success]enabled[/success] ({config.ai.provider})")
+        console.print(f"{_L} AI: [success]enabled[/success] ({config.ai.provider})")
     else:
-        console.print("  AI: [warning]disabled[/warning] (heuristics only)")
-    console.print(f"  Mode: {config.operation_mode}")
-    console.print(f"  Scan days: {config.scan_days}")
+        console.print(f"{_L} AI: [warning]disabled[/warning] (heuristics only)")
+    console.print(f"{_L} Mode: {config.operation_mode}")
+    console.print(f"{_L} Scan days: {config.scan_days}")
 
     # Detailed stats
     console.print("\n[header]Details[/header]")
     if total_unsub_attempts > 0:
         console.print(
-            f"  Unsubscribe results: [success]{successful} successful[/success], "
+            f"{_L} Unsubscribe results: [success]{successful} successful[/success], "
             f"[error]{failed} failed[/error]"
         )
 
-    console.print(f"  Pending review: [count]{stats['pending_review']}[/count]")
-    console.print(f"  Total runs: [count]{stats['total_runs']}[/count]")
+    console.print(f"{_L} Pending review: [count]{stats['pending_review']}[/count]")
+    console.print(f"{_L} Total runs: [count]{stats['total_runs']}[/count]")
 
     if stats["last_run"]:
         try:
             last_run_dt = datetime.fromisoformat(stats["last_run"])
             relative_time = humanize.naturaltime(last_run_dt)
-            console.print(f"  Last run: {relative_time}")
+            console.print(f"{_L} Last run: {relative_time}")
         except (ValueError, TypeError):
-            console.print(f"  Last run: {stats['last_run']}")
+            console.print(f"{_L} Last run: {stats['last_run']}")
 
     # Schedule status
     schedule = get_schedule_status()
     if schedule:
         console.print("\n[header]Schedule[/header]")
-        console.print(f"  Type: {schedule['type']}")
-        console.print(f"  Frequency: {schedule['frequency']}")
+        console.print(f"{_L} Type: {schedule['type']}")
+        console.print(f"{_L} Frequency: {schedule['frequency']}")
     else:
         console.print("\n[warning]No automatic schedule configured[/warning]")
         console.print("Run [bold]nothx schedule --monthly[/bold] to set up")
@@ -1144,10 +1147,10 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         if sender.get("ai_classification"):
             confidence = sender.get("ai_confidence", 0)
             console.print(
-                f"  [muted]AI says: {sender['ai_classification']} ({confidence:.0%} confident)[/muted]"
+                f"{_L} [muted]AI says: {sender['ai_classification']} ({confidence:.0%} confident)[/muted]"
             )
         if subjects and subjects[0]:
-            console.print(f"  [muted]Subjects: {', '.join(s for s in subjects if s)}[/muted]")
+            console.print(f"{_L} [muted]Subjects: {', '.join(s for s in subjects if s)}[/muted]")
 
         # Interactive selector with clear labels
         choice = questionary.select(
@@ -1163,26 +1166,26 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
 
         if choice is None:
             # User cancelled (Ctrl+C or ESC)
-            console.print("  [muted]Cancelled[/muted]")
+            console.print(f"{_L} [muted]Cancelled[/muted]")
             break
 
         if choice == "unsub":
             db.set_user_override(domain, "unsub")
             db.update_sender_status(domain, SenderStatus.UNSUBSCRIBED)
-            console.print("  [unsubscribe]→ Will unsubscribe[/unsubscribe]")
+            console.print(f"{_L} [unsubscribe]→ Will unsubscribe[/unsubscribe]")
             user_action = Action.UNSUB
         elif choice == "keep":
             db.set_user_override(domain, "keep")
             db.update_sender_status(domain, SenderStatus.KEEP)
-            console.print("  [keep]→ Will keep[/keep]")
+            console.print(f"{_L} [keep]→ Will keep[/keep]")
             user_action = Action.KEEP
         elif choice == "block":
             db.set_user_override(domain, "block")
             db.update_sender_status(domain, SenderStatus.BLOCKED)
-            console.print("  [block]→ Will block[/block]")
+            console.print(f"{_L} [block]→ Will block[/block]")
             user_action = Action.BLOCK
         else:
-            console.print("  [review]→ Skipped[/review]")
+            console.print(f"{_L} [review]→ Skipped[/review]")
             user_action = None
 
         # Log user action for learning (if not skipped)
@@ -1271,7 +1274,7 @@ def undo(domain: str | None):
 
     for i, item in enumerate(recent[:20], 1):
         console.print(
-            f"  {i}. {item['domain']} ({item['total_emails']} emails) - {item['attempted_at'][:10]}"
+            f"{_L} {i}. {item['domain']} ({item['total_emails']} emails) - {item['attempted_at'][:10]}"
         )
 
     console.print("\nTo undo, run: [bold]nothx undo <domain>[/bold]")
@@ -1288,9 +1291,9 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
         status = get_schedule_status()
         if status:
             console.print("\n[header]Current Schedule[/header]")
-            console.print(f"  Type: {status['type']}")
-            console.print(f"  Frequency: {status['frequency']}")
-            console.print(f"  Path: {status['path']}")
+            console.print(f"{_L} Type: {status['type']}")
+            console.print(f"{_L} Frequency: {status['frequency']}")
+            console.print(f"{_L} Path: {status['path']}")
         else:
             console.print("[yellow]No schedule configured[/yellow]")
         return
@@ -1334,13 +1337,13 @@ def config_cmd(show: bool, ai: str | None, mode: str | None):
 
     if show or (not ai and not mode):
         console.print("\n[header]Current Configuration[/header]")
-        console.print(f"  Config dir: {get_config_dir()}")
-        console.print(f"  AI enabled: {config.ai.enabled}")
-        console.print(f"  AI provider: {config.ai.provider}")
-        console.print(f"  Operation mode: {config.operation_mode}")
-        console.print(f"  Scan days: {config.scan_days}")
-        console.print(f"  Unsub confidence: {config.thresholds.unsub_confidence}")
-        console.print(f"  Keep confidence: {config.thresholds.keep_confidence}")
+        console.print(f"{_L} Config dir: {get_config_dir()}")
+        console.print(f"{_L} AI enabled: {config.ai.enabled}")
+        console.print(f"{_L} AI provider: {config.ai.provider}")
+        console.print(f"{_L} Operation mode: {config.operation_mode}")
+        console.print(f"{_L} Scan days: {config.scan_days}")
+        console.print(f"{_L} Unsub confidence: {config.thresholds.unsub_confidence}")
+        console.print(f"{_L} Keep confidence: {config.thresholds.keep_confidence}")
 
 
 @main.command()
@@ -1493,14 +1496,14 @@ def search(pattern: str, as_json: bool):
             except (ValueError, TypeError):
                 last_seen = last_seen[:10] if last_seen else ""
 
-        console.print(f"  [domain]{domain}[/domain]")
+        console.print(f"{_L} [domain]{domain}[/domain]")
         console.print(
-            f"    Status: [{style}]{status.title()}[/{style}]"
+            f"{_L}   Status: [{style}]{status.title()}[/{style}]"
             + (f" ({last_seen})" if last_seen else "")
         )
-        console.print(f"    Emails: [count]{total}[/count] total")
+        console.print(f"{_L}   Emails: [count]{total}[/count] total")
         if subjects and subjects[0]:
-            console.print(f"    Subjects: {', '.join(s for s in subjects[:3] if s)}")
+            console.print(f"{_L}   Subjects: {', '.join(s for s in subjects[:3] if s)}")
         console.print()
 
 
@@ -1632,11 +1635,11 @@ def test_connection():
         else:
             console.print(f"[error]✗ Connection failed: {msg}[/error]")
             console.print("\n[muted]Suggestions:[/muted]")
-            console.print("  • Check your internet connection")
+            console.print(f"{_L} • Check your internet connection")
             if tips := TROUBLESHOOTING_TIPS.get(account.provider):
                 for tip in tips:
-                    console.print(tip)
-            console.print("  • Make sure IMAP is enabled in your email settings")
+                    console.print(f"{_L}{tip[1:]}" if tip.startswith("  ") else tip)
+            console.print(f"{_L} • Make sure IMAP is enabled in your email settings")
 
 
 @main.command()
@@ -1649,13 +1652,13 @@ def reset(keep_config: bool):
     stats = db.get_stats()
 
     console.print("\n[warning]⚠️  This will delete all nothx data:[/warning]")
-    console.print(f"  • {stats['total_senders']} tracked senders")
-    console.print(f"  • {stats['unsubscribed']} unsubscribe records")
-    console.print("  • All classification history")
+    console.print(f"{_L} • {stats['total_senders']} tracked senders")
+    console.print(f"{_L} • {stats['unsubscribed']} unsubscribe records")
+    console.print(f"{_L} • All classification history")
 
     if not keep_config:
-        console.print("  • All user rules")
-        console.print("  • [warning]Configuration file (accounts, API key)[/warning]")
+        console.print(f"{_L} • All user rules")
+        console.print(f"{_L} • [warning]Configuration file (accounts, API key)[/warning]")
 
     console.print()
 
@@ -1824,15 +1827,17 @@ def update(check: bool):
                 console.print(f"[error]Update failed: {result.stderr}[/error]")
         except subprocess.TimeoutExpired:
             console.print("[error]Update timed out. Try running manually:[/error]")
-            console.print("  pip install --upgrade nothx")
+            console.print(f"{_L} pip install --upgrade nothx")
             return
     else:
         console.print("\n[warning]Could not check PyPI for updates.[/warning]")
         console.print("[muted]nothx may not be published yet, or you're offline.[/muted]")
         console.print("\nTo update manually:")
-        console.print("  [info]pip install --upgrade nothx[/info]")
-        console.print("  [muted]or from git:[/muted]")
-        console.print("  [info]pip install --upgrade git+https://github.com/nothx/nothx.git[/info]")
+        console.print(f"{_L} [info]pip install --upgrade nothx[/info]")
+        console.print(f"{_L} [muted]or from git:[/muted]")
+        console.print(
+            f"{_L} [info]pip install --upgrade git+https://github.com/nothx/nothx.git[/info]"
+        )
 
 
 # Command aliases for power users

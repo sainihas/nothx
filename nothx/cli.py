@@ -127,7 +127,7 @@ APP_PASSWORD_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
     "outlook": (
         "[warning]For Outlook/Live/Hotmail, you need an App Password:[/warning]",
         "  1. Go to [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]",
-        "  2. You may need to enable 2FA first at account.microsoft.com/security",
+        "  2. You may need to enable 2FA first at [link=https://account.microsoft.com/security]account.microsoft.com/security[/link]",
         "  3. Generate a new app password and copy it\n",
     ),
     "yahoo": (
@@ -143,6 +143,31 @@ APP_PASSWORD_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
         "  2. Sign in and go to 'Sign-In and Security' > 'App-Specific Passwords'",
         "  3. Click '+' to generate a new password for 'nothx'",
         "  4. Copy the generated password\n",
+    ),
+}
+
+# Provider-specific API key setup instructions
+API_KEY_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
+    "anthropic": (
+        "[warning]To get your Anthropic API key:[/warning]",
+        "  1. Go to [link=https://console.anthropic.com]console.anthropic.com[/link]",
+        "  2. Sign in or create an account",
+        "  3. Go to 'Settings' > 'API Keys'",
+        "  4. Click 'Create Key' and copy it\n",
+    ),
+    "openai": (
+        "[warning]To get your OpenAI API key:[/warning]",
+        "  1. Go to [link=https://platform.openai.com/api-keys]platform.openai.com/api-keys[/link]",
+        "  2. Sign in or create an account",
+        "  3. Click 'Create new secret key'",
+        "  4. Copy the key (it won't be shown again)\n",
+    ),
+    "gemini": (
+        "[warning]To get your Google AI API key:[/warning]",
+        "  1. Go to [link=https://aistudio.google.com/apikey]aistudio.google.com/apikey[/link]",
+        "  2. Sign in with your Google account",
+        "  3. Click 'Create API Key'",
+        "  4. Copy the generated key\n",
     ),
 }
 
@@ -538,7 +563,11 @@ def init(ctx):
         provider_info = SUPPORTED_PROVIDERS[provider]
         config.ai.api_base = None  # Clear any stale Ollama URL
 
-        console.print(f"\nGet your API key from: [link]{provider_info['key_url']}[/link]")
+        if provider in API_KEY_INSTRUCTIONS:
+            instructions = API_KEY_INSTRUCTIONS[provider]
+            console.print()
+            for line in instructions:
+                console.print(f"{_L}{line[1:]}" if line.startswith("  ") else line)
 
         api_key = questionary.text(
             f"{provider_info['name']} API key (leave empty to skip):",

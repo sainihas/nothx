@@ -1,5 +1,6 @@
 """Email scanning and sender aggregation for nothx."""
 
+import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
@@ -8,8 +9,11 @@ if TYPE_CHECKING:
 
 from . import db
 from .config import Config
+from .errors import IMAPError
 from .imap import IMAPConnection
 from .models import EmailHeader, SenderStats
+
+logger = logging.getLogger(__name__)
 
 
 class ScanResult:
@@ -35,6 +39,7 @@ def scan_inbox(
     config: Config,
     account_names: list[str] | None = None,
     on_account_start: "Callable[[str, str, int, int], None] | None" = None,
+    on_account_error: "Callable[[str, str, str], None] | None" = None,
 ) -> ScanResult:
     """
     Scan inbox for marketing emails and aggregate by sender domain.
@@ -47,6 +52,7 @@ def scan_inbox(
         config: The configuration object
         account_names: Optional list of account names to scan
         on_account_start: Optional callback(email, name, current, total) called when starting each account
+        on_account_error: Optional callback(email, name, error) called when an account fails
     """
     # Determine which accounts to scan
     if account_names:
@@ -70,11 +76,16 @@ def scan_inbox(
         if on_account_start:
             on_account_start(account.email, account_name, idx, total_accounts)
 
-        with IMAPConnection(account) as conn:
-            for header in conn.fetch_marketing_emails(days=config.scan_days):
-                # Track which account this email came from (for mailto unsubscribes)
-                header.account_name = account_name
-                domain_emails[header.domain].append(header)
+        try:
+            with IMAPConnection(account) as conn:
+                for header in conn.fetch_marketing_emails(days=config.scan_days):
+                    # Track which account this email came from (for mailto unsubscribes)
+                    header.account_name = account_name
+                    domain_emails[header.domain].append(header)
+        except (IMAPError, OSError) as e:
+            logger.warning("Failed to scan %s: %s", account.email, e)
+            if on_account_error:
+                on_account_error(account.email, account_name, str(e))
 
     # Convert to SenderStats
     sender_stats: dict[str, SenderStats] = {}

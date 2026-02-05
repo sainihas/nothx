@@ -40,7 +40,7 @@ IMAP_RETRY_CONFIG = RetryConfig(
 # IMAP server settings
 IMAP_SERVERS = {
     "gmail": "imap.gmail.com",
-    "outlook": "outlook.office365.com",
+    "outlook": "imap-mail.outlook.com",
     "yahoo": "imap.mail.yahoo.com",
     "icloud": "imap.mail.me.com",
 }
@@ -133,13 +133,8 @@ class IMAPConnection:
             self.conn.select("INBOX", readonly=True)
             self.disconnect()
             return True
-        except IMAPError as e:
-            logger.info(
-                "Connection test failed: %s",
-                e,
-                extra={"server": self.server, "error_code": e.code.value},
-            )
-            return False
+        except IMAPError:
+            raise
         except (imaplib.IMAP4.error, OSError) as e:
             logger.info(
                 "Connection test failed with error: %s",

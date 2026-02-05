@@ -250,6 +250,17 @@ class AIClassifier:
             )
             return {}
 
+        except ImportError as e:
+            logger.warning(
+                "AI provider SDK not installed, falling back to heuristics: %s",
+                e,
+                extra={
+                    "error_type": "import_error",
+                    "sender_count": len(senders),
+                },
+            )
+            return {}
+
     def _call_provider_with_retry(
         self, provider: BaseAIProvider, prompt: str, max_tokens: int = 4096
     ):

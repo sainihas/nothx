@@ -2,6 +2,7 @@
 
 import csv
 import json
+import logging
 import re
 from datetime import datetime
 from typing import Any
@@ -26,7 +27,9 @@ from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
 from .theme import console, print_animated_welcome
-from .unsubscriber import unsubscribe
+from .unsubscriber import UnsafeUnsubscribeError, unsubscribe
+
+logger = logging.getLogger(__name__)
 
 # Questionary style — orange1 highlight matching our logo color
 Q_STYLE = QStyle(
@@ -34,8 +37,8 @@ Q_STYLE = QStyle(
         ("highlighted", "fg:#ffaf00"),
         ("pointer", "fg:#ffaf00"),
         ("selected", "fg:#ffaf00"),
-        ("qmark", "fg:green"),
-        ("answer", "fg:green"),
+        ("qmark", "fg:#ffaf00"),
+        ("answer", "fg:#ffaf00"),
     ]
 )
 Q_POINTER = "›"
@@ -50,7 +53,8 @@ Q_COMMON: dict[str, Any] = {
 Q_INPUT_STYLE = QStyle(
     [
         ("qmark", "bold fg:#b3b3b3"),  # match header style (bold grey70)
-        ("answer", "fg:green"),
+        ("answer", "fg:#ffaf00"),
+        ("text", "fg:#ffaf00"),
     ]
 )
 
@@ -326,7 +330,25 @@ def _show_welcome_screen() -> None:
     elif selected == "senders":
         ctx.invoke(senders, status=None, sort="date", as_json=False)
     elif selected == "help":
-        console.print(ctx.get_help())
+        alias_names = {"r", "s", "rv", "h"}
+        _select_header("Select a command")
+        cmd_choices = []
+        for name in sorted(ctx.command.commands):
+            if name not in alias_names:
+                cmd = ctx.command.commands[name]
+                help_text = cmd.get_short_help_str(limit=50)
+                cmd_choices.append(
+                    questionary.Choice(f"{name:<12s} {help_text}", value=name)
+                )
+        cmd_choices.append(questionary.Choice("Back", value="back"))
+
+        cmd_selected = _styled_select(cmd_choices)
+        if cmd_selected and cmd_selected != "back":
+            cmd_obj = ctx.command.commands[cmd_selected]
+            try:
+                ctx.invoke(cmd_obj)
+            except click.UsageError as e:
+                console.print(f"[warning]{e.format_message()}[/warning]")
 
 
 def _show_learning_status(config: Config) -> None:
@@ -451,7 +473,7 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
 
     # Test connection
     account = AccountConfig(provider=provider, email=email, password=password)
-    with console.status("Testing connection..."):
+    with console.status("Testing connection...", spinner_style="white"):
         success, msg = test_account(account)
 
     if not success:
@@ -564,7 +586,7 @@ def init(ctx):
             config.ai.model = "llama3.2"
             console.print("[warning]Could not fetch models. Using default: llama3.2[/warning]")
 
-        with console.status("Testing Ollama connection..."):
+        with console.status("Testing Ollama connection...", spinner_style="white"):
             success, msg = test_ai_connection(config)
 
         if success:
@@ -601,7 +623,7 @@ def init(ctx):
             if temp_provider:
                 config.ai.model = temp_provider.default_model
 
-            with console.status(f"Testing {provider_info['name']} connection..."):
+            with console.status(f"Testing {provider_info['name']} connection...", spinner_style="white"):
                 success, msg = test_ai_connection(config)
 
             if success:
@@ -827,14 +849,16 @@ def _run_scan(
     console.print(f"\n[header]Phase 1/3: Scanning inbox {label}[/header]")
 
     with Progress(
-        SpinnerColumn(),
+        SpinnerColumn(style="white"),
         TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
+        BarColumn(complete_style="orange1", finished_style="orange1", pulse_style="orange1"),
         TaskProgressColumn(),
         console=console,
         transient=True,
     ) as progress:
         task = progress.add_task("Connecting to mailbox...", total=None)
+
+        scan_errors: list[str] = []
 
         def on_account_start(email: str, _name: str, current: int, total: int) -> None:
             if total > 1:
@@ -842,10 +866,20 @@ def _run_scan(
             else:
                 progress.update(task, description=f"Scanning {email}...")
 
+        def on_account_error(email: str, _name: str, error: str) -> None:
+            scan_errors.append(f"{email}: {error}")
+
         scan_result = scan_inbox(
-            config, account_names=account_names, on_account_start=on_account_start
+            config,
+            account_names=account_names,
+            on_account_start=on_account_start,
+            on_account_error=on_account_error,
         )
         sender_stats = scan_result.sender_stats
+
+    if scan_errors:
+        for err in scan_errors:
+            console.print(f"[warning]! Skipped account: {err}[/warning]")
 
     if not sender_stats:
         console.print("[success]✓ No marketing emails found.[/success]")
@@ -863,9 +897,9 @@ def _run_scan(
     engine = ClassificationEngine(config)
 
     with Progress(
-        SpinnerColumn(),
+        SpinnerColumn(style="white"),
         TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
+        BarColumn(complete_style="orange1", finished_style="orange1", pulse_style="orange1"),
         TaskProgressColumn(),
         console=console,
         transient=True,
@@ -981,9 +1015,9 @@ def _run_scan(
             console.print("\n[header]Phase 3/3: Unsubscribing[/header]")
 
             with Progress(
-                SpinnerColumn(),
+                SpinnerColumn(style="white"),
                 TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
+                BarColumn(complete_style="orange1", finished_style="orange1", pulse_style="orange1"),
                 TaskProgressColumn(),
                 console=console,
                 transient=True,
@@ -996,7 +1030,12 @@ def _run_scan(
                     if email:
                         # Use the account the email came from (for correct mailto credentials)
                         account = config.get_account(email.account_name)
-                        result = unsubscribe(email, config, account)
+                        try:
+                            result = unsubscribe(email, config, account)
+                        except UnsafeUnsubscribeError:
+                            logger.info("Skipped protected domain: %s", sender.domain)
+                            progress.advance(task)
+                            continue
                         if result.success:
                             stats.auto_unsubbed += 1
                         else:
@@ -1096,10 +1135,10 @@ def status(learning: bool):
         (f"[count]{success_rate:.0f}%[/count]", "Success"),
     ]
     stat_panels = [
-        Panel(f"{value}\n[muted]{label}[/muted]", expand=True, border_style="dim")
+        Panel(f"{value}\n[muted]{label}[/muted]", width=14, border_style="dim")
         for value, label in panel_data
     ]
-    console.print(Columns(stat_panels, equal=True, expand=True))
+    console.print(Columns(stat_panels, padding=(0, 1)))
 
     # Account info
     console.print("\n[header]Accounts[/header]")
@@ -1674,7 +1713,7 @@ def test_connection():
     for _name, account in config.accounts.items():
         console.print(f"\n[header]Testing connection to {account.email}...[/header]")
 
-        with console.status("Connecting..."):
+        with console.status("Connecting...", spinner_style="white"):
             success, msg = test_account(account)
 
         if success:
@@ -1836,7 +1875,7 @@ def update(check: bool):
     console.print(f"\n[header]Current version:[/header] {__version__}")
 
     # Check for latest version on PyPI using the JSON API
-    with console.status("Checking for updates..."):
+    with console.status("Checking for updates...", spinner_style="white"):
         try:
             url = "https://pypi.org/pypi/nothx/json"
             with urllib.request.urlopen(url, timeout=10) as response:

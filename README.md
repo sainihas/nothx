@@ -12,19 +12,21 @@
 
 nothx (no thanks) hunts down marketing emails, uses AI to sort the noise from the signal, and actually clicks unsubscribe for you. It runs on your machine, learns your preferences, and never touches your data.
 
-Set it. Forget it. Inbox fixed.
+Inbox zero, effort zero.
 
 ---
 
 ## Quick Start
 
 ```bash
-pip install nothx
+pipx install nothx
 nothx init
 ```
 
 That's it. The wizard handles everything else.
 
+> Don't have pipx? `brew install pipx` (macOS) or `sudo apt install pipx` (Linux).
+>
 > Run `nothx` anytime for the interactive menu.
 
 ---
@@ -132,15 +134,19 @@ Each layer can make a final call or pass to the next. Your rules always win.
 | `nothx search <pattern>` | Find a specific sender |
 | `nothx undo [domain]` | Undo an unsubscribe |
 | `nothx history` | View activity log |
+| `nothx export` | Export data to CSV |
 
 ### Configuration
 
 | Command | What it does |
 |---------|--------------|
 | `nothx rule "pattern" keep/unsub` | Add a classification rule |
+| `nothx rules` | List all classification rules |
 | `nothx schedule --monthly` | Set automatic run frequency |
 | `nothx account add/remove` | Manage email accounts |
 | `nothx config --show` | View current config |
+| `nothx update` | Check for and install updates |
+| `nothx completion` | Generate shell completion |
 
 **Aliases:** `r` (run), `s` (status), `rv` (review), `h` (history)
 
@@ -153,43 +159,53 @@ Each layer can make a final call or pass to the next. Your rules always win.
 - Gmail, Outlook, Yahoo, or iCloud account
 - AI provider *(optional — works without AI too)*
 
+### Installation
+
+[pipx](https://pipx.pypa.io) is the recommended way to install nothx. It handles virtual environments automatically.
+
+```bash
+# Base install (heuristics only, or Ollama)
+pipx install nothx
+
+# With your preferred AI provider
+pipx install "nothx[anthropic]"  # Claude (recommended)
+pipx install "nothx[openai]"     # GPT-4
+pipx install "nothx[gemini]"     # Google Gemini
+pipx install "nothx[all-ai]"     # All providers
+```
+
 <details>
-<summary><strong>Don't have Python?</strong></summary>
+<summary><strong>Don't have pipx?</strong></summary>
 
 **macOS:**
 ```bash
-brew install python@3.11
+brew install pipx
 ```
-Or download from [python.org/downloads](https://python.org/downloads)
-
-**Windows:**
-
-Download from [python.org/downloads](https://python.org/downloads). During install, check "Add Python to PATH".
 
 **Linux:**
 ```bash
 # Ubuntu/Debian
-sudo apt install python3.11 python3-pip
+sudo apt install pipx
 
 # Fedora
-sudo dnf install python3.11 python3-pip
+sudo dnf install pipx
 ```
 
-After installing, verify with `python3 --version`.
+pipx requires Python 3.11+. After installing, verify with `python3 --version`.
 </details>
 
-### Installation
+<details>
+<summary><strong>Using pip instead</strong></summary>
+
+If you prefer pip, use a virtual environment to avoid system conflicts:
 
 ```bash
-# Base install (heuristics only, or Ollama)
+python3 -m venv ~/.nothx-venv
+source ~/.nothx-venv/bin/activate
 pip install nothx
-
-# With your preferred AI provider
-pip install "nothx[anthropic]"  # Claude (recommended)
-pip install "nothx[openai]"     # GPT-4
-pip install "nothx[gemini]"     # Google Gemini
-pip install "nothx[all-ai]"     # All providers
 ```
+
+</details>
 
 <details>
 <summary><strong>Gmail App Password</strong></summary>

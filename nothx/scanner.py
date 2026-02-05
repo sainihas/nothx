@@ -11,9 +11,9 @@ from . import db
 from .config import Config
 from .errors import IMAPError
 from .imap import IMAPConnection
+from .models import EmailHeader, SenderStats
 
 logger = logging.getLogger(__name__)
-from .models import EmailHeader, SenderStats
 
 
 class ScanResult:

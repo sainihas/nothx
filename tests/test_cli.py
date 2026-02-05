@@ -94,13 +94,12 @@ class TestMainCommand:
         assert "run" in result.output
         assert "status" in result.output
 
-    @patch("nothx.cli.questionary.select")
-    @patch("nothx.cli.print_animated_banner")
-    def test_main_no_subcommand_shows_welcome(
-        self, mock_banner, mock_select, runner, temp_config_dir
-    ):
+    @patch("nothx.cli.NothxApp")
+    def test_main_no_subcommand_shows_welcome(self, mock_app_class, runner, temp_config_dir):
         """Test that running without subcommand shows welcome screen."""
-        mock_select.return_value.ask.return_value = None  # User pressed ESC
+        mock_app = MagicMock()
+        mock_app.run.return_value = None  # User pressed ESC
+        mock_app_class.return_value = mock_app
 
         result = runner.invoke(main, [])
         # Should attempt to show welcome screen
@@ -232,7 +231,7 @@ class TestRunCommand:
         """Test run when not configured."""
         result = runner.invoke(run, [])
 
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "not configured" in result.output
 
     @patch("nothx.cli.scan_inbox")
@@ -268,7 +267,7 @@ class TestRunCommand:
         """Test run with invalid account name."""
         result = runner.invoke(run, ["--account", "nonexistent"])
 
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "not found" in result.output
 
 
@@ -279,7 +278,7 @@ class TestStatusCommand:
         """Test status when not configured."""
         result = runner.invoke(status, [])
 
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "not configured" in result.output
 
     def test_status_configured(self, runner, configured_env, temp_config_dir):
@@ -313,7 +312,7 @@ class TestReviewCommand:
         """Test review when not configured."""
         result = runner.invoke(review, [])
 
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "not configured" in result.output
 
     def test_review_empty(self, runner, configured_env, temp_config_dir):
@@ -568,7 +567,7 @@ class TestHistoryCommand:
         result = runner.invoke(history, [])
 
         assert result.exit_code == 0
-        assert "No activity recorded" in result.output
+        assert "No activity yet" in result.output
 
     def test_history_with_runs(self, runner, temp_config_dir):
         """Test history with run logs."""
@@ -677,7 +676,7 @@ class TestTestConnectionCommand:
         """Test when no accounts configured."""
         result = runner.invoke(test_connection, [])
 
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "No accounts configured" in result.output
 
     @patch("nothx.cli.test_account")
@@ -697,7 +696,7 @@ class TestTestConnectionCommand:
 
         result = runner.invoke(test_connection, [])
 
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "failed" in result.output
 
 

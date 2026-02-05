@@ -8,6 +8,7 @@ from datetime import datetime
 import click
 import humanize
 import questionary
+from questionary import Style as QStyle
 from rich.columns import Columns
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
@@ -24,8 +25,17 @@ from .imap import test_account
 from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
-from .theme import console, print_animated_banner, print_banner
+from .theme import console, print_animated_welcome, print_banner
+from .tui import NothxApp, ReviewApp, SendersApp, StatusApp, UndoApp
 from .unsubscriber import unsubscribe
+
+# Questionary style — orange1 highlight matching our logo color
+Q_STYLE = QStyle([
+    ("highlighted", "fg:#ffaf00"),
+    ("pointer", "fg:#ffaf00"),
+    ("selected", "fg:#ffaf00"),
+])
+Q_POINTER = "›"
 
 # Simple email validation regex
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
@@ -87,19 +97,98 @@ TROUBLESHOOTING_TIPS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _show_welcome_screen() -> None:
-    """Show welcome screen with status and interactive command selector."""
+def _celebrate_milestone(total_unsubbed: int, just_unsubbed: int) -> None:
+    """Show celebration for unsubscribe milestones."""
+    # Calculate if we just crossed a milestone
+    milestones = [1, 10, 50, 100, 500]
+    for milestone in milestones:
+        if total_unsubbed >= milestone > total_unsubbed - just_unsubbed:
+            if milestone == 1:
+                console.print("\n[success]🎉 Your first unsubscribe![/success]")
+                console.print("[muted]You're on your way to inbox freedom.[/muted]")
+            elif milestone == 10:
+                console.print("\n[success]✨ 10 unsubscribes![/success]")
+                console.print("[muted]Your inbox is getting quieter.[/muted]")
+            elif milestone == 50:
+                console.print("\n[success]🚀 50 unsubscribes![/success]")
+                console.print("[muted]That's serious inbox decluttering.[/muted]")
+            elif milestone == 100:
+                console.print("\n[success]🏆 100 unsubscribes![/success]")
+                console.print("[muted]You're an inbox zero champion.[/muted]")
+            elif milestone == 500:
+                console.print("\n[success]⚡ 500 unsubscribes![/success]")
+                console.print("[muted]Legendary. Your inbox fears you.[/muted]")
+            break  # Only show one milestone per run
+
+
+def _get_previous_run_summary_text() -> str | None:
+    """Get brief summary text from the last run, or None."""
+    try:
+        activity = db.get_activity_log(limit=1)
+        if activity and activity[0].get("type") == "run":
+            r = activity[0]
+            timestamp = r.get("timestamp", "")
+            try:
+                ts_dt = datetime.fromisoformat(timestamp)
+                time_ago = humanize.naturaltime(ts_dt)
+            except (ValueError, TypeError):
+                time_ago = "recently"
+
+            unsubbed = r.get("auto_unsubbed", 0)
+            if unsubbed > 0:
+                return f"Last run {time_ago} · unsubscribed from {unsubbed} sender{'s' if unsubbed != 1 else ''}"
+    except Exception:
+        pass  # Silently skip if DB not ready
+    return None
+
+
+def _show_previous_run_summary() -> None:
+    """Show brief summary from the last run."""
+    text = _get_previous_run_summary_text()
+    if text:
+        console.print(f"[muted]{text}[/muted]")
+
+
+def _get_greeting() -> str:
+    """Get time-based greeting with user's first name if available."""
+    import os
+
+    # Time-based greeting with emoji
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        emoji = "☀️"
+        greeting = "Good morning"
+    elif 12 <= hour < 17:
+        emoji = "🌤️"
+        greeting = "Good afternoon"
+    elif 17 <= hour < 21:
+        emoji = "🌆"
+        greeting = "Good evening"
+    else:
+        emoji = "🌙"
+        greeting = "Hey there"
+
+    # Try to get user's first name
+    name = None
+    try:
+        # Try common environment variables
+        for var in ("USER", "USERNAME", "LOGNAME"):
+            if username := os.environ.get(var):
+                # Capitalize and use first name only
+                name = username.split(".")[0].capitalize()
+                break
+    except Exception:
+        pass
+
+    if name:
+        return f"{emoji}  {greeting}, {name}!"
+    return f"{emoji}  {greeting}!"
+
+
+def _build_version_line(config: Config) -> str:
+    """Build the version + status string for display."""
     import sqlite3
 
-    config = Config.load()
-
-    # Header: Brand + tagline
-    console.print()
-    print_animated_banner()
-    console.print("[logo]nothx[/logo]")
-    console.print("Smart enough to say no.")
-
-    # Version + status in muted text
     status_parts = [f"v{__version__}"]
 
     account_count = len(config.accounts)
@@ -108,7 +197,6 @@ def _show_welcome_screen() -> None:
     else:
         status_parts.append("not configured")
 
-    # Get last scan time if DB exists
     try:
         db.init_db()
         stats = db.get_stats()
@@ -121,44 +209,35 @@ def _show_welcome_screen() -> None:
         if stats.get("pending_review", 0) > 0:
             status_parts.append(f"{stats['pending_review']} pending")
     except (sqlite3.Error, OSError):
-        # Database not initialized or inaccessible - skip stats
         pass
 
-    console.print(f"[dim]{' · '.join(status_parts)}[/dim]")
+    return " · ".join(status_parts)
 
-    # Separator
-    console.print()
-    console.print(Rule(style="dim"))
 
-    # Get started section with interactive selector
-    console.print("\n[header]Get started[/header]\n")
+def _show_welcome_screen() -> None:
+    """Show welcome screen with TUI (or fallback for non-TTY)."""
+    config = Config.load()
+    greeting = _get_greeting()
+    version_line = _build_version_line(config)
+    run_summary = _get_previous_run_summary_text()
+    is_configured = bool(config.accounts)
 
-    # Build command choices based on configuration state
-    if not config.accounts:
-        # Not configured - prioritize init
-        choices = [
-            questionary.Choice("nothx init     Set up email accounts and API key", value="init"),
-            questionary.Choice("nothx --help   View all commands", value="help"),
-        ]
+    # Use TUI for interactive terminals, fallback for pipes/CI
+    if console.is_terminal:
+        app = NothxApp(
+            greeting=greeting,
+            version_line=version_line,
+            run_summary=run_summary,
+            is_configured=is_configured,
+        )
+        selected = app.run()
     else:
-        # Configured - show main workflow commands
-        choices = [
-            questionary.Choice("nothx run      Scan inbox and unsubscribe", value="run"),
-            questionary.Choice("nothx status   Show current stats", value="status"),
-            questionary.Choice("nothx review   Review pending decisions", value="review"),
-            questionary.Choice("nothx senders  List all tracked senders", value="senders"),
-            questionary.Choice("nothx --help   View all commands", value="help"),
-        ]
-
-    selected = questionary.select(
-        "",
-        choices=choices,
-        instruction="",
-    ).ask()
+        # Non-TTY fallback: print static welcome and exit
+        print_animated_welcome(greeting, version_line)
+        _show_previous_run_summary()
+        return
 
     if selected is None:
-        # User pressed ESC - exit cleanly
-        console.print()
         return
 
     # Execute the selected command
@@ -183,7 +262,7 @@ def _show_learning_status(config: Config) -> None:
     summary = learner.get_learning_summary()
 
     console.print("\n[header]Learning Status[/header]")
-    console.print(Rule(style="dim"))
+    console.print(Rule(style="muted"))
 
     # Overall stats
     console.print("\n[header]Training Data[/header]")
@@ -269,6 +348,8 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
             questionary.Choice("Yahoo Mail", value="yahoo"),
             questionary.Choice("iCloud Mail", value="icloud"),
         ],
+        style=Q_STYLE,
+        pointer=Q_POINTER,
     ).ask()
 
     if provider is None:  # User cancelled
@@ -374,6 +455,8 @@ def init():
         "Select AI provider:",
         choices=provider_choices,
         default="anthropic",
+        style=Q_STYLE,
+        pointer=Q_POINTER,
     ).ask()
 
     config.ai.provider = provider
@@ -403,6 +486,8 @@ def init():
                 "Select model:",
                 choices=available_models,
                 default=available_models[0],
+                style=Q_STYLE,
+                pointer=Q_POINTER,
             ).ask()
             config.ai.model = model
         else:
@@ -504,6 +589,8 @@ def account(ctx):
     selected = questionary.select(
         "What would you like to do?",
         choices=choices,
+        style=Q_STYLE,
+        pointer=Q_POINTER,
     ).ask()
 
     if selected is None:
@@ -581,6 +668,8 @@ def account_remove():
     account_name = questionary.select(
         "Select account to remove:",
         choices=choices,
+        style=Q_STYLE,
+        pointer=Q_POINTER,
     ).ask()
 
     if account_name is None:
@@ -626,8 +715,8 @@ def run(auto: bool, dry_run: bool, verbose: bool, account: tuple[str, ...]):
     config = Config.load()
 
     if not config.is_configured():
-        console.print("[red]nothx is not configured. Run 'nothx init' first.[/red]")
-        return
+        console.print("[error]✗ nothx is not configured. Run 'nothx init' first.[/error]")
+        raise SystemExit(1)
 
     # Validate accounts if specified
     accounts_to_scan: list[str] | None = None
@@ -647,12 +736,12 @@ def run(auto: bool, dry_run: bool, verbose: bool, account: tuple[str, ...]):
                 console.print(
                     f"Available: {', '.join(f'{n} ({a.email})' for n, a in config.accounts.items())}"
                 )
-                return
+                raise SystemExit(1)
 
     db.init_db()
 
     if dry_run:
-        console.print("[yellow]DRY RUN - no changes will be made[/yellow]\n")
+        console.print("[warning]DRY RUN - no changes will be made[/warning]\n")
 
     _run_scan(config, verbose=verbose, dry_run=dry_run, auto=auto, account_names=accounts_to_scan)
 
@@ -701,7 +790,8 @@ def _run_scan(
         sender_stats = scan_result.sender_stats
 
     if not sender_stats:
-        console.print("[success]✓ No marketing emails found.[/success]")
+        console.print("\n[success]📮 All clear![/success]")
+        console.print("[muted]No marketing emails found. Your inbox is clean.[/muted]\n")
         return
 
     stats.emails_scanned = sum(s.total_emails for s in sender_stats.values())
@@ -764,71 +854,67 @@ def _run_scan(
             default=False,
         ).ask()
 
-        if review_decisions:
-            console.print("\n[header]Manual Review[/header]")
-            console.print("[muted]Change any decisions you disagree with:[/muted]\n")
+        if review_decisions and console.is_terminal:
+            # Build sender dicts for TUI review
+            review_senders = []
+            for sender, classification in to_unsub:
+                review_senders.append({
+                    "domain": sender.domain,
+                    "total_emails": sender.total_emails,
+                    "ai_classification": classification.action.value,
+                    "ai_confidence": classification.confidence,
+                    "_pre_decision": "unsub",
+                })
+            for sender, classification in to_keep:
+                review_senders.append({
+                    "domain": sender.domain,
+                    "total_emails": sender.total_emails,
+                    "ai_classification": classification.action.value,
+                    "ai_confidence": classification.confidence,
+                    "_pre_decision": "keep",
+                })
 
-            # Review items marked for unsubscribe
-            review_cancelled = False
-            for sender, classification in to_unsub[:]:  # Slice to allow modification
-                action = questionary.select(
-                    f"[{sender.total_emails} emails] {sender.domain}",
-                    choices=[
-                        questionary.Choice("Unsubscribe (AI recommendation)", value="unsub"),
-                        questionary.Choice("Keep instead", value="keep"),
-                        questionary.Choice("Skip for now", value="skip"),
-                    ],
-                    default="unsub",
-                ).ask()
+            app = ReviewApp(
+                senders=review_senders,
+                title="Review AI decisions before unsubscribing",
+            )
+            decisions = app.run()
 
-                if action is None:
-                    console.print("[muted]Review cancelled[/muted]")
-                    review_cancelled = True
-                    break
+            if decisions is not None:
+                # Rebuild to_unsub, to_keep, to_review from decisions
+                sender_map = {s.domain: (s, c) for s, c in to_unsub + to_keep}
+                to_unsub.clear()
+                to_keep.clear()
 
-                if action == "keep":
-                    to_unsub.remove((sender, classification))
-                    to_keep.append((sender, classification))
-                    console.print("  [keep]→ Changed to keep[/keep]")
-                elif action == "skip":
-                    to_unsub.remove((sender, classification))
-                    to_review.append((sender, classification))
-                    console.print("  [review]→ Moved to review[/review]")
-
-            # Review items marked to keep (only if not cancelled)
-            if not review_cancelled:
-                for sender, classification in to_keep[:]:  # Slice to allow modification
-                    action = questionary.select(
-                        f"[{sender.total_emails} emails] {sender.domain}",
-                        choices=[
-                            questionary.Choice("Keep (AI recommendation)", value="keep"),
-                            questionary.Choice("Unsubscribe instead", value="unsub"),
-                            questionary.Choice("Skip for now", value="skip"),
-                        ],
-                        default="keep",
-                    ).ask()
-
-                    if action is None:
-                        console.print("[muted]Review cancelled[/muted]")
-                        break
-
+                for domain, action in decisions.items():
+                    if domain not in sender_map:
+                        continue
+                    sender, classification = sender_map[domain]
                     if action == "unsub":
-                        to_keep.remove((sender, classification))
                         to_unsub.append((sender, classification))
-                        console.print("  [unsubscribe]→ Changed to unsubscribe[/unsubscribe]")
+                    elif action == "keep":
+                        to_keep.append((sender, classification))
                     elif action == "skip":
-                        to_keep.remove((sender, classification))
                         to_review.append((sender, classification))
-                        console.print("  [review]→ Moved to review[/review]")
+                    elif action == "block":
+                        to_block.append((sender, classification))
+                    # None = unchanged, keep original
 
-            # Updated summary
-            # Updated summary as tree
-            updated_tree = Tree("[header]Updated decisions[/header]")
-            updated_tree.add(f"[unsubscribe]{len(to_unsub)} to unsubscribe[/unsubscribe]")
-            updated_tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
-            updated_tree.add(f"[review]{len(to_review)} need review[/review]")
-            console.print()
-            console.print(updated_tree)
+                # For domains with no decision, keep original classification
+                for domain, (sender, classification) in sender_map.items():
+                    if decisions.get(domain) is None:
+                        if classification.action == Action.UNSUB:
+                            to_unsub.append((sender, classification))
+                        else:
+                            to_keep.append((sender, classification))
+
+                # Show updated summary
+                updated_tree = Tree("[header]Updated decisions[/header]")
+                updated_tree.add(f"[unsubscribe]{len(to_unsub)} to unsubscribe[/unsubscribe]")
+                updated_tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
+                updated_tree.add(f"[review]{len(to_review)} need review[/review]")
+                console.print()
+                console.print(updated_tree)
 
     # Phase 3: Execute unsubscribes (if not dry run)
     if not dry_run and (to_unsub or to_block):
@@ -865,8 +951,13 @@ def _run_scan(
             if stats.failed:
                 console.print(f"[warning]! {stats.failed} failed (logged for retry)[/warning]")
 
+            # Check for milestones
+            total_stats = db.get_stats()
+            total_unsubbed = total_stats.get("unsubscribed", 0)
+            _celebrate_milestone(total_unsubbed, stats.auto_unsubbed)
+
             # Undo reminder
-            console.print("\n[muted]⏱ Run `nothx undo` to restore if needed[/muted]")
+            console.print("\n[muted]Run `nothx undo` to restore if needed[/muted]")
 
     # Update stats
     stats.kept = len(to_keep)
@@ -882,7 +973,7 @@ def _run_scan(
 
     # Prompt about review queue
     if to_review and not auto:
-        console.print(f"\n[yellow]{len(to_review)} senders need manual review.[/yellow]")
+        console.print(f"\n[warning]{len(to_review)} senders need manual review.[/warning]")
         console.print("Run [bold]nothx review[/bold] to process them.")
 
 
@@ -929,7 +1020,7 @@ def status(learning: bool):
 
     if not config.is_configured():
         console.print("[error]nothx is not configured. Run 'nothx init' first.[/error]")
-        return
+        raise SystemExit(1)
 
     db.init_db()
 
@@ -938,14 +1029,52 @@ def status(learning: bool):
         _show_learning_status(config)
         return
 
-    console.print("\n[header]nothx Status[/header]")
-    console.print(Rule(style="dim"))
-
-    # Stats summary as columns
     stats = db.get_stats()
     successful, failed = db.get_unsub_success_rate()
     total_unsub_attempts = successful + failed
     success_rate = (successful / total_unsub_attempts * 100) if total_unsub_attempts > 0 else 0
+
+    # Build last run display string
+    last_run_display = None
+    if stats["last_run"]:
+        try:
+            last_run_dt = datetime.fromisoformat(stats["last_run"])
+            last_run_display = humanize.naturaltime(last_run_dt)
+        except (ValueError, TypeError):
+            last_run_display = stats["last_run"]
+
+    schedule_info = get_schedule_status()
+
+    # Build status data for TUI
+    status_data = {
+        "stats": stats,
+        "success_rate": success_rate,
+        "successful_unsubs": successful,
+        "failed_unsubs": failed,
+        "last_run_display": last_run_display,
+        "accounts": {
+            name: {"email": acc.email, "provider": acc.provider}
+            for name, acc in config.accounts.items()
+        },
+        "default_account": config.default_account,
+        "ai": {
+            "enabled": config.ai.enabled,
+            "provider": config.ai.provider,
+        },
+        "operation_mode": config.operation_mode,
+        "scan_days": config.scan_days,
+        "schedule": schedule_info,
+    }
+
+    # Use TUI for interactive terminals
+    if console.is_terminal:
+        app = StatusApp(status_data=status_data)
+        app.run()
+        return
+
+    # Non-TTY fallback: static output
+    console.print("\n[header]nothx Status[/header]")
+    console.print(Rule(style="muted"))
 
     panel_data = [
         (f"[count]{stats['total_senders']}[/count]", "Senders"),
@@ -954,18 +1083,16 @@ def status(learning: bool):
         (f"[count]{success_rate:.0f}%[/count]", "Success"),
     ]
     stat_panels = [
-        Panel(f"{value}\n[muted]{label}[/muted]", expand=True, border_style="dim")
+        Panel(f"{value}\n[muted]{label}[/muted]", expand=True, border_style="muted")
         for value, label in panel_data
     ]
     console.print(Columns(stat_panels, equal=True, expand=True))
 
-    # Account info
     console.print("\n[header]Accounts[/header]")
     for name, acc in config.accounts.items():
         is_default = " [muted](default)[/muted]" if name == config.default_account else ""
         console.print(f"  {acc.email} ({acc.provider}){is_default}")
 
-    # AI status
     console.print("\n[header]Configuration[/header]")
     if config.ai.enabled:
         console.print(f"  AI: [success]enabled[/success] ({config.ai.provider})")
@@ -974,36 +1101,95 @@ def status(learning: bool):
     console.print(f"  Mode: {config.operation_mode}")
     console.print(f"  Scan days: {config.scan_days}")
 
-    # Detailed stats
     console.print("\n[header]Details[/header]")
     if total_unsub_attempts > 0:
         console.print(
             f"  Unsubscribe results: [success]{successful} successful[/success], "
             f"[error]{failed} failed[/error]"
         )
-
     console.print(f"  Pending review: [count]{stats['pending_review']}[/count]")
     console.print(f"  Total runs: [count]{stats['total_runs']}[/count]")
+    if last_run_display:
+        console.print(f"  Last run: {last_run_display}")
 
-    if stats["last_run"]:
-        try:
-            last_run_dt = datetime.fromisoformat(stats["last_run"])
-            relative_time = humanize.naturaltime(last_run_dt)
-            console.print(f"  Last run: {relative_time}")
-        except (ValueError, TypeError):
-            console.print(f"  Last run: {stats['last_run']}")
-
-    # Schedule status
-    schedule = get_schedule_status()
-    if schedule:
+    if schedule_info:
         console.print("\n[header]Schedule[/header]")
-        console.print(f"  Type: {schedule['type']}")
-        console.print(f"  Frequency: {schedule['frequency']}")
+        console.print(f"  Type: {schedule_info['type']}")
+        console.print(f"  Frequency: {schedule_info['frequency']}")
     else:
         console.print("\n[warning]No automatic schedule configured[/warning]")
         console.print("Run [bold]nothx schedule --monthly[/bold] to set up")
 
     console.print()
+
+
+def _apply_review_decisions(
+    senders: list[dict], decisions: dict[str, str | None]
+) -> None:
+    """Apply review decisions from the TUI to the database and learner."""
+    action_map = {"unsub": Action.UNSUB, "keep": Action.KEEP, "block": Action.BLOCK}
+    status_map = {
+        "unsub": SenderStatus.UNSUBSCRIBED,
+        "keep": SenderStatus.KEEP,
+        "block": SenderStatus.BLOCKED,
+    }
+    counts: dict[str, int] = {}
+
+    for sender in senders:
+        domain = sender["domain"]
+        choice = decisions.get(domain)
+        if not choice or choice == "skip":
+            continue
+
+        db.set_user_override(domain, choice)
+        if status := status_map.get(choice):
+            db.update_sender_status(domain, status)
+
+        user_action = action_map.get(choice)
+        if user_action is not None:
+            total = sender.get("total_emails", 0)
+
+            # Get AI recommendation if available
+            ai_rec = None
+            if ai_class_str := sender.get("ai_classification"):
+                if ai_class_str == "unsubscribe":
+                    ai_class_str = "unsub"
+                try:
+                    ai_rec = Action(ai_class_str)
+                except ValueError:
+                    pass
+
+            seen = sender.get("seen_emails", 0)
+            open_rate = (seen / total * 100) if total > 0 else 0
+
+            action_record = UserAction(
+                domain=domain,
+                action=user_action,
+                timestamp=datetime.now(),
+                ai_recommendation=ai_rec,
+                heuristic_score=None,
+                open_rate=open_rate,
+                email_count=total,
+            )
+            db.log_user_action(action_record)
+
+            learner = get_learner()
+            learner.update_from_action(action_record)
+
+        counts[choice] = counts.get(choice, 0) + 1
+
+    # Print summary
+    parts = []
+    if counts.get("unsub"):
+        parts.append(f"[unsubscribe]{counts['unsub']} unsubscribed[/unsubscribe]")
+    if counts.get("keep"):
+        parts.append(f"[keep]{counts['keep']} kept[/keep]")
+    if counts.get("block"):
+        parts.append(f"[block]{counts['block']} blocked[/block]")
+    if parts:
+        console.print("\n[success]✓ Review complete:[/success] " + ", ".join(parts))
+    else:
+        console.print("[muted]No changes made.[/muted]")
 
 
 @main.command()
@@ -1020,7 +1206,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
 
     if not config.is_configured():
         console.print("[error]nothx is not configured. Run 'nothx init' first.[/error]")
-        return
+        raise SystemExit(1)
 
     db.init_db()
 
@@ -1040,94 +1226,32 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         filter_label = "needing review"
 
     if not senders:
-        console.print(f"[success]No senders {filter_label}![/success]")
+        if filter_label == "needing review":
+            console.print("\n[success]✨ All caught up![/success]")
+            console.print("[muted]No senders need your decision.[/muted]\n")
+        else:
+            console.print(f"[success]No senders {filter_label}.[/success]")
         return
 
-    console.print(f"\n[header]{len(senders)} senders {filter_label}:[/header]\n")
+    # Launch TUI review screen
+    if console.is_terminal:
+        app = ReviewApp(
+            senders=senders,
+            title=f"{len(senders)} senders {filter_label}",
+        )
+        decisions = app.run()
+    else:
+        # Non-TTY: just list senders
+        for sender in senders:
+            console.print(f"  {sender['domain']} ({sender.get('total_emails', 0)} emails)")
+        return
 
-    for sender in senders:
-        domain = sender["domain"]
-        total = sender["total_emails"]
-        subjects = sender.get("sample_subjects", "").split("|")[:3]
+    if decisions is None:
+        console.print("[muted]Review cancelled.[/muted]")
+        return
 
-        console.print(f"[bold][{total} emails] [domain]{domain}[/domain][/bold]")
-        if sender.get("ai_classification"):
-            confidence = sender.get("ai_confidence", 0)
-            console.print(
-                f"  [muted]AI says: {sender['ai_classification']} ({confidence:.0%} confident)[/muted]"
-            )
-        if subjects and subjects[0]:
-            console.print(f"  [muted]Subjects: {', '.join(s for s in subjects if s)}[/muted]")
-
-        # Interactive selector with clear labels
-        choice = questionary.select(
-            f"What would you like to do with {domain}?",
-            choices=[
-                questionary.Choice("Unsubscribe - Stop receiving emails", value="unsub"),
-                questionary.Choice("Keep - Continue receiving", value="keep"),
-                questionary.Choice("Block - Block sender entirely", value="block"),
-                questionary.Choice("Skip - Decide later", value="skip"),
-            ],
-        ).ask()
-
-        if choice is None:
-            # User cancelled (Ctrl+C or ESC)
-            console.print("  [muted]Cancelled[/muted]")
-            break
-
-        if choice == "unsub":
-            db.set_user_override(domain, "unsub")
-            db.update_sender_status(domain, SenderStatus.UNSUBSCRIBED)
-            console.print("  [unsubscribe]→ Will unsubscribe[/unsubscribe]")
-            user_action = Action.UNSUB
-        elif choice == "keep":
-            db.set_user_override(domain, "keep")
-            db.update_sender_status(domain, SenderStatus.KEEP)
-            console.print("  [keep]→ Will keep[/keep]")
-            user_action = Action.KEEP
-        elif choice == "block":
-            db.set_user_override(domain, "block")
-            db.update_sender_status(domain, SenderStatus.BLOCKED)
-            console.print("  [block]→ Will block[/block]")
-            user_action = Action.BLOCK
-        else:
-            console.print("  [review]→ Skipped[/review]")
-            user_action = None
-
-        # Log user action for learning (if not skipped)
-        if user_action is not None:
-            # Get AI recommendation if available
-            ai_rec = None
-            if ai_class_str := sender.get("ai_classification"):
-                # Normalize 'unsubscribe' to 'unsub' for enum matching
-                if ai_class_str == "unsubscribe":
-                    ai_class_str = "unsub"
-                try:
-                    ai_rec = Action(ai_class_str)
-                except ValueError:
-                    pass  # ai_rec remains None for unknown values
-
-            # Calculate open rate
-            seen = sender.get("seen_emails", 0)
-            open_rate = (seen / total * 100) if total > 0 else 0
-
-            # Log the action
-            action_record = UserAction(
-                domain=domain,
-                action=user_action,
-                timestamp=datetime.now(),
-                ai_recommendation=ai_rec,
-                heuristic_score=None,  # Not available in review context
-                open_rate=open_rate,
-                email_count=total,
-            )
-            db.log_user_action(action_record)
-
-            # Update learner with this action
-            learner = get_learner()
-            learner.update_from_action(action_record)
-
-        console.print()
+    # Apply decisions
+    _apply_review_decisions(senders, decisions)
 
 
 @main.command()
@@ -1176,6 +1300,45 @@ def undo(domain: str | None):
         console.print("No recent unsubscribes to undo.")
         return
 
+    # Use TUI for interactive terminals
+    if console.is_terminal:
+        app = UndoApp(recent_unsubs=recent)
+        to_undo = app.run()
+
+        if to_undo:
+            for undo_domain in to_undo:
+                db.set_user_override(undo_domain, "keep")
+                db.update_sender_status(undo_domain, SenderStatus.KEEP)
+                db.log_correction(undo_domain, "unsub", "keep")
+
+                sender = db.get_sender(undo_domain)
+                if sender:
+                    seen = sender.get("seen_emails", 0)
+                    total = sender.get("total_emails", 0)
+                    open_rate = (seen / total * 100) if total > 0 else 0
+
+                    action_record = UserAction(
+                        domain=undo_domain,
+                        action=Action.KEEP,
+                        timestamp=datetime.now(),
+                        ai_recommendation=Action.UNSUB,
+                        heuristic_score=None,
+                        open_rate=open_rate,
+                        email_count=total,
+                    )
+                    db.log_user_action(action_record)
+                    learner = get_learner()
+                    learner.update_from_action(action_record)
+
+            console.print(
+                f"[success]✓ Undone {len(to_undo)} sender(s) — marked as 'keep'[/success]"
+            )
+            console.print("[muted]Learning from corrections.[/muted]")
+        else:
+            console.print("[muted]No changes.[/muted]")
+        return
+
+    # Non-TTY fallback: just list
     console.print("\n[header]Recent unsubscribes (last 30 days):[/header]\n")
 
     for i, item in enumerate(recent[:20], 1):
@@ -1201,24 +1364,26 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
             console.print(f"  Frequency: {status['frequency']}")
             console.print(f"  Path: {status['path']}")
         else:
-            console.print("[yellow]No schedule configured[/yellow]")
+            console.print("[warning]No schedule configured[/warning]")
         return
 
     if off:
         success, msg = uninstall_schedule()
         if success:
-            console.print(f"[green]✓ {msg}[/green]")
+            console.print(f"[success]✓ {msg}[/success]")
         else:
-            console.print(f"[red]{msg}[/red]")
+            console.print(f"[error]✗ {msg}[/error]")
+            raise SystemExit(1)
         return
 
     frequency = "monthly" if monthly else "weekly"
     success, msg = install_schedule(frequency)
 
     if success:
-        console.print(f"[green]✓ {msg}[/green]")
+        console.print(f"[success]✓ {msg}[/success]")
     else:
-        console.print(f"[red]{msg}[/red]")
+        console.print(f"[error]✗ {msg}[/error]")
+        raise SystemExit(1)
 
 
 @main.command("config")
@@ -1234,12 +1399,15 @@ def config_cmd(show: bool, ai: str | None, mode: str | None):
     if ai:
         config.ai.enabled = ai == "on"
         config.save()
-        console.print(f"AI: {'enabled' if config.ai.enabled else 'disabled'}")
+        if config.ai.enabled:
+            console.print("[success]✓ AI enabled[/success]")
+        else:
+            console.print("[muted]✓ AI disabled[/muted]")
 
     if mode:
         config.operation_mode = mode
         config.save()
-        console.print(f"Mode: {mode}")
+        console.print(f"[success]✓ Mode set to {mode}[/success]")
 
     if show or (not ai and not mode):
         console.print("\n[header]Current Configuration[/header]")
@@ -1262,7 +1430,7 @@ def rule(pattern: str, action: str):
     """
     db.init_db()
     db.add_rule(pattern, action)
-    console.print(f"[green]✓ Added rule: {pattern} → {action}[/green]")
+    console.print(f"[success]✓ Added rule: {pattern} → {action}[/success]")
 
 
 @main.command()
@@ -1312,13 +1480,36 @@ def senders(status: str | None, sort: str, as_json: bool):
     all_senders = db.get_all_senders(status_filter=status_filter, sort_by=sort_map[sort])
 
     if not all_senders:
-        console.print("[muted]No senders tracked yet. Run 'nothx run' to scan your inbox.[/muted]")
+        console.print("\n[muted]🔍 No senders tracked yet[/muted]")
+        console.print("[muted]Run 'nothx run' to scan your inbox.[/muted]\n")
         return
 
     if as_json:
         click.echo(json.dumps(all_senders, indent=2, default=str))
         return
 
+    # Use TUI for interactive terminals
+    if console.is_terminal:
+        app = SendersApp(senders=all_senders)
+        status_changes = app.run()
+
+        # Apply any status changes made in the TUI
+        if status_changes:
+            status_change_map = {
+                "unsub": SenderStatus.UNSUBSCRIBED,
+                "keep": SenderStatus.KEEP,
+            }
+            for domain, new_status in status_changes.items():
+                if db_status := status_change_map.get(new_status):
+                    db.set_user_override(domain, new_status)
+                    db.update_sender_status(domain, db_status)
+            if status_changes:
+                console.print(
+                    f"[success]✓ Updated {len(status_changes)} sender(s)[/success]"
+                )
+        return
+
+    # Non-TTY fallback: static table
     status_label = f" ({status})" if status else ""
     console.print(f"\n[header]Tracked Senders{status_label} ({len(all_senders)} total)[/header]\n")
 
@@ -1335,7 +1526,7 @@ def senders(status: str | None, sort: str, as_json: bool):
         "unknown": "review",
     }
 
-    for sender in all_senders[:50]:  # Limit display to 50
+    for sender in all_senders[:50]:
         sender_status = sender.get("status", "unknown")
         style = status_styles.get(sender_status, "")
         status_display = f"[{style}]{sender_status.title()}[/{style}]"
@@ -1424,7 +1615,8 @@ def history(limit: int, failures: bool, as_json: bool):
     activity = db.get_activity_log(limit=limit, failures_only=failures)
 
     if not activity:
-        console.print("[muted]No activity recorded yet.[/muted]")
+        console.print("\n[muted]📝 No activity yet[/muted]")
+        console.print("[muted]Your activity will appear here after your first scan.[/muted]\n")
         return
 
     if as_json:
@@ -1517,6 +1709,7 @@ def export(type_: str, output: str):
         console.print(f"[success]✓ Exported {len(data)} records to {output}[/success]")
     except OSError as e:
         console.print(f"[error]Failed to write {output}: {e}[/error]")
+        raise SystemExit(1)
 
 
 @main.command("test")
@@ -1526,8 +1719,9 @@ def test_connection():
 
     if not config.accounts:
         console.print("[error]No accounts configured. Run 'nothx init' first.[/error]")
-        return
+        raise SystemExit(1)
 
+    any_failed = False
     for _name, account in config.accounts.items():
         console.print(f"\n[header]Testing connection to {account.email}...[/header]")
 
@@ -1539,6 +1733,7 @@ def test_connection():
             console.print("[success]✓ Authentication successful[/success]")
             console.print("[success]✓ Inbox accessible[/success]")
         else:
+            any_failed = True
             console.print(f"[error]✗ Connection failed: {msg}[/error]")
             console.print("\n[muted]Suggestions:[/muted]")
             console.print("  • Check your internet connection")
@@ -1546,6 +1741,9 @@ def test_connection():
                 for tip in tips:
                     console.print(tip)
             console.print("  • Make sure IMAP is enabled in your email settings")
+
+    if any_failed:
+        raise SystemExit(1)
 
 
 @main.command()
@@ -1732,10 +1930,11 @@ def update(check: bool):
                 console.print("\n[muted]Restart nothx to use the new version.[/muted]")
             else:
                 console.print(f"[error]Update failed: {result.stderr}[/error]")
+                raise SystemExit(1)
         except subprocess.TimeoutExpired:
             console.print("[error]Update timed out. Try running manually:[/error]")
             console.print("  pip install --upgrade nothx")
-            return
+            raise SystemExit(1)
     else:
         console.print("\n[warning]Could not check PyPI for updates.[/warning]")
         console.print("[muted]nothx may not be published yet, or you're offline.[/muted]")

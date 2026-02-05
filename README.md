@@ -17,6 +17,15 @@ Set it. Forget it. Inbox fixed.
 
 ## Quick Start
 
+**macOS:**
+```bash
+brew install pipx
+pipx install nothx
+pipx ensurepath   # then restart your terminal
+nothx init
+```
+
+**Linux / inside a venv:**
 ```bash
 pip install nothx
 nothx init
@@ -25,6 +34,31 @@ nothx init
 That's it. The wizard handles everything else.
 
 > Run `nothx` anytime for the interactive menu.
+
+<details>
+<summary><strong>Don't have Python?</strong></summary>
+
+**macOS:**
+```bash
+brew install python@3.11 pipx
+```
+Or download from [python.org/downloads](https://python.org/downloads)
+
+**Windows:**
+
+Download from [python.org/downloads](https://python.org/downloads). During install, check "Add Python to PATH".
+
+**Linux:**
+```bash
+# Ubuntu/Debian
+sudo apt install python3.11 python3-pip
+
+# Fedora
+sudo dnf install python3.11 python3-pip
+```
+
+After installing, verify with `python3 --version`.
+</details>
 
 ---
 
@@ -152,42 +186,23 @@ Each layer can make a final call or pass to the next. Your rules always win.
 - Gmail, Outlook, Yahoo, or iCloud account
 - AI provider *(optional — works without AI too)*
 
-<details>
-<summary><strong>Don't have Python?</strong></summary>
+### Installation
 
 **macOS:**
 ```bash
-brew install python@3.11
+# Base install
+pipx install nothx
+
+# With AI provider (use a venv)
+python3 -m venv ~/.nothx-env
+source ~/.nothx-env/bin/activate
+pip install "nothx[anthropic]"  # or openai, gemini, all-ai
 ```
-Or download from [python.org/downloads](https://python.org/downloads)
-
-**Windows:**
-
-Download from [python.org/downloads](https://python.org/downloads). During install, check "Add Python to PATH".
 
 **Linux:**
 ```bash
-# Ubuntu/Debian
-sudo apt install python3.11 python3-pip
-
-# Fedora
-sudo dnf install python3.11 python3-pip
-```
-
-After installing, verify with `python3 --version`.
-</details>
-
-### Installation
-
-```bash
-# Base install (heuristics only, or Ollama)
 pip install nothx
-
-# With your preferred AI provider
-pip install "nothx[anthropic]"  # Claude (recommended)
-pip install "nothx[openai]"     # GPT-4
-pip install "nothx[gemini]"     # Google Gemini
-pip install "nothx[all-ai]"     # All providers
+pip install "nothx[anthropic]"  # or openai, gemini, all-ai
 ```
 
 <details>
@@ -225,6 +240,30 @@ pip install "nothx[all-ai]"     # All providers
 ---
 
 ## Troubleshooting
+
+<details>
+<summary><strong><code>command not found: nothx</code> after installing</strong></summary>
+
+If you installed with `pipx`, run:
+```bash
+pipx ensurepath
+```
+Then restart your terminal.
+
+</details>
+
+<details>
+<summary><strong><code>error: externally-managed-environment</code></strong></summary>
+
+Your Python is managed by Homebrew. Use `pipx` instead of `pip`:
+```bash
+brew install pipx
+pipx install nothx
+pipx ensurepath
+```
+Then restart your terminal.
+
+</details>
 
 <details>
 <summary><strong>Connection failed</strong></summary>

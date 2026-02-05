@@ -8,6 +8,7 @@ from datetime import datetime
 import click
 import humanize
 import questionary
+from questionary import Style as QStyle
 from rich.columns import Columns
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
@@ -24,8 +25,68 @@ from .imap import test_account
 from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
-from .theme import console, print_animated_banner, print_banner
+from .theme import console, print_animated_banner, print_animated_welcome
 from .unsubscriber import unsubscribe
+
+# Questionary style — orange1 highlight matching our logo color
+Q_STYLE = QStyle([
+    ("highlighted", "fg:#ffaf00"),
+    ("pointer", "fg:#ffaf00"),
+    ("selected", "fg:#ffaf00"),
+    ("questionmark", "fg:green"),
+    ("answer", "fg:green"),
+])
+Q_POINTER = "›"
+
+
+def _key(k: str) -> str:
+    """Render a single keycap with rounded pill shape using half-block edges."""
+    return f"[grey19]▐[/][grey50 on grey19] {k} [/][grey19]▌[/]"
+
+
+_key_hints_shown = False
+
+
+def _styled_select(choices: list, **kwargs) -> str | None:
+    """Run a styled questionary.select, replacing answer line with ✓ confirmation."""
+    result = questionary.select(
+        "",
+        choices=choices,
+        instruction=" ",
+        style=Q_STYLE,
+        qmark="",
+        pointer=Q_POINTER,
+        **kwargs,
+    ).ask()
+    if result is not None:
+        # Find display label from Choice objects or plain strings
+        label = str(result)
+        for c in choices:
+            if isinstance(c, questionary.Choice) and c.value == result:
+                label = c.title
+                break
+        # Overwrite questionary's answer line with styled ✓ version
+        # The \n ensures 1 blank line between the preceding header and ✓,
+        # matching the gap questionary's blank prompt provided during browsing.
+        console.file.write("\033[1A\033[2K\r")
+        console.file.flush()
+        console.print(f"\n  [green]✓ {label}[/green]")
+    return result
+
+
+def _select_header(label: str) -> None:
+    """Print a section header with key hints on first call, plain header after."""
+    global _key_hints_shown
+    if not _key_hints_shown:
+        _key_hints_shown = True
+        console.print(
+            f"\n\n[header]{label}[/header]  "
+            f"{_key('↑')} {_key('↓')} [dim]navigate[/dim]  "
+            f"{_key('⏎')} [dim]select[/dim]"
+        )
+    else:
+        console.print(f"\n[header]{label}[/header]")
+
 
 # Simple email validation regex
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
@@ -87,19 +148,38 @@ TROUBLESHOOTING_TIPS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _show_welcome_screen() -> None:
-    """Show welcome screen with status and interactive command selector."""
+def _get_greeting() -> str:
+    """Get time-based greeting with user's first name if available."""
+    import os as _os
+
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        emoji, greeting = "☀️", "Good morning"
+    elif 12 <= hour < 17:
+        emoji, greeting = "🌤️", "Good afternoon"
+    elif 17 <= hour < 21:
+        emoji, greeting = "🌆", "Good evening"
+    else:
+        emoji, greeting = "🌙", "Hey there"
+
+    name = None
+    try:
+        for var in ("USER", "USERNAME", "LOGNAME"):
+            if username := _os.environ.get(var):
+                name = username.split(".")[0].capitalize()
+                break
+    except Exception:
+        pass
+
+    if name:
+        return f"{emoji}  {greeting}, {name}!"
+    return f"{emoji}  {greeting}!"
+
+
+def _build_version_line(config: Config) -> str:
+    """Build the version + status string for display."""
     import sqlite3
 
-    config = Config.load()
-
-    # Header: Brand + tagline
-    console.print()
-    print_animated_banner()
-    console.print("[logo]nothx[/logo]")
-    console.print("Smart enough to say no.")
-
-    # Version + status in muted text
     status_parts = [f"v{__version__}"]
 
     account_count = len(config.accounts)
@@ -108,7 +188,6 @@ def _show_welcome_screen() -> None:
     else:
         status_parts.append("not configured")
 
-    # Get last scan time if DB exists
     try:
         db.init_db()
         stats = db.get_stats()
@@ -121,48 +200,72 @@ def _show_welcome_screen() -> None:
         if stats.get("pending_review", 0) > 0:
             status_parts.append(f"{stats['pending_review']} pending")
     except (sqlite3.Error, OSError):
-        # Database not initialized or inaccessible - skip stats
         pass
 
-    console.print(f"[dim]{' · '.join(status_parts)}[/dim]")
+    return " · ".join(status_parts)
 
-    # Separator
-    console.print()
-    console.print(Rule(style="dim"))
 
-    # Get started section with interactive selector
-    console.print("\n[header]Get started[/header]\n")
+def _get_previous_run_summary_text() -> str | None:
+    """Get brief summary text from the last run, or None."""
+    try:
+        activity = db.get_activity_log(limit=1)
+        if activity and activity[0].get("type") == "run":
+            r = activity[0]
+            timestamp = r.get("timestamp", "")
+            try:
+                ts_dt = datetime.fromisoformat(timestamp)
+                time_ago = humanize.naturaltime(ts_dt)
+            except (ValueError, TypeError):
+                time_ago = "recently"
 
-    # Build command choices based on configuration state
+            unsubbed = r.get("auto_unsubbed", 0)
+            if unsubbed > 0:
+                return f"Last run {time_ago} · unsubscribed from {unsubbed} sender{'s' if unsubbed != 1 else ''}"
+    except Exception:
+        pass
+    return None
+
+
+def _show_welcome_screen() -> None:
+    """Show welcome screen with gradient panel and interactive command selector."""
+    config = Config.load()
+    greeting = _get_greeting()
+    version_line = _build_version_line(config)
+
+    # Animated gradient banner in a panel
+    print_animated_welcome(greeting, version_line)
+
+    # Show last run summary if available
+    run_summary = _get_previous_run_summary_text()
+    if run_summary:
+        console.print(f"[muted]{run_summary}[/muted]")
+
+    _select_header("Get started")
+
     if not config.accounts:
-        # Not configured - prioritize init
         choices = [
-            questionary.Choice("nothx init     Set up email accounts and API key", value="init"),
-            questionary.Choice("nothx --help   View all commands", value="help"),
+            questionary.Choice("Set up email accounts and API key", value="init"),
+            questionary.Choice("View all commands", value="help"),
+            questionary.Choice("Exit", value="exit"),
         ]
     else:
-        # Configured - show main workflow commands
         choices = [
-            questionary.Choice("nothx run      Scan inbox and unsubscribe", value="run"),
-            questionary.Choice("nothx status   Show current stats", value="status"),
-            questionary.Choice("nothx review   Review pending decisions", value="review"),
-            questionary.Choice("nothx senders  List all tracked senders", value="senders"),
-            questionary.Choice("nothx --help   View all commands", value="help"),
+            questionary.Choice("Scan inbox and unsubscribe", value="run"),
+            questionary.Choice("Show current stats", value="status"),
+            questionary.Choice("Review pending decisions", value="review"),
+            questionary.Choice("List all tracked senders", value="senders"),
+            questionary.Choice("View all commands", value="help"),
+            questionary.Choice("Exit", value="exit"),
         ]
 
-    selected = questionary.select(
-        "",
-        choices=choices,
-        instruction="",
-    ).ask()
+    selected = _styled_select(choices)
 
-    if selected is None:
-        # User pressed ESC - exit cleanly
+    if selected is None or selected == "exit":
         console.print()
         return
 
-    # Execute the selected command
     ctx = click.get_current_context()
+    ctx.obj["from_welcome"] = True
     if selected == "init":
         ctx.invoke(init)
     elif selected == "run":
@@ -254,6 +357,7 @@ def main(ctx):
 
     Set it up once. AI handles your inbox forever.
     """
+    ctx.ensure_object(dict)
     if ctx.invoked_subcommand is None:
         _show_welcome_screen()
 
@@ -261,18 +365,19 @@ def main(ctx):
 def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
     """Interactive flow to add an email account. Returns (name, account) or None if cancelled."""
     # Email provider selection
-    provider = questionary.select(
-        "Select your email provider:",
-        choices=[
-            questionary.Choice("Gmail", value="gmail"),
-            questionary.Choice("Outlook / Live / Hotmail", value="outlook"),
-            questionary.Choice("Yahoo Mail", value="yahoo"),
-            questionary.Choice("iCloud Mail", value="icloud"),
-        ],
-    ).ask()
+    _select_header("Select your email provider")
+    provider_choices = [
+        questionary.Choice("Gmail", value="gmail"),
+        questionary.Choice("Outlook / Live / Hotmail", value="outlook"),
+        questionary.Choice("Yahoo Mail", value="yahoo"),
+        questionary.Choice("iCloud Mail", value="icloud"),
+    ]
+    provider = _styled_select(provider_choices)
 
     if provider is None:  # User cancelled
         return None
+
+    console.print()  # Gap after selection
 
     # Email address with validation
     while True:
@@ -319,11 +424,15 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
 
 
 @main.command()
-def init():
+@click.pass_context
+def init(ctx):
     """Set up nothx with your email account and API key."""
-    print_banner("Let's set up your inbox cleanup")
-
     config = Config.load()
+
+    if not (ctx.obj or {}).get("from_welcome"):
+        greeting = _get_greeting()
+        version_line = _build_version_line(config)
+        print_animated_welcome(greeting, version_line)
 
     # Multi-account loop
     account_count = 0
@@ -370,11 +479,8 @@ def init():
             questionary.Choice(f"{info['name']} - {info['description']}", value=key)
         )
 
-    provider = questionary.select(
-        "Select AI provider:",
-        choices=provider_choices,
-        default="anthropic",
-    ).ask()
+    _select_header("Select AI provider")
+    provider = _styled_select(provider_choices, default="anthropic")
 
     config.ai.provider = provider
 
@@ -386,6 +492,7 @@ def init():
         config.ai.api_key = None
 
         # Ask for Ollama URL
+        console.print()  # Gap after selection
         api_base = questionary.text(
             "Ollama URL:",
             default="http://localhost:11434",
@@ -399,11 +506,8 @@ def init():
         available_models = ollama.get_model_options()
 
         if available_models:
-            model = questionary.select(
-                "Select model:",
-                choices=available_models,
-                default=available_models[0],
-            ).ask()
+            _select_header("Select model")
+            model = _styled_select(available_models, default=available_models[0])
             config.ai.model = model
         else:
             config.ai.model = "llama3.2"
@@ -496,17 +600,16 @@ def account(ctx):
 
     # Show interactive selector when no subcommand provided
     choices = [
-        questionary.Choice("list    List configured accounts", value="list"),
-        questionary.Choice("add     Add a new account", value="add"),
-        questionary.Choice("remove  Remove an account", value="remove"),
+        questionary.Choice("List configured accounts", value="list"),
+        questionary.Choice("Add a new account", value="add"),
+        questionary.Choice("Remove an account", value="remove"),
+        questionary.Choice("Exit", value="exit"),
     ]
 
-    selected = questionary.select(
-        "What would you like to do?",
-        choices=choices,
-    ).ask()
+    _select_header("Manage accounts")
+    selected = _styled_select(choices)
 
-    if selected is None:
+    if selected is None or selected == "exit":
         return
 
     if selected == "list":
@@ -578,10 +681,8 @@ def account_remove():
     ]
     choices.append(questionary.Choice("Cancel", value=None))
 
-    account_name = questionary.select(
-        "Select account to remove:",
-        choices=choices,
-    ).ask()
+    _select_header("Select account to remove")
+    account_name = _styled_select(choices)
 
     if account_name is None:
         console.print("Cancelled.")
@@ -765,7 +866,7 @@ def _run_scan(
         ).ask()
 
         if review_decisions:
-            console.print("\n[header]Manual Review[/header]")
+            _select_header("Manual Review")
             console.print("[muted]Change any decisions you disagree with:[/muted]\n")
 
             # Review items marked for unsubscribe
@@ -779,6 +880,9 @@ def _run_scan(
                         questionary.Choice("Skip for now", value="skip"),
                     ],
                     default="unsub",
+                    instruction=" ",
+                    style=Q_STYLE,
+                    pointer=Q_POINTER,
                 ).ask()
 
                 if action is None:
@@ -806,6 +910,9 @@ def _run_scan(
                             questionary.Choice("Skip for now", value="skip"),
                         ],
                         default="keep",
+                        instruction=" ",
+                        style=Q_STYLE,
+                        pointer=Q_POINTER,
                     ).ask()
 
                     if action is None:
@@ -866,7 +973,7 @@ def _run_scan(
                 console.print(f"[warning]! {stats.failed} failed (logged for retry)[/warning]")
 
             # Undo reminder
-            console.print("\n[muted]⏱ Run `nothx undo` to restore if needed[/muted]")
+            console.print("\n[muted]⏱  Run `nothx undo` to restore if needed[/muted]")
 
     # Update stats
     stats.kept = len(to_keep)
@@ -1043,7 +1150,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         console.print(f"[success]No senders {filter_label}![/success]")
         return
 
-    console.print(f"\n[header]{len(senders)} senders {filter_label}:[/header]\n")
+    _select_header(f"{len(senders)} senders {filter_label}")
 
     for sender in senders:
         domain = sender["domain"]
@@ -1068,6 +1175,9 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
                 questionary.Choice("Block - Block sender entirely", value="block"),
                 questionary.Choice("Skip - Decide later", value="skip"),
             ],
+            instruction=" ",
+            style=Q_STYLE,
+            pointer=Q_POINTER,
         ).ask()
 
         if choice is None:

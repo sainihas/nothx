@@ -331,20 +331,20 @@ def _show_welcome_screen() -> None:
         ctx.invoke(senders, status=None, sort="date", as_json=False)
     elif selected == "help":
         alias_names = {"r", "s", "rv", "h"}
+        group = ctx.command
+        assert isinstance(group, click.Group)
         _select_header("Select a command")
         cmd_choices = []
-        for name in sorted(ctx.command.commands):
+        for name in sorted(group.commands):
             if name not in alias_names:
-                cmd = ctx.command.commands[name]
+                cmd = group.commands[name]
                 help_text = cmd.get_short_help_str(limit=50)
-                cmd_choices.append(
-                    questionary.Choice(f"{name:<12s} {help_text}", value=name)
-                )
+                cmd_choices.append(questionary.Choice(f"{name:<12s} {help_text}", value=name))
         cmd_choices.append(questionary.Choice("Back", value="back"))
 
         cmd_selected = _styled_select(cmd_choices)
         if cmd_selected and cmd_selected != "back":
-            cmd_obj = ctx.command.commands[cmd_selected]
+            cmd_obj = group.commands[cmd_selected]
             try:
                 ctx.invoke(cmd_obj)
             except click.UsageError as e:
@@ -623,7 +623,9 @@ def init(ctx):
             if temp_provider:
                 config.ai.model = temp_provider.default_model
 
-            with console.status(f"Testing {provider_info['name']} connection...", spinner_style="white"):
+            with console.status(
+                f"Testing {provider_info['name']} connection...", spinner_style="white"
+            ):
                 success, msg = test_ai_connection(config)
 
             if success:
@@ -1017,7 +1019,9 @@ def _run_scan(
             with Progress(
                 SpinnerColumn(style="white"),
                 TextColumn("[progress.description]{task.description}"),
-                BarColumn(complete_style="orange1", finished_style="orange1", pulse_style="orange1"),
+                BarColumn(
+                    complete_style="orange1", finished_style="orange1", pulse_style="orange1"
+                ),
                 TaskProgressColumn(),
                 console=console,
                 transient=True,

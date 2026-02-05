@@ -34,12 +34,25 @@ Q_STYLE = QStyle(
         ("highlighted", "fg:#ffaf00"),
         ("pointer", "fg:#ffaf00"),
         ("selected", "fg:#ffaf00"),
-        ("questionmark", "fg:green"),
+        ("qmark", "fg:green"),
         ("answer", "fg:green"),
     ]
 )
 Q_POINTER = "›"
-Q_COMMON: dict[str, Any] = {"instruction": " ", "style": Q_STYLE, "pointer": Q_POINTER}
+Q_COMMON: dict[str, Any] = {
+    "instruction": " ",
+    "style": Q_STYLE,
+    "pointer": Q_POINTER,
+    "qmark": "",
+}
+
+# Style for text/password prompts — label goes in qmark for column-0 alignment
+Q_INPUT_STYLE = QStyle(
+    [
+        ("qmark", "bold fg:#b3b3b3"),  # match header style (bold grey70)
+        ("answer", "fg:green"),
+    ]
+)
 
 # Vertical line prefix for indented content under section headers
 _L = "[muted]│[/muted]"
@@ -417,7 +430,7 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
 
     # Email address with validation
     while True:
-        email = questionary.text("Email address:").ask()
+        email = questionary.text("", qmark="Email address:", style=Q_INPUT_STYLE).ask()
         if not email:
             return None
         if _is_valid_email(email):
@@ -432,7 +445,7 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
     else:
         console.print("\n[warning]Enter your email password or app password.[/warning]\n")
 
-    password = questionary.password("App Password:").ask()
+    password = questionary.password("", qmark="App Password:", style=Q_INPUT_STYLE).ask()
     if not password:
         return None
 
@@ -529,8 +542,10 @@ def init(ctx):
         # Ask for Ollama URL
         console.print()  # Gap after selection
         api_base = questionary.text(
-            "Ollama URL:",
+            "",
             default="http://localhost:11434",
+            qmark="Ollama URL:",
+            style=Q_INPUT_STYLE,
         ).ask()
         config.ai.api_base = api_base
 
@@ -570,7 +585,9 @@ def init(ctx):
                 console.print(f"{_L}{line[1:]}" if line.startswith("  ") else line)
 
         api_key = questionary.text(
-            f"{provider_info['name']} API key (leave empty to skip):",
+            "",
+            qmark=f"{provider_info['name']} API key (leave empty to skip):",
+            style=Q_INPUT_STYLE,
         ).ask()
 
         if api_key and api_key.strip():
@@ -812,6 +829,8 @@ def _run_scan(
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
         console=console,
         transient=True,
     ) as progress:
@@ -967,6 +986,7 @@ def _run_scan(
                 BarColumn(),
                 TaskProgressColumn(),
                 console=console,
+                transient=True,
             ) as progress:
                 task = progress.add_task("Processing...", total=len(to_unsub) + len(to_block))
 
@@ -1692,7 +1712,7 @@ def reset(keep_config: bool):
     console.print()
 
     # Require typing "reset" to confirm
-    confirm = questionary.text('Type "reset" to confirm:').ask()
+    confirm = questionary.text("", qmark='Type "reset" to confirm:', style=Q_INPUT_STYLE).ask()
 
     if confirm != "reset":
         console.print("Cancelled.")

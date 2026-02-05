@@ -13,7 +13,6 @@ from questionary import Style as QStyle
 from rich.columns import Columns
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
-from rich.prompt import Confirm
 from rich.rule import Rule
 from rich.table import Table
 from rich.tree import Tree
@@ -90,6 +89,17 @@ def _select_header(label: str) -> None:
         )
     else:
         console.print(f"\n[header]{label}[/header]")
+
+
+def _styled_confirm(message: str, default: bool = True) -> bool:
+    """Styled yes/no selector matching the overall UI style."""
+    console.print(f"\n[header]{message}[/header]")
+    choices = [
+        questionary.Choice("Yes", value="yes"),
+        questionary.Choice("No", value="no"),
+    ]
+    result = _styled_select(choices, default="yes" if default else "no")
+    return result == "yes"
 
 
 # Simple email validation regex
@@ -237,11 +247,6 @@ def _show_welcome_screen() -> None:
 
     # Animated gradient banner in a panel
     print_animated_welcome(greeting, version_line)
-
-    # Show last run summary if available
-    run_summary = _get_previous_run_summary_text()
-    if run_summary:
-        console.print(f"[muted]{run_summary}[/muted]")
 
     _select_header("Get started")
 
@@ -455,15 +460,10 @@ def init(ctx):
             config.default_account = account_name
         account_count += 1
 
-        console.print(f"[success]✓ Added account: {account.email}[/success]\n")
+        console.print(f"[success]✓ Added account: {account.email}[/success]")
 
         # Ask to add another
-        add_another = questionary.confirm(
-            "Add another email account?",
-            default=False,
-        ).ask()
-
-        if not add_another:
+        if not _styled_confirm("Add another email account?", default=False):
             break
 
     # AI Provider setup
@@ -570,22 +570,14 @@ def init(ctx):
 
     # Save config
     config.save()
-    console.print(f"[success]✓ Configuration saved to {get_config_dir()}[/success]\n")
+    console.print(f"[success]✓ Configuration saved to {get_config_dir()}[/success]")
 
     # First scan
-    run_scan = questionary.confirm(
-        "Run first scan now?",
-        default=True,
-    ).ask()
-
-    if run_scan:
+    if _styled_confirm("Run first scan now?", default=True):
         _run_scan(config, verbose=True, dry_run=True)
 
     # Schedule setup
-    schedule_runs = questionary.confirm(
-        "Auto-schedule monthly runs?",
-        default=True,
-    ).ask()
+    schedule_runs = _styled_confirm("Auto-schedule monthly runs?", default=True)
 
     if schedule_runs:
         success, msg = install_schedule("monthly")
@@ -698,12 +690,7 @@ def account_remove():
 
     # Confirm removal
     acc = config.accounts[account_name]
-    confirm = questionary.confirm(
-        f"Remove {acc.email}?",
-        default=False,
-    ).ask()
-
-    if not confirm:
+    if not _styled_confirm(f"Remove {acc.email}?", default=False):
         console.print("Cancelled.")
         return
 
@@ -867,13 +854,7 @@ def _run_scan(
 
     # Optional manual review of decisions (not in auto mode)
     if not auto and not dry_run and (to_unsub or to_keep):
-        console.print()
-        review_decisions = questionary.confirm(
-            "Review decisions before proceeding?",
-            default=False,
-        ).ask()
-
-        if review_decisions:
+        if _styled_confirm("Review decisions before proceeding?", default=False):
             _select_header("Manual Review")
             console.print("[muted]Change any decisions you disagree with:[/muted]\n")
 
@@ -943,9 +924,7 @@ def _run_scan(
 
     # Phase 3: Execute unsubscribes (if not dry run)
     if not dry_run and (to_unsub or to_block):
-        console.print()
-
-        if auto or Confirm.ask(
+        if auto or _styled_confirm(
             f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
         ):
             console.print("\n[header]Phase 3/3: Unsubscribing[/header]")
@@ -1826,8 +1805,7 @@ def update(check: bool):
             return
 
         # Perform update
-        console.print()
-        if not questionary.confirm(f"Update to version {latest}?", default=True).ask():
+        if not _styled_confirm(f"Update to version {latest}?", default=True):
             console.print("Cancelled.")
             return
 

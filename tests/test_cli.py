@@ -113,14 +113,12 @@ class TestInitCommand:
     @patch("nothx.cli.questionary.select")
     @patch("nothx.cli.questionary.text")
     @patch("nothx.cli.questionary.password")
-    @patch("nothx.cli.questionary.confirm")
     @patch("nothx.cli.test_account")
     @patch("nothx.cli.test_ai_connection")
     def test_init_full_flow(
         self,
         mock_ai_test,
         mock_account_test,
-        mock_confirm,
         mock_password,
         mock_text,
         mock_select,
@@ -131,18 +129,16 @@ class TestInitCommand:
         # Mock user inputs
         mock_select.return_value.ask.side_effect = [
             "gmail",  # Provider selection
+            "no",  # Add another account? (via _styled_confirm)
             "anthropic",  # AI provider selection
+            "no",  # Run first scan? (via _styled_confirm)
+            "no",  # Schedule runs? (via _styled_confirm)
         ]
         mock_text.return_value.ask.side_effect = [
             "user@gmail.com",  # Email
             "test-api-key",  # API key
         ]
         mock_password.return_value.ask.return_value = "app-password"
-        mock_confirm.return_value.ask.side_effect = [
-            False,  # Add another account
-            False,  # Run first scan
-            False,  # Schedule runs
-        ]
         mock_account_test.return_value = (True, "Connected")
         mock_ai_test.return_value = (True, "AI working")
 
@@ -197,13 +193,12 @@ class TestAccountCommands:
         assert "Added account" in result.output
 
     @patch("nothx.cli.questionary.select")
-    @patch("nothx.cli.questionary.confirm")
-    def test_account_remove(
-        self, mock_confirm, mock_select, runner, configured_env, temp_config_dir
-    ):
+    def test_account_remove(self, mock_select, runner, configured_env, temp_config_dir):
         """Test removing an account."""
-        mock_select.return_value.ask.return_value = "default"
-        mock_confirm.return_value.ask.return_value = True
+        mock_select.return_value.ask.side_effect = [
+            "default",  # Account selection
+            "yes",  # Remove confirmation (via _styled_confirm)
+        ]
 
         result = runner.invoke(account_remove, [])
 
@@ -211,13 +206,12 @@ class TestAccountCommands:
         assert "Removed account" in result.output
 
     @patch("nothx.cli.questionary.select")
-    @patch("nothx.cli.questionary.confirm")
-    def test_account_remove_cancelled(
-        self, mock_confirm, mock_select, runner, configured_env, temp_config_dir
-    ):
+    def test_account_remove_cancelled(self, mock_select, runner, configured_env, temp_config_dir):
         """Test cancelling account removal."""
-        mock_select.return_value.ask.return_value = "default"
-        mock_confirm.return_value.ask.return_value = False
+        mock_select.return_value.ask.side_effect = [
+            "default",  # Account selection
+            "no",  # Remove confirmation cancelled (via _styled_confirm)
+        ]
 
         result = runner.invoke(account_remove, [])
 

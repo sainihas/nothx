@@ -4,6 +4,7 @@ import csv
 import json
 import re
 from datetime import datetime
+from typing import Any
 
 import click
 import humanize
@@ -39,6 +40,7 @@ Q_STYLE = QStyle(
     ]
 )
 Q_POINTER = "›"
+Q_COMMON: dict[str, Any] = {"instruction": " ", "style": Q_STYLE, "pointer": Q_POINTER}
 
 
 def _key(k: str) -> str:
@@ -82,7 +84,7 @@ def _select_header(label: str) -> None:
     if not _key_hints_shown:
         _key_hints_shown = True
         console.print(
-            f"\n\n[header]{label}[/header]  "
+            f"\n\n[header]{label}[/header]    "
             f"{_key('↑')} {_key('↓')} [dim]navigate[/dim]  "
             f"{_key('⏎')} [dim]select[/dim]"
         )
@@ -165,13 +167,10 @@ def _get_greeting() -> str:
         emoji, greeting = "🌙", "Hey there"
 
     name = None
-    try:
-        for var in ("USER", "USERNAME", "LOGNAME"):
-            if username := _os.environ.get(var):
-                name = username.split(".")[0].capitalize()
-                break
-    except Exception:
-        pass
+    for var in ("USER", "USERNAME", "LOGNAME"):
+        if username := _os.environ.get(var):
+            name = username.split(".")[0].capitalize()
+            break
 
     if name:
         return f"{emoji}  {greeting}, {name}!"
@@ -209,6 +208,8 @@ def _build_version_line(config: Config) -> str:
 
 def _get_previous_run_summary_text() -> str | None:
     """Get brief summary text from the last run, or None."""
+    import sqlite3
+
     try:
         activity = db.get_activity_log(limit=1)
         if activity and activity[0].get("type") == "run":
@@ -223,7 +224,7 @@ def _get_previous_run_summary_text() -> str | None:
             unsubbed = r.get("auto_unsubbed", 0)
             if unsubbed > 0:
                 return f"Last run {time_ago} · unsubscribed from {unsubbed} sender{'s' if unsubbed != 1 else ''}"
-    except Exception:
+    except (sqlite3.Error, OSError):
         pass
     return None
 
@@ -887,9 +888,7 @@ def _run_scan(
                         questionary.Choice("Skip for now", value="skip"),
                     ],
                     default="unsub",
-                    instruction=" ",
-                    style=Q_STYLE,
-                    pointer=Q_POINTER,
+                    **Q_COMMON,
                 ).ask()
 
                 if action is None:
@@ -917,9 +916,7 @@ def _run_scan(
                             questionary.Choice("Skip for now", value="skip"),
                         ],
                         default="keep",
-                        instruction=" ",
-                        style=Q_STYLE,
-                        pointer=Q_POINTER,
+                        **Q_COMMON,
                     ).ask()
 
                     if action is None:
@@ -1182,9 +1179,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
                 questionary.Choice("Block - Block sender entirely", value="block"),
                 questionary.Choice("Skip - Decide later", value="skip"),
             ],
-            instruction=" ",
-            style=Q_STYLE,
-            pointer=Q_POINTER,
+            **Q_COMMON,
         ).ask()
 
         if choice is None:

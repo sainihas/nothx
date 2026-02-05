@@ -4,14 +4,15 @@ import csv
 import json
 import re
 from datetime import datetime
+from typing import Any
 
 import click
 import humanize
 import questionary
+from questionary import Style as QStyle
 from rich.columns import Columns
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
-from rich.prompt import Confirm
 from rich.rule import Rule
 from rich.table import Table
 from rich.tree import Tree
@@ -24,8 +25,98 @@ from .imap import test_account
 from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
-from .theme import console, print_animated_banner, print_banner
+from .theme import console, print_animated_welcome
 from .unsubscriber import unsubscribe
+
+# Questionary style — orange1 highlight matching our logo color
+Q_STYLE = QStyle(
+    [
+        ("highlighted", "fg:#ffaf00"),
+        ("pointer", "fg:#ffaf00"),
+        ("selected", "fg:#ffaf00"),
+        ("qmark", "fg:green"),
+        ("answer", "fg:green"),
+    ]
+)
+Q_POINTER = "›"
+Q_COMMON: dict[str, Any] = {
+    "instruction": " ",
+    "style": Q_STYLE,
+    "pointer": Q_POINTER,
+    "qmark": "",
+}
+
+# Style for text/password prompts — label goes in qmark for column-0 alignment
+Q_INPUT_STYLE = QStyle(
+    [
+        ("qmark", "bold fg:#b3b3b3"),  # match header style (bold grey70)
+        ("answer", "fg:green"),
+    ]
+)
+
+# Vertical line prefix for indented content under section headers
+_L = "[muted]│[/muted]"
+
+
+def _key(k: str) -> str:
+    """Render a single keycap with rounded pill shape using half-block edges."""
+    return f"[grey19]▐[/][grey50 on grey19] {k} [/][grey19]▌[/]"
+
+
+_key_hints_shown = False
+
+
+def _styled_select(choices: list, **kwargs) -> str | None:
+    """Run a styled questionary.select, replacing answer line with ✓ confirmation."""
+    result = questionary.select(
+        "",
+        choices=choices,
+        instruction=" ",
+        style=Q_STYLE,
+        qmark="",
+        pointer=Q_POINTER,
+        **kwargs,
+    ).ask()
+    if result is not None:
+        # Find display label from Choice objects or plain strings
+        label = str(result)
+        for c in choices:
+            if isinstance(c, questionary.Choice) and c.value == result:
+                label = str(c.title) if c.title is not None else label
+                break
+        # Overwrite questionary's answer line with styled ✓ version
+        # The \n ensures 1 blank line between the preceding header and ✓,
+        # matching the gap questionary's blank prompt provided during browsing.
+        console.file.write("\033[1A\033[2K\r")
+        console.file.flush()
+        console.print(f"{_L}\n{_L} [green]✓ {label}[/green]")
+    return result
+
+
+def _select_header(label: str) -> None:
+    """Print a section header with key hints on first call, plain header after."""
+    global _key_hints_shown
+    if not _key_hints_shown:
+        _key_hints_shown = True
+        console.print(
+            f"\n\n[header]{label}[/header]    "
+            f"{_key('↑')} {_key('↓')} [dim]navigate[/dim]  "
+            f"{_key('⏎')} [dim]select[/dim]"
+        )
+    else:
+        console.print(f"\n[header]{label}[/header]")
+
+
+def _styled_confirm(message: str, default: bool = True) -> bool:
+    """Styled yes/no selector matching the overall UI style."""
+    console.print(f"\n[header]{message}[/header]")
+    choices = [
+        questionary.Choice("Yes", value="yes"),
+        questionary.Choice("No", value="no"),
+    ]
+    result = _styled_select(choices, default="yes" if default else "no")
+    return result == "yes"
+
 
 # Simple email validation regex
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
@@ -49,7 +140,7 @@ APP_PASSWORD_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
     "outlook": (
         "[warning]For Outlook/Live/Hotmail, you need an App Password:[/warning]",
         "  1. Go to [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]",
-        "  2. You may need to enable 2FA first at account.microsoft.com/security",
+        "  2. You may need to enable 2FA first at [link=https://account.microsoft.com/security]account.microsoft.com/security[/link]",
         "  3. Generate a new app password and copy it\n",
     ),
     "yahoo": (
@@ -65,6 +156,31 @@ APP_PASSWORD_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
         "  2. Sign in and go to 'Sign-In and Security' > 'App-Specific Passwords'",
         "  3. Click '+' to generate a new password for 'nothx'",
         "  4. Copy the generated password\n",
+    ),
+}
+
+# Provider-specific API key setup instructions
+API_KEY_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
+    "anthropic": (
+        "[warning]To get your Anthropic API key:[/warning]",
+        "  1. Go to [link=https://console.anthropic.com]console.anthropic.com[/link]",
+        "  2. Sign in or create an account",
+        "  3. Go to 'Settings' > 'API Keys'",
+        "  4. Click 'Create Key' and copy it\n",
+    ),
+    "openai": (
+        "[warning]To get your OpenAI API key:[/warning]",
+        "  1. Go to [link=https://platform.openai.com/api-keys]platform.openai.com/api-keys[/link]",
+        "  2. Sign in or create an account",
+        "  3. Click 'Create new secret key'",
+        "  4. Copy the key (it won't be shown again)\n",
+    ),
+    "gemini": (
+        "[warning]To get your Google AI API key:[/warning]",
+        "  1. Go to [link=https://aistudio.google.com/apikey]aistudio.google.com/apikey[/link]",
+        "  2. Sign in with your Google account",
+        "  3. Click 'Create API Key'",
+        "  4. Copy the generated key\n",
     ),
 }
 
@@ -87,19 +203,35 @@ TROUBLESHOOTING_TIPS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _show_welcome_screen() -> None:
-    """Show welcome screen with status and interactive command selector."""
+def _get_greeting() -> str:
+    """Get time-based greeting with user's first name if available."""
+    import os as _os
+
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        emoji, greeting = "☀️", "Good morning"
+    elif 12 <= hour < 17:
+        emoji, greeting = "🌤️", "Good afternoon"
+    elif 17 <= hour < 21:
+        emoji, greeting = "🌆", "Good evening"
+    else:
+        emoji, greeting = "🌙", "Hey there"
+
+    name = None
+    for var in ("USER", "USERNAME", "LOGNAME"):
+        if username := _os.environ.get(var):
+            name = username.split(".")[0].capitalize()
+            break
+
+    if name:
+        return f"{emoji}  {greeting}, {name}!"
+    return f"{emoji}  {greeting}!"
+
+
+def _build_version_line(config: Config) -> str:
+    """Build the version + status string for display."""
     import sqlite3
 
-    config = Config.load()
-
-    # Header: Brand + tagline
-    console.print()
-    print_animated_banner()
-    console.print("[logo]nothx[/logo]")
-    console.print("Smart enough to say no.")
-
-    # Version + status in muted text
     status_parts = [f"v{__version__}"]
 
     account_count = len(config.accounts)
@@ -108,7 +240,6 @@ def _show_welcome_screen() -> None:
     else:
         status_parts.append("not configured")
 
-    # Get last scan time if DB exists
     try:
         db.init_db()
         stats = db.get_stats()
@@ -121,48 +252,69 @@ def _show_welcome_screen() -> None:
         if stats.get("pending_review", 0) > 0:
             status_parts.append(f"{stats['pending_review']} pending")
     except (sqlite3.Error, OSError):
-        # Database not initialized or inaccessible - skip stats
         pass
 
-    console.print(f"[dim]{' · '.join(status_parts)}[/dim]")
+    return " · ".join(status_parts)
 
-    # Separator
-    console.print()
-    console.print(Rule(style="dim"))
 
-    # Get started section with interactive selector
-    console.print("\n[header]Get started[/header]\n")
+def _get_previous_run_summary_text() -> str | None:
+    """Get brief summary text from the last run, or None."""
+    import sqlite3
 
-    # Build command choices based on configuration state
+    try:
+        activity = db.get_activity_log(limit=1)
+        if activity and activity[0].get("type") == "run":
+            r = activity[0]
+            timestamp = r.get("timestamp", "")
+            try:
+                ts_dt = datetime.fromisoformat(timestamp)
+                time_ago = humanize.naturaltime(ts_dt)
+            except (ValueError, TypeError):
+                time_ago = "recently"
+
+            unsubbed = r.get("auto_unsubbed", 0)
+            if unsubbed > 0:
+                return f"Last run {time_ago} · unsubscribed from {unsubbed} sender{'s' if unsubbed != 1 else ''}"
+    except (sqlite3.Error, OSError):
+        pass
+    return None
+
+
+def _show_welcome_screen() -> None:
+    """Show welcome screen with gradient panel and interactive command selector."""
+    config = Config.load()
+    greeting = _get_greeting()
+    version_line = _build_version_line(config)
+
+    # Animated gradient banner in a panel
+    print_animated_welcome(greeting, version_line)
+
+    _select_header("Get started")
+
     if not config.accounts:
-        # Not configured - prioritize init
         choices = [
-            questionary.Choice("nothx init     Set up email accounts and API key", value="init"),
-            questionary.Choice("nothx --help   View all commands", value="help"),
+            questionary.Choice("Set up email accounts and API key", value="init"),
+            questionary.Choice("View all commands", value="help"),
+            questionary.Choice("Exit", value="exit"),
         ]
     else:
-        # Configured - show main workflow commands
         choices = [
-            questionary.Choice("nothx run      Scan inbox and unsubscribe", value="run"),
-            questionary.Choice("nothx status   Show current stats", value="status"),
-            questionary.Choice("nothx review   Review pending decisions", value="review"),
-            questionary.Choice("nothx senders  List all tracked senders", value="senders"),
-            questionary.Choice("nothx --help   View all commands", value="help"),
+            questionary.Choice("Scan inbox and unsubscribe", value="run"),
+            questionary.Choice("Show current stats", value="status"),
+            questionary.Choice("Review pending decisions", value="review"),
+            questionary.Choice("List all tracked senders", value="senders"),
+            questionary.Choice("View all commands", value="help"),
+            questionary.Choice("Exit", value="exit"),
         ]
 
-    selected = questionary.select(
-        "",
-        choices=choices,
-        instruction="",
-    ).ask()
+    selected = _styled_select(choices)
 
-    if selected is None:
-        # User pressed ESC - exit cleanly
+    if selected is None or selected == "exit":
         console.print()
         return
 
-    # Execute the selected command
     ctx = click.get_current_context()
+    ctx.obj["from_welcome"] = True
     if selected == "init":
         ctx.invoke(init)
     elif selected == "run":
@@ -187,8 +339,8 @@ def _show_learning_status(config: Config) -> None:
 
     # Overall stats
     console.print("\n[header]Training Data[/header]")
-    console.print(f"  Total decisions learned from: [count]{summary['total_actions']}[/count]")
-    console.print(f"  Corrections (overrode AI): [count]{summary['total_corrections']}[/count]")
+    console.print(f"{_L} Total decisions learned from: [count]{summary['total_actions']}[/count]")
+    console.print(f"{_L} Corrections (overrode AI): [count]{summary['total_corrections']}[/count]")
 
     # Learned preferences
     console.print("\n[header]Your Preferences[/header]")
@@ -200,7 +352,7 @@ def _show_learning_status(config: Config) -> None:
         "normal": "Normal (default behavior)",
     }
     importance = summary.get("open_rate_importance", "normal")
-    console.print(f"  Open rate importance: {open_rate_desc.get(importance, importance)}")
+    console.print(f"{_L} Open rate importance: {open_rate_desc.get(importance, importance)}")
 
     # Volume sensitivity
     volume_desc = {
@@ -209,7 +361,7 @@ def _show_learning_status(config: Config) -> None:
         "normal": "Normal (default behavior)",
     }
     sensitivity = summary.get("volume_sensitivity", "normal")
-    console.print(f"  Volume sensitivity: {volume_desc.get(sensitivity, sensitivity)}")
+    console.print(f"{_L} Volume sensitivity: {volume_desc.get(sensitivity, sensitivity)}")
 
     # Keyword patterns as tree
     keyword_patterns = summary.get("keyword_patterns", [])
@@ -254,6 +406,7 @@ def main(ctx):
 
     Set it up once. AI handles your inbox forever.
     """
+    ctx.ensure_object(dict)
     if ctx.invoked_subcommand is None:
         _show_welcome_screen()
 
@@ -261,22 +414,23 @@ def main(ctx):
 def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
     """Interactive flow to add an email account. Returns (name, account) or None if cancelled."""
     # Email provider selection
-    provider = questionary.select(
-        "Select your email provider:",
-        choices=[
-            questionary.Choice("Gmail", value="gmail"),
-            questionary.Choice("Outlook / Live / Hotmail", value="outlook"),
-            questionary.Choice("Yahoo Mail", value="yahoo"),
-            questionary.Choice("iCloud Mail", value="icloud"),
-        ],
-    ).ask()
+    _select_header("Select your email provider")
+    provider_choices = [
+        questionary.Choice("Gmail", value="gmail"),
+        questionary.Choice("Outlook / Live / Hotmail", value="outlook"),
+        questionary.Choice("Yahoo Mail", value="yahoo"),
+        questionary.Choice("iCloud Mail", value="icloud"),
+    ]
+    provider = _styled_select(provider_choices)
 
     if provider is None:  # User cancelled
         return None
 
+    console.print()  # Gap after selection
+
     # Email address with validation
     while True:
-        email = questionary.text("Email address:").ask()
+        email = questionary.text("", qmark="Email address:", style=Q_INPUT_STYLE).ask()
         if not email:
             return None
         if _is_valid_email(email):
@@ -287,11 +441,11 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
     if instructions := APP_PASSWORD_INSTRUCTIONS.get(provider):
         console.print()
         for line in instructions:
-            console.print(line)
+            console.print(f"{_L}{line[1:]}" if line.startswith("  ") else line)
     else:
         console.print("\n[warning]Enter your email password or app password.[/warning]\n")
 
-    password = questionary.password("App Password:").ask()
+    password = questionary.password("", qmark="App Password:", style=Q_INPUT_STYLE).ask()
     if not password:
         return None
 
@@ -319,11 +473,15 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
 
 
 @main.command()
-def init():
+@click.pass_context
+def init(ctx):
     """Set up nothx with your email account and API key."""
-    print_banner("Let's set up your inbox cleanup")
-
     config = Config.load()
+
+    if not (ctx.obj or {}).get("from_welcome"):
+        greeting = _get_greeting()
+        version_line = _build_version_line(config)
+        print_animated_welcome(greeting, version_line)
 
     # Multi-account loop
     account_count = 0
@@ -343,15 +501,10 @@ def init():
             config.default_account = account_name
         account_count += 1
 
-        console.print(f"[success]✓ Added account: {account.email}[/success]\n")
+        console.print(f"[success]✓ Added account: {account.email}[/success]")
 
         # Ask to add another
-        add_another = questionary.confirm(
-            "Add another email account?",
-            default=False,
-        ).ask()
-
-        if not add_another:
+        if not _styled_confirm("Add another email account?", default=False):
             break
 
     # AI Provider setup
@@ -370,11 +523,12 @@ def init():
             questionary.Choice(f"{info['name']} - {info['description']}", value=key)
         )
 
-    provider = questionary.select(
-        "Select AI provider:",
-        choices=provider_choices,
-        default="anthropic",
-    ).ask()
+    _select_header("Select AI provider")
+    provider = _styled_select(provider_choices, default="anthropic")
+
+    if provider is None:
+        console.print("[warning]AI setup cancelled.[/warning]")
+        return
 
     config.ai.provider = provider
 
@@ -386,9 +540,12 @@ def init():
         config.ai.api_key = None
 
         # Ask for Ollama URL
+        console.print()  # Gap after selection
         api_base = questionary.text(
-            "Ollama URL:",
+            "",
             default="http://localhost:11434",
+            qmark="Ollama URL:",
+            style=Q_INPUT_STYLE,
         ).ask()
         config.ai.api_base = api_base
 
@@ -399,12 +556,10 @@ def init():
         available_models = ollama.get_model_options()
 
         if available_models:
-            model = questionary.select(
-                "Select model:",
-                choices=available_models,
-                default=available_models[0],
-            ).ask()
-            config.ai.model = model
+            _select_header("Select model")
+            model = _styled_select(available_models, default=available_models[0])
+            if model is not None:
+                config.ai.model = model
         else:
             config.ai.model = "llama3.2"
             console.print("[warning]Could not fetch models. Using default: llama3.2[/warning]")
@@ -423,10 +578,16 @@ def init():
         provider_info = SUPPORTED_PROVIDERS[provider]
         config.ai.api_base = None  # Clear any stale Ollama URL
 
-        console.print(f"\nGet your API key from: [link]{provider_info['key_url']}[/link]")
+        if provider in API_KEY_INSTRUCTIONS:
+            instructions = API_KEY_INSTRUCTIONS[provider]
+            console.print()
+            for line in instructions:
+                console.print(f"{_L}{line[1:]}" if line.startswith("  ") else line)
 
         api_key = questionary.text(
-            f"{provider_info['name']} API key (leave empty to skip):",
+            "",
+            qmark=f"{provider_info['name']} API key (leave empty to skip):",
+            style=Q_INPUT_STYLE,
         ).ask()
 
         if api_key and api_key.strip():
@@ -458,22 +619,14 @@ def init():
 
     # Save config
     config.save()
-    console.print(f"[success]✓ Configuration saved to {get_config_dir()}[/success]\n")
+    console.print(f"[success]✓ Configuration saved to {get_config_dir()}[/success]")
 
     # First scan
-    run_scan = questionary.confirm(
-        "Run first scan now?",
-        default=True,
-    ).ask()
-
-    if run_scan:
+    if _styled_confirm("Run first scan now?", default=True):
         _run_scan(config, verbose=True, dry_run=True)
 
     # Schedule setup
-    schedule_runs = questionary.confirm(
-        "Auto-schedule monthly runs?",
-        default=True,
-    ).ask()
+    schedule_runs = _styled_confirm("Auto-schedule monthly runs?", default=True)
 
     if schedule_runs:
         success, msg = install_schedule("monthly")
@@ -496,17 +649,16 @@ def account(ctx):
 
     # Show interactive selector when no subcommand provided
     choices = [
-        questionary.Choice("list    List configured accounts", value="list"),
-        questionary.Choice("add     Add a new account", value="add"),
-        questionary.Choice("remove  Remove an account", value="remove"),
+        questionary.Choice("List configured accounts", value="list"),
+        questionary.Choice("Add a new account", value="add"),
+        questionary.Choice("Remove an account", value="remove"),
+        questionary.Choice("Exit", value="exit"),
     ]
 
-    selected = questionary.select(
-        "What would you like to do?",
-        choices=choices,
-    ).ask()
+    _select_header("Manage accounts")
+    selected = _styled_select(choices)
 
-    if selected is None:
+    if selected is None or selected == "exit":
         return
 
     if selected == "list":
@@ -534,8 +686,8 @@ def account_add():
     config.save()
 
     console.print(f"\n[success]✓ Added account: {acc.email}[/success]")
-    console.print(f"  Name: {account_name}")
-    console.print(f"  Provider: {acc.provider}")
+    console.print(f"{_L} Name: {account_name}")
+    console.print(f"{_L} Provider: {acc.provider}")
 
 
 @account.command("list")
@@ -578,10 +730,8 @@ def account_remove():
     ]
     choices.append(questionary.Choice("Cancel", value=None))
 
-    account_name = questionary.select(
-        "Select account to remove:",
-        choices=choices,
-    ).ask()
+    _select_header("Select account to remove")
+    account_name = _styled_select(choices)
 
     if account_name is None:
         console.print("Cancelled.")
@@ -589,12 +739,7 @@ def account_remove():
 
     # Confirm removal
     acc = config.accounts[account_name]
-    confirm = questionary.confirm(
-        f"Remove {acc.email}?",
-        default=False,
-    ).ask()
-
-    if not confirm:
+    if not _styled_confirm(f"Remove {acc.email}?", default=False):
         console.print("Cancelled.")
         return
 
@@ -684,6 +829,8 @@ def _run_scan(
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
         console=console,
         transient=True,
     ) as progress:
@@ -758,14 +905,8 @@ def _run_scan(
 
     # Optional manual review of decisions (not in auto mode)
     if not auto and not dry_run and (to_unsub or to_keep):
-        console.print()
-        review_decisions = questionary.confirm(
-            "Review decisions before proceeding?",
-            default=False,
-        ).ask()
-
-        if review_decisions:
-            console.print("\n[header]Manual Review[/header]")
+        if _styled_confirm("Review decisions before proceeding?", default=False):
+            _select_header("Manual Review")
             console.print("[muted]Change any decisions you disagree with:[/muted]\n")
 
             # Review items marked for unsubscribe
@@ -779,6 +920,7 @@ def _run_scan(
                         questionary.Choice("Skip for now", value="skip"),
                     ],
                     default="unsub",
+                    **Q_COMMON,
                 ).ask()
 
                 if action is None:
@@ -789,11 +931,11 @@ def _run_scan(
                 if action == "keep":
                     to_unsub.remove((sender, classification))
                     to_keep.append((sender, classification))
-                    console.print("  [keep]→ Changed to keep[/keep]")
+                    console.print(f"{_L} [keep]→ Changed to keep[/keep]")
                 elif action == "skip":
                     to_unsub.remove((sender, classification))
                     to_review.append((sender, classification))
-                    console.print("  [review]→ Moved to review[/review]")
+                    console.print(f"{_L} [review]→ Moved to review[/review]")
 
             # Review items marked to keep (only if not cancelled)
             if not review_cancelled:
@@ -806,6 +948,7 @@ def _run_scan(
                             questionary.Choice("Skip for now", value="skip"),
                         ],
                         default="keep",
+                        **Q_COMMON,
                     ).ask()
 
                     if action is None:
@@ -815,11 +958,11 @@ def _run_scan(
                     if action == "unsub":
                         to_keep.remove((sender, classification))
                         to_unsub.append((sender, classification))
-                        console.print("  [unsubscribe]→ Changed to unsubscribe[/unsubscribe]")
+                        console.print(f"{_L} [unsubscribe]→ Changed to unsubscribe[/unsubscribe]")
                     elif action == "skip":
                         to_keep.remove((sender, classification))
                         to_review.append((sender, classification))
-                        console.print("  [review]→ Moved to review[/review]")
+                        console.print(f"{_L} [review]→ Moved to review[/review]")
 
             # Updated summary
             # Updated summary as tree
@@ -832,9 +975,7 @@ def _run_scan(
 
     # Phase 3: Execute unsubscribes (if not dry run)
     if not dry_run and (to_unsub or to_block):
-        console.print()
-
-        if auto or Confirm.ask(
+        if auto or _styled_confirm(
             f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
         ):
             console.print("\n[header]Phase 3/3: Unsubscribing[/header]")
@@ -845,6 +986,7 @@ def _run_scan(
                 BarColumn(),
                 TaskProgressColumn(),
                 console=console,
+                transient=True,
             ) as progress:
                 task = progress.add_task("Processing...", total=len(to_unsub) + len(to_block))
 
@@ -866,7 +1008,7 @@ def _run_scan(
                 console.print(f"[warning]! {stats.failed} failed (logged for retry)[/warning]")
 
             # Undo reminder
-            console.print("\n[muted]⏱ Run `nothx undo` to restore if needed[/muted]")
+            console.print("\n[muted]⏱  Run `nothx undo` to restore if needed[/muted]")
 
     # Update stats
     stats.kept = len(to_keep)
@@ -963,42 +1105,42 @@ def status(learning: bool):
     console.print("\n[header]Accounts[/header]")
     for name, acc in config.accounts.items():
         is_default = " [muted](default)[/muted]" if name == config.default_account else ""
-        console.print(f"  {acc.email} ({acc.provider}){is_default}")
+        console.print(f"{_L} {acc.email} ({acc.provider}){is_default}")
 
     # AI status
     console.print("\n[header]Configuration[/header]")
     if config.ai.enabled:
-        console.print(f"  AI: [success]enabled[/success] ({config.ai.provider})")
+        console.print(f"{_L} AI: [success]enabled[/success] ({config.ai.provider})")
     else:
-        console.print("  AI: [warning]disabled[/warning] (heuristics only)")
-    console.print(f"  Mode: {config.operation_mode}")
-    console.print(f"  Scan days: {config.scan_days}")
+        console.print(f"{_L} AI: [warning]disabled[/warning] (heuristics only)")
+    console.print(f"{_L} Mode: {config.operation_mode}")
+    console.print(f"{_L} Scan days: {config.scan_days}")
 
     # Detailed stats
     console.print("\n[header]Details[/header]")
     if total_unsub_attempts > 0:
         console.print(
-            f"  Unsubscribe results: [success]{successful} successful[/success], "
+            f"{_L} Unsubscribe results: [success]{successful} successful[/success], "
             f"[error]{failed} failed[/error]"
         )
 
-    console.print(f"  Pending review: [count]{stats['pending_review']}[/count]")
-    console.print(f"  Total runs: [count]{stats['total_runs']}[/count]")
+    console.print(f"{_L} Pending review: [count]{stats['pending_review']}[/count]")
+    console.print(f"{_L} Total runs: [count]{stats['total_runs']}[/count]")
 
     if stats["last_run"]:
         try:
             last_run_dt = datetime.fromisoformat(stats["last_run"])
             relative_time = humanize.naturaltime(last_run_dt)
-            console.print(f"  Last run: {relative_time}")
+            console.print(f"{_L} Last run: {relative_time}")
         except (ValueError, TypeError):
-            console.print(f"  Last run: {stats['last_run']}")
+            console.print(f"{_L} Last run: {stats['last_run']}")
 
     # Schedule status
     schedule = get_schedule_status()
     if schedule:
         console.print("\n[header]Schedule[/header]")
-        console.print(f"  Type: {schedule['type']}")
-        console.print(f"  Frequency: {schedule['frequency']}")
+        console.print(f"{_L} Type: {schedule['type']}")
+        console.print(f"{_L} Frequency: {schedule['frequency']}")
     else:
         console.print("\n[warning]No automatic schedule configured[/warning]")
         console.print("Run [bold]nothx schedule --monthly[/bold] to set up")
@@ -1043,7 +1185,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         console.print(f"[success]No senders {filter_label}![/success]")
         return
 
-    console.print(f"\n[header]{len(senders)} senders {filter_label}:[/header]\n")
+    _select_header(f"{len(senders)} senders {filter_label}")
 
     for sender in senders:
         domain = sender["domain"]
@@ -1054,10 +1196,10 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         if sender.get("ai_classification"):
             confidence = sender.get("ai_confidence", 0)
             console.print(
-                f"  [muted]AI says: {sender['ai_classification']} ({confidence:.0%} confident)[/muted]"
+                f"{_L} [muted]AI says: {sender['ai_classification']} ({confidence:.0%} confident)[/muted]"
             )
         if subjects and subjects[0]:
-            console.print(f"  [muted]Subjects: {', '.join(s for s in subjects if s)}[/muted]")
+            console.print(f"{_L} [muted]Subjects: {', '.join(s for s in subjects if s)}[/muted]")
 
         # Interactive selector with clear labels
         choice = questionary.select(
@@ -1068,30 +1210,31 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
                 questionary.Choice("Block - Block sender entirely", value="block"),
                 questionary.Choice("Skip - Decide later", value="skip"),
             ],
+            **Q_COMMON,
         ).ask()
 
         if choice is None:
             # User cancelled (Ctrl+C or ESC)
-            console.print("  [muted]Cancelled[/muted]")
+            console.print(f"{_L} [muted]Cancelled[/muted]")
             break
 
         if choice == "unsub":
             db.set_user_override(domain, "unsub")
             db.update_sender_status(domain, SenderStatus.UNSUBSCRIBED)
-            console.print("  [unsubscribe]→ Will unsubscribe[/unsubscribe]")
+            console.print(f"{_L} [unsubscribe]→ Will unsubscribe[/unsubscribe]")
             user_action = Action.UNSUB
         elif choice == "keep":
             db.set_user_override(domain, "keep")
             db.update_sender_status(domain, SenderStatus.KEEP)
-            console.print("  [keep]→ Will keep[/keep]")
+            console.print(f"{_L} [keep]→ Will keep[/keep]")
             user_action = Action.KEEP
         elif choice == "block":
             db.set_user_override(domain, "block")
             db.update_sender_status(domain, SenderStatus.BLOCKED)
-            console.print("  [block]→ Will block[/block]")
+            console.print(f"{_L} [block]→ Will block[/block]")
             user_action = Action.BLOCK
         else:
-            console.print("  [review]→ Skipped[/review]")
+            console.print(f"{_L} [review]→ Skipped[/review]")
             user_action = None
 
         # Log user action for learning (if not skipped)
@@ -1180,7 +1323,7 @@ def undo(domain: str | None):
 
     for i, item in enumerate(recent[:20], 1):
         console.print(
-            f"  {i}. {item['domain']} ({item['total_emails']} emails) - {item['attempted_at'][:10]}"
+            f"{_L} {i}. {item['domain']} ({item['total_emails']} emails) - {item['attempted_at'][:10]}"
         )
 
     console.print("\nTo undo, run: [bold]nothx undo <domain>[/bold]")
@@ -1197,9 +1340,9 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
         status = get_schedule_status()
         if status:
             console.print("\n[header]Current Schedule[/header]")
-            console.print(f"  Type: {status['type']}")
-            console.print(f"  Frequency: {status['frequency']}")
-            console.print(f"  Path: {status['path']}")
+            console.print(f"{_L} Type: {status['type']}")
+            console.print(f"{_L} Frequency: {status['frequency']}")
+            console.print(f"{_L} Path: {status['path']}")
         else:
             console.print("[yellow]No schedule configured[/yellow]")
         return
@@ -1243,13 +1386,13 @@ def config_cmd(show: bool, ai: str | None, mode: str | None):
 
     if show or (not ai and not mode):
         console.print("\n[header]Current Configuration[/header]")
-        console.print(f"  Config dir: {get_config_dir()}")
-        console.print(f"  AI enabled: {config.ai.enabled}")
-        console.print(f"  AI provider: {config.ai.provider}")
-        console.print(f"  Operation mode: {config.operation_mode}")
-        console.print(f"  Scan days: {config.scan_days}")
-        console.print(f"  Unsub confidence: {config.thresholds.unsub_confidence}")
-        console.print(f"  Keep confidence: {config.thresholds.keep_confidence}")
+        console.print(f"{_L} Config dir: {get_config_dir()}")
+        console.print(f"{_L} AI enabled: {config.ai.enabled}")
+        console.print(f"{_L} AI provider: {config.ai.provider}")
+        console.print(f"{_L} Operation mode: {config.operation_mode}")
+        console.print(f"{_L} Scan days: {config.scan_days}")
+        console.print(f"{_L} Unsub confidence: {config.thresholds.unsub_confidence}")
+        console.print(f"{_L} Keep confidence: {config.thresholds.keep_confidence}")
 
 
 @main.command()
@@ -1402,14 +1545,14 @@ def search(pattern: str, as_json: bool):
             except (ValueError, TypeError):
                 last_seen = last_seen[:10] if last_seen else ""
 
-        console.print(f"  [domain]{domain}[/domain]")
+        console.print(f"{_L} [domain]{domain}[/domain]")
         console.print(
-            f"    Status: [{style}]{status.title()}[/{style}]"
+            f"{_L}   Status: [{style}]{status.title()}[/{style}]"
             + (f" ({last_seen})" if last_seen else "")
         )
-        console.print(f"    Emails: [count]{total}[/count] total")
+        console.print(f"{_L}   Emails: [count]{total}[/count] total")
         if subjects and subjects[0]:
-            console.print(f"    Subjects: {', '.join(s for s in subjects[:3] if s)}")
+            console.print(f"{_L}   Subjects: {', '.join(s for s in subjects[:3] if s)}")
         console.print()
 
 
@@ -1541,11 +1684,11 @@ def test_connection():
         else:
             console.print(f"[error]✗ Connection failed: {msg}[/error]")
             console.print("\n[muted]Suggestions:[/muted]")
-            console.print("  • Check your internet connection")
+            console.print(f"{_L} • Check your internet connection")
             if tips := TROUBLESHOOTING_TIPS.get(account.provider):
                 for tip in tips:
-                    console.print(tip)
-            console.print("  • Make sure IMAP is enabled in your email settings")
+                    console.print(f"{_L}{tip[1:]}" if tip.startswith("  ") else tip)
+            console.print(f"{_L} • Make sure IMAP is enabled in your email settings")
 
 
 @main.command()
@@ -1558,18 +1701,18 @@ def reset(keep_config: bool):
     stats = db.get_stats()
 
     console.print("\n[warning]⚠️  This will delete all nothx data:[/warning]")
-    console.print(f"  • {stats['total_senders']} tracked senders")
-    console.print(f"  • {stats['unsubscribed']} unsubscribe records")
-    console.print("  • All classification history")
+    console.print(f"{_L} • {stats['total_senders']} tracked senders")
+    console.print(f"{_L} • {stats['unsubscribed']} unsubscribe records")
+    console.print(f"{_L} • All classification history")
 
     if not keep_config:
-        console.print("  • All user rules")
-        console.print("  • [warning]Configuration file (accounts, API key)[/warning]")
+        console.print(f"{_L} • All user rules")
+        console.print(f"{_L} • [warning]Configuration file (accounts, API key)[/warning]")
 
     console.print()
 
     # Require typing "reset" to confirm
-    confirm = questionary.text('Type "reset" to confirm:').ask()
+    confirm = questionary.text("", qmark='Type "reset" to confirm:', style=Q_INPUT_STYLE).ask()
 
     if confirm != "reset":
         console.print("Cancelled.")
@@ -1714,8 +1857,7 @@ def update(check: bool):
             return
 
         # Perform update
-        console.print()
-        if not questionary.confirm(f"Update to version {latest}?", default=True).ask():
+        if not _styled_confirm(f"Update to version {latest}?", default=True):
             console.print("Cancelled.")
             return
 
@@ -1734,15 +1876,17 @@ def update(check: bool):
                 console.print(f"[error]Update failed: {result.stderr}[/error]")
         except subprocess.TimeoutExpired:
             console.print("[error]Update timed out. Try running manually:[/error]")
-            console.print("  pip install --upgrade nothx")
+            console.print(f"{_L} pip install --upgrade nothx")
             return
     else:
         console.print("\n[warning]Could not check PyPI for updates.[/warning]")
         console.print("[muted]nothx may not be published yet, or you're offline.[/muted]")
         console.print("\nTo update manually:")
-        console.print("  [info]pip install --upgrade nothx[/info]")
-        console.print("  [muted]or from git:[/muted]")
-        console.print("  [info]pip install --upgrade git+https://github.com/nothx/nothx.git[/info]")
+        console.print(f"{_L} [info]pip install --upgrade nothx[/info]")
+        console.print(f"{_L} [muted]or from git:[/muted]")
+        console.print(
+            f"{_L} [info]pip install --upgrade git+https://github.com/nothx/nothx.git[/info]"
+        )
 
 
 # Command aliases for power users

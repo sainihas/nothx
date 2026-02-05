@@ -30,7 +30,7 @@ NOTHX_THEME = Theme(
         "muted": "dim",
         "highlight": "bold cyan",
         "domain": "cyan",
-        "count": "magenta",
+        "count": "orange1",
         # Banner
         "logo": "orange1",
     }

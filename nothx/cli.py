@@ -25,17 +25,19 @@ from .imap import test_account
 from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
-from .theme import console, print_animated_banner, print_animated_welcome
+from .theme import console, print_animated_welcome
 from .unsubscriber import unsubscribe
 
 # Questionary style — orange1 highlight matching our logo color
-Q_STYLE = QStyle([
-    ("highlighted", "fg:#ffaf00"),
-    ("pointer", "fg:#ffaf00"),
-    ("selected", "fg:#ffaf00"),
-    ("questionmark", "fg:green"),
-    ("answer", "fg:green"),
-])
+Q_STYLE = QStyle(
+    [
+        ("highlighted", "fg:#ffaf00"),
+        ("pointer", "fg:#ffaf00"),
+        ("selected", "fg:#ffaf00"),
+        ("questionmark", "fg:green"),
+        ("answer", "fg:green"),
+    ]
+)
 Q_POINTER = "›"
 
 
@@ -63,7 +65,7 @@ def _styled_select(choices: list, **kwargs) -> str | None:
         label = str(result)
         for c in choices:
             if isinstance(c, questionary.Choice) and c.value == result:
-                label = c.title
+                label = str(c.title) if c.title is not None else label
                 break
         # Overwrite questionary's answer line with styled ✓ version
         # The \n ensures 1 blank line between the preceding header and ✓,
@@ -482,6 +484,10 @@ def init(ctx):
     _select_header("Select AI provider")
     provider = _styled_select(provider_choices, default="anthropic")
 
+    if provider is None:
+        console.print("[warning]AI setup cancelled.[/warning]")
+        return
+
     config.ai.provider = provider
 
     if provider == "none":
@@ -508,7 +514,8 @@ def init(ctx):
         if available_models:
             _select_header("Select model")
             model = _styled_select(available_models, default=available_models[0])
-            config.ai.model = model
+            if model is not None:
+                config.ai.model = model
         else:
             config.ai.model = "llama3.2"
             console.print("[warning]Could not fetch models. Using default: llama3.2[/warning]")

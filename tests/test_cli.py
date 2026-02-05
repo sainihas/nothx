@@ -95,9 +95,9 @@ class TestMainCommand:
         assert "status" in result.output
 
     @patch("nothx.cli.questionary.select")
-    @patch("nothx.cli.print_animated_banner")
+    @patch("nothx.cli.print_animated_welcome")
     def test_main_no_subcommand_shows_welcome(
-        self, mock_banner, mock_select, runner, temp_config_dir
+        self, mock_welcome, mock_select, runner, temp_config_dir
     ):
         """Test that running without subcommand shows welcome screen."""
         mock_select.return_value.ask.return_value = None  # User pressed ESC

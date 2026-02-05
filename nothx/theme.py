@@ -122,9 +122,7 @@ def apply_gradient(lines: list[str], visible_cols: int | None = None) -> Text:
     return result
 
 
-def build_welcome_panel(
-    greeting: str, banner_text: Text, version_line: str
-) -> Panel:
+def build_welcome_panel(greeting: str, banner_text: Text, version_line: str) -> Panel:
     """Build the welcome Panel with greeting title, gradient banner, and branding.
 
     Args:

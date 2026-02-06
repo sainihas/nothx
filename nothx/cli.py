@@ -1629,7 +1629,7 @@ def _senders_pick_individual(displayed_senders: list[dict]) -> None:
     if selected_domain is None:
         return
 
-    sender_data = db.get_sender(selected_domain)
+    sender_data = next((s for s in displayed_senders if s["domain"] == selected_domain), None)
     if not sender_data:
         return
 

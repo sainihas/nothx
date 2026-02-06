@@ -292,8 +292,8 @@ def _get_greeting() -> str:
             break
 
     if name:
-        return f"{emoji}  {greeting}, {name}!"
-    return f"{emoji}  {greeting}!"
+        return f"{emoji} {greeting}, {name}!"
+    return f"{emoji} {greeting}!"
 
 
 def _build_version_line(config: Config) -> str:

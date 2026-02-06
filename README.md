@@ -13,7 +13,7 @@
 
 nothx (no thanks) hunts down marketing emails, uses AI to sort the noise from the signal, and actually clicks unsubscribe for you. It runs on your machine, learns your preferences, and never touches your data.
 
-Inbox zero, effort zero.
+Your inbox, uncrowded.
 
 ---
 

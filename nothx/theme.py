@@ -18,16 +18,16 @@ NOTHX_THEME = Theme(
         # Actions
         "success": "green",
         "error": "bold red",
-        "warning": "yellow",
+        "warning": "#d4a017",
         "info": "cyan",
         # Email actions (grouped by meaning)
         "unsubscribe": "red",
         "keep": "green",
         "block": "bold red",
-        "review": "yellow",
+        "review": "#d4a017",
         # UI elements
-        "header": "bold grey70",
-        "muted": "dim",
+        "header": "bold #a0a0a0",
+        "muted": "#808080",
         "highlight": "bold cyan",
         "domain": "cyan",
         "count": "orange1",
@@ -77,6 +77,7 @@ def apply_gradient(
     lines: list[str],
     colors: list[str],
     cell_states: dict[tuple[int, int], int] | None = None,
+    check_style: str = "green",
 ) -> Text:
     """Apply horizontal gradient coloring to banner lines.
 
@@ -116,7 +117,7 @@ def apply_gradient(
 
             # Locked / static render
             if final_char == "✓":
-                result.append(final_char, Style(color="green"))
+                result.append(final_char, Style(color=check_style, bold=True))
             elif final_char == " ":
                 result.append(" ")
             else:
@@ -142,9 +143,9 @@ def build_welcome_panel(greeting: str, banner_text: Text, version_line: str) -> 
     content.append("\n\n")
     content.append("nothx", Style(color="orange1"))
     content.append("\n")
-    content.append("Inbox zero, effort zero.")
+    content.append("Your inbox, uncrowded.")
     content.append("\n")
-    content.append(version_line, Style(color="grey50"))
+    content.append(version_line, Style(color="#808080"))
 
     return Panel(
         content,
@@ -220,3 +221,29 @@ def print_animated_welcome(
                 s > _SCRAMBLE_FRAMES for s in cell_states.values()
             ):
                 break
+
+        # Pause to let the reveal settle, then twinkle the check mark
+        time.sleep(0.3)
+
+        # Neon green flash → fade back to original green
+        twinkle = [
+            "#39ff14",  # neon green flash
+            "#33ee12",
+            "#2cdd10",
+            "#26cc0e",
+            "#20bb0c",
+            "#1aaa0a",
+            "#149908",
+            "#0e8806",
+            "#087704",
+        ]
+        for cs in twinkle:
+            banner_text = apply_gradient(lines, colors, check_style=cs)
+            panel = build_welcome_panel(greeting, banner_text, version_line)
+            live.update(Group(Text(""), panel))
+            time.sleep(0.06)
+
+        # Final frame: original green
+        banner_text = apply_gradient(lines, colors, check_style="green")
+        panel = build_welcome_panel(greeting, banner_text, version_line)
+        live.update(Group(Text(""), panel))

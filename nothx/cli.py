@@ -32,7 +32,6 @@ from .unsubscriber import UnsafeUnsubscribeError, unsubscribe
 logger = logging.getLogger(__name__)
 
 
-
 # Questionary style — orange1 highlight matching our logo color
 Q_STYLE = QStyle(
     [
@@ -929,7 +928,9 @@ def _run_scan(
 
         def on_account_start(email: str, _name: str, current: int, total: int) -> None:
             if total > 1:
-                progress.update(task, description=f"Scanning account {current} of {total} · {email}")
+                progress.update(
+                    task, description=f"Scanning account {current} of {total} · {email}"
+                )
             else:
                 progress.update(task, description=f"Scanning {email}")
 
@@ -1084,7 +1085,9 @@ def _run_scan(
             with Progress(
                 SpinnerColumn(style="#ffaf00"),
                 TextColumn("[progress.description]{task.description}"),
-                BarColumn(complete_style="orange1", finished_style="orange1", pulse_style="orange1"),
+                BarColumn(
+                    complete_style="orange1", finished_style="orange1", pulse_style="orange1"
+                ),
                 TaskProgressColumn(),
                 console=console,
                 transient=True,
@@ -1540,7 +1543,9 @@ def senders(status: str | None, sort: str, as_json: bool):
     for sender in all_senders[:50]:  # Limit display to 50
         sender_status = sender.get("status", "unknown")
         style = status_styles.get(sender_status)
-        status_display = f"[{style}]{sender_status.title()}[/{style}]" if style else sender_status.title()
+        status_display = (
+            f"[{style}]{sender_status.title()}[/{style}]" if style else sender_status.title()
+        )
 
         last_seen = sender.get("last_seen", "")
         if last_seen:
@@ -1669,7 +1674,9 @@ def change(domain: str):
         "unknown": "review",
     }
     style = status_styles.get(current_status)
-    status_display = f"[{style}]{current_status.title()}[/{style}]" if style else current_status.title()
+    status_display = (
+        f"[{style}]{current_status.title()}[/{style}]" if style else current_status.title()
+    )
 
     last_seen = sender.get("last_seen", "")
     if last_seen:

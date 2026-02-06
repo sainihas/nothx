@@ -215,6 +215,7 @@ def _execute_mailto(mailto: str, account: AccountConfig, config: Config) -> Unsu
         smtp_class = smtplib.SMTP if use_starttls else smtplib.SMTP_SSL
         with smtp_class(server, port) as smtp:
             if use_starttls:
+                smtp.ehlo()
                 smtp.starttls()
                 smtp.ehlo()  # Required after STARTTLS
             smtp.login(account.email, account.password)

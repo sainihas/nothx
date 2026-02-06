@@ -146,13 +146,8 @@ def _change_sender_status(domain: str, new_status: str, sender: dict | None = No
     }
     sender_status, action_enum, style, label = status_map[new_status]
 
-    old_status = sender.get("status", "unknown")
-
     db.set_user_override(domain, new_status)
     db.update_sender_status(domain, sender_status)
-
-    if old_status != sender_status.value:
-        db.log_correction(domain, old_status, new_status)
 
     # Build AI recommendation from sender data
     ai_rec = None
@@ -163,6 +158,9 @@ def _change_sender_status(domain: str, new_status: str, sender: dict | None = No
             ai_rec = Action(ai_class_str)
         except ValueError:
             pass
+
+    if ai_rec and ai_rec.value != new_status:
+        db.log_correction(domain, ai_rec.value, new_status)
 
     total = sender.get("total_emails", 0)
     seen = sender.get("seen_emails", 0)

@@ -135,14 +135,23 @@ def get_emails_for_domain(
     config: Config, domain: str, account_name: str | None = None
 ) -> list[EmailHeader]:
     """Get all marketing emails for a specific domain."""
-    account = config.get_account(account_name)
-    if not account:
-        raise ValueError("No account configured")
+    if account_name:
+        account = config.get_account(account_name)
+        if not account:
+            raise ValueError("No account configured")
+        accounts_to_scan = [(account_name, account)]
+    else:
+        accounts_to_scan = list(config.accounts.items())
+        if not accounts_to_scan:
+            raise ValueError("No account configured")
 
     emails = []
-    with IMAPConnection(account) as conn:
-        for header in conn.fetch_marketing_emails(days=config.scan_days):
-            if header.domain == domain:
-                emails.append(header)
+    for _, account in accounts_to_scan:
+        if not account:
+            continue
+        with IMAPConnection(account) as conn:
+            for header in conn.fetch_marketing_emails(days=config.scan_days):
+                if header.domain == domain:
+                    emails.append(header)
 
     return emails

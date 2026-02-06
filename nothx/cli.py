@@ -31,6 +31,7 @@ from .unsubscriber import UnsafeUnsubscribeError, unsubscribe
 
 logger = logging.getLogger(__name__)
 
+
 # Questionary style — orange1 highlight matching our logo color
 Q_STYLE = QStyle(
     [
@@ -52,7 +53,7 @@ Q_COMMON: dict[str, Any] = {
 # Style for text/password prompts — label goes in qmark for column-0 alignment
 Q_INPUT_STYLE = QStyle(
     [
-        ("qmark", "bold fg:#b3b3b3"),  # match header style (bold grey70)
+        ("qmark", "bold fg:#a0a0a0"),  # match header style
         ("answer", "fg:#ffaf00"),
         ("text", "fg:#ffaf00"),
     ]
@@ -64,7 +65,7 @@ _L = "[muted]│[/muted]"
 
 def _key(k: str) -> str:
     """Render a single keycap with rounded pill shape using half-block edges."""
-    return f"[grey19]▐[/][grey50 on grey19] {k} [/][grey19]▌[/]"
+    return f"[#505050]▐[/][#808080 on #505050] {k} [/][#505050]▌[/]"
 
 
 _key_hints_shown = False
@@ -118,8 +119,71 @@ def _styled_confirm(message: str, default: bool = True) -> bool:
         questionary.Choice("Yes", value="yes"),
         questionary.Choice("No", value="no"),
     ]
-    result = _styled_select(choices, default="yes" if default else "no")
+    result = _styled_select(choices)
     return result == "yes"
+
+
+def _change_sender_status(domain: str, new_status: str, sender: dict | None = None) -> bool:
+    """Change a sender's status and log the action for learning.
+
+    Args:
+        domain: The sender domain to change.
+        new_status: One of "keep", "unsub", "block".
+        sender: Optional pre-fetched sender dict. If None, fetches from DB.
+
+    Returns:
+        True if the status was changed, False if sender not found.
+    """
+    if sender is None:
+        sender = db.get_sender(domain)
+    if not sender:
+        return False
+
+    status_map = {
+        "unsub": (SenderStatus.UNSUBSCRIBED, Action.UNSUB, "unsubscribe", "Unsubscribed"),
+        "keep": (SenderStatus.KEEP, Action.KEEP, "keep", "Keep"),
+        "block": (SenderStatus.BLOCKED, Action.BLOCK, "block", "Blocked"),
+    }
+    sender_status, action_enum, style, label = status_map[new_status]
+
+    old_status = sender.get("status", "unknown")
+
+    db.set_user_override(domain, new_status)
+    db.update_sender_status(domain, sender_status)
+
+    if old_status != sender_status.value:
+        db.log_correction(domain, old_status, new_status)
+
+    # Build AI recommendation from sender data
+    ai_rec = None
+    if ai_class_str := sender.get("ai_classification"):
+        if ai_class_str == "unsubscribe":
+            ai_class_str = "unsub"
+        try:
+            ai_rec = Action(ai_class_str)
+        except ValueError:
+            pass
+
+    total = sender.get("total_emails", 0)
+    seen = sender.get("seen_emails", 0)
+    open_rate = (seen / total * 100) if total > 0 else 0
+
+    action_record = UserAction(
+        domain=domain,
+        action=action_enum,
+        timestamp=datetime.now(),
+        ai_recommendation=ai_rec,
+        heuristic_score=None,
+        open_rate=open_rate,
+        email_count=total,
+    )
+    db.log_user_action(action_record)
+
+    learner = get_learner()
+    learner.update_from_action(action_record)
+
+    console.print(f"{_L} [{style}]\u2192 {label}[/{style}]")
+    return True
 
 
 # Simple email validation regex
@@ -330,7 +394,7 @@ def _show_welcome_screen() -> None:
     elif selected == "senders":
         ctx.invoke(senders, status=None, sort="date", as_json=False)
     elif selected == "help":
-        alias_names = {"r", "s", "rv", "h"}
+        alias_names = {"r", "s", "rv", "h", "c"}
         group = ctx.command
         assert isinstance(group, click.Group)
         _select_header("Select a command")
@@ -357,7 +421,7 @@ def _show_learning_status(config: Config) -> None:
     summary = learner.get_learning_summary()
 
     console.print("\n[header]Learning Status[/header]")
-    console.print(Rule(style="dim"))
+    console.print(Rule(style="#808080"))
 
     # Overall stats
     console.print("\n[header]Training Data[/header]")
@@ -473,7 +537,7 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
 
     # Test connection
     account = AccountConfig(provider=provider, email=email, password=password)
-    with console.status("Testing connection...", spinner_style="white"):
+    with console.status("Testing connection...", spinner_style="#ffaf00"):
         success, msg = test_account(account)
 
     if not success:
@@ -586,7 +650,7 @@ def init(ctx):
             config.ai.model = "llama3.2"
             console.print("[warning]Could not fetch models. Using default: llama3.2[/warning]")
 
-        with console.status("Testing Ollama connection...", spinner_style="white"):
+        with console.status("Testing Ollama connection...", spinner_style="#ffaf00"):
             success, msg = test_ai_connection(config)
 
         if success:
@@ -624,7 +688,7 @@ def init(ctx):
                 config.ai.model = temp_provider.default_model
 
             with console.status(
-                f"Testing {provider_info['name']} connection...", spinner_style="white"
+                f"Testing {provider_info['name']} connection...", spinner_style="#ffaf00"
             ):
                 success, msg = test_ai_connection(config)
 
@@ -821,7 +885,7 @@ def run(auto: bool, dry_run: bool, verbose: bool, account: tuple[str, ...]):
     db.init_db()
 
     if dry_run:
-        console.print("[yellow]DRY RUN - no changes will be made[/yellow]\n")
+        console.print("[warning]DRY RUN - no changes will be made[/warning]\n")
 
     _run_scan(config, verbose=verbose, dry_run=dry_run, auto=auto, account_names=accounts_to_scan)
 
@@ -848,10 +912,10 @@ def _run_scan(
     else:
         account_count = len(config.accounts)
         label = f"({account_count} account{'s' if account_count != 1 else ''})"
-    console.print(f"\n[header]Phase 1/3: Scanning inbox {label}[/header]")
+    console.print(f"\n[header]Step 1/3: Scanning inbox {label}[/header]")
 
     with Progress(
-        SpinnerColumn(style="white"),
+        SpinnerColumn(style="#ffaf00"),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(complete_style="orange1", finished_style="orange1", pulse_style="orange1"),
         TaskProgressColumn(),
@@ -864,9 +928,11 @@ def _run_scan(
 
         def on_account_start(email: str, _name: str, current: int, total: int) -> None:
             if total > 1:
-                progress.update(task, description=f"Scanning {email}... ({current}/{total})")
+                progress.update(
+                    task, description=f"Scanning account {current} of {total} · {email}"
+                )
             else:
-                progress.update(task, description=f"Scanning {email}...")
+                progress.update(task, description=f"Scanning {email}")
 
         def on_account_error(email: str, _name: str, error: str) -> None:
             scan_errors.append(f"{email}: {error}")
@@ -891,15 +957,15 @@ def _run_scan(
     stats.unique_senders = len(sender_stats)
 
     console.print(
-        f"[success]✓ Found [count]{stats.emails_scanned}[/count] emails from [count]{stats.unique_senders}[/count] senders[/success]"
+        f"[success]✓ Found {stats.emails_scanned} emails from {stats.unique_senders} senders[/success]"
     )
 
     # Phase 2: Classify senders
-    console.print("\n[header]Phase 2/3: Classifying senders[/header]")
+    console.print("\n[header]Step 2/3: Classifying senders[/header]")
     engine = ClassificationEngine(config)
 
     with Progress(
-        SpinnerColumn(style="white"),
+        SpinnerColumn(style="#ffaf00"),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(complete_style="orange1", finished_style="orange1", pulse_style="orange1"),
         TaskProgressColumn(),
@@ -1014,10 +1080,10 @@ def _run_scan(
         if auto or _styled_confirm(
             f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
         ):
-            console.print("\n[header]Phase 3/3: Unsubscribing[/header]")
+            console.print("\n[header]Step 3/3: Unsubscribing[/header]")
 
             with Progress(
-                SpinnerColumn(style="white"),
+                SpinnerColumn(style="#ffaf00"),
                 TextColumn("[progress.description]{task.description}"),
                 BarColumn(
                     complete_style="orange1", finished_style="orange1", pulse_style="orange1"
@@ -1067,7 +1133,7 @@ def _run_scan(
 
     # Prompt about review queue
     if to_review and not auto:
-        console.print(f"\n[yellow]{len(to_review)} senders need manual review.[/yellow]")
+        console.print(f"\n[warning]{len(to_review)} senders need manual review.[/warning]")
         console.print("Run [bold]nothx review[/bold] to process them.")
 
 
@@ -1124,7 +1190,7 @@ def status(learning: bool):
         return
 
     console.print("\n[header]nothx Status[/header]")
-    console.print(Rule(style="dim"))
+    console.print(Rule(style="#808080"))
 
     # Stats summary as columns
     stats = db.get_stats()
@@ -1139,7 +1205,7 @@ def status(learning: bool):
         (f"[count]{success_rate:.0f}%[/count]", "Success"),
     ]
     stat_panels = [
-        Panel(f"{value}\n[muted]{label}[/muted]", width=14, border_style="dim")
+        Panel(f"{value}\n[muted]{label}[/muted]", width=14, border_style="#808080")
         for value, label in panel_data
     ]
     console.print(Columns(stat_panels, padding=(0, 1)))
@@ -1261,57 +1327,10 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
             console.print(f"{_L} [muted]Cancelled[/muted]")
             break
 
-        if choice == "unsub":
-            db.set_user_override(domain, "unsub")
-            db.update_sender_status(domain, SenderStatus.UNSUBSCRIBED)
-            console.print(f"{_L} [unsubscribe]→ Will unsubscribe[/unsubscribe]")
-            user_action = Action.UNSUB
-        elif choice == "keep":
-            db.set_user_override(domain, "keep")
-            db.update_sender_status(domain, SenderStatus.KEEP)
-            console.print(f"{_L} [keep]→ Will keep[/keep]")
-            user_action = Action.KEEP
-        elif choice == "block":
-            db.set_user_override(domain, "block")
-            db.update_sender_status(domain, SenderStatus.BLOCKED)
-            console.print(f"{_L} [block]→ Will block[/block]")
-            user_action = Action.BLOCK
+        if choice in ("unsub", "keep", "block"):
+            _change_sender_status(domain, choice, sender=sender)
         else:
-            console.print(f"{_L} [review]→ Skipped[/review]")
-            user_action = None
-
-        # Log user action for learning (if not skipped)
-        if user_action is not None:
-            # Get AI recommendation if available
-            ai_rec = None
-            if ai_class_str := sender.get("ai_classification"):
-                # Normalize 'unsubscribe' to 'unsub' for enum matching
-                if ai_class_str == "unsubscribe":
-                    ai_class_str = "unsub"
-                try:
-                    ai_rec = Action(ai_class_str)
-                except ValueError:
-                    pass  # ai_rec remains None for unknown values
-
-            # Calculate open rate
-            seen = sender.get("seen_emails", 0)
-            open_rate = (seen / total * 100) if total > 0 else 0
-
-            # Log the action
-            action_record = UserAction(
-                domain=domain,
-                action=user_action,
-                timestamp=datetime.now(),
-                ai_recommendation=ai_rec,
-                heuristic_score=None,  # Not available in review context
-                open_rate=open_rate,
-                email_count=total,
-            )
-            db.log_user_action(action_record)
-
-            # Update learner with this action
-            learner = get_learner()
-            learner.update_from_action(action_record)
+            console.print(f"{_L} [review]\u2192 Skipped[/review]")
 
         console.print()
 
@@ -1387,7 +1406,7 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
             console.print(f"{_L} Frequency: {status['frequency']}")
             console.print(f"{_L} Path: {status['path']}")
         else:
-            console.print("[yellow]No schedule configured[/yellow]")
+            console.print("[warning]No schedule configured[/warning]")
         return
 
     if off:
@@ -1523,8 +1542,10 @@ def senders(status: str | None, sort: str, as_json: bool):
 
     for sender in all_senders[:50]:  # Limit display to 50
         sender_status = sender.get("status", "unknown")
-        style = status_styles.get(sender_status, "")
-        status_display = f"[{style}]{sender_status.title()}[/{style}]"
+        style = status_styles.get(sender_status)
+        status_display = (
+            f"[{style}]{sender_status.title()}[/{style}]" if style else sender_status.title()
+        )
 
         last_seen = sender.get("last_seen", "")
         if last_seen:
@@ -1545,6 +1566,154 @@ def senders(status: str | None, sort: str, as_json: bool):
 
     if len(all_senders) > 50:
         console.print(f"\n[muted]Showing first 50 of {len(all_senders)} senders[/muted]")
+
+    # Bulk action mode when filtering by status (skip for JSON output or non-TTY)
+    if not as_json and all_senders and status and console.is_terminal:
+        _senders_bulk_action(all_senders, status)
+
+
+def _senders_bulk_action(all_senders: list[dict], status_filter: str) -> None:
+    """Show bulk action menu for filtered senders."""
+    _select_header("Actions")
+
+    bulk_choices = [
+        questionary.Choice(f"Change all {len(all_senders)} to Keep", value="keep"),
+        questionary.Choice(f"Change all {len(all_senders)} to Unsubscribe", value="unsub"),
+        questionary.Choice(f"Change all {len(all_senders)} to Block", value="block"),
+        questionary.Choice("Pick individual sender", value="pick"),
+        questionary.Choice("Exit", value=None),
+    ]
+
+    # Remove the option matching current filter (no-op change)
+    filter_action_map = {"keep": "keep", "unsub": "unsub", "blocked": "block"}
+    current_action = filter_action_map.get(status_filter)
+    bulk_choices = [c for c in bulk_choices if c.value != current_action]
+
+    bulk_action = _styled_select(bulk_choices)
+
+    if bulk_action is None:
+        return
+
+    if bulk_action == "pick":
+        _senders_pick_individual(all_senders[:50])
+        return
+
+    # Confirm bulk action
+    if not _styled_confirm(f"Change all {len(all_senders)} senders to {bulk_action}?"):
+        console.print("[muted]Cancelled.[/muted]")
+        return
+
+    changed = 0
+    for sender_item in all_senders:
+        if _change_sender_status(sender_item["domain"], bulk_action, sender=sender_item):
+            changed += 1
+
+    console.print(f"\n[success]\u2713 Changed {changed} senders[/success]")
+
+
+def _senders_pick_individual(displayed_senders: list[dict]) -> None:
+    """Show domain picker for individual status change."""
+    _select_header("Change a sender's status")
+
+    domain_choices = []
+    for sender_item in displayed_senders:
+        s_domain = sender_item["domain"]
+        s_status = sender_item.get("status", "unknown")
+        s_emails = sender_item.get("total_emails", 0)
+        label = f"{s_domain} ({s_status}, {s_emails} emails)"
+        domain_choices.append(questionary.Choice(label, value=s_domain))
+    domain_choices.append(questionary.Choice("Exit", value=None))
+
+    selected_domain = _styled_select(domain_choices)
+
+    if selected_domain is None:
+        return
+
+    sender_data = next((s for s in displayed_senders if s["domain"] == selected_domain), None)
+    if not sender_data:
+        return
+
+    current = sender_data.get("status", "unknown")
+    console.print(f"\n{_L} Current status: [bold]{current.title()}[/bold]")
+
+    _select_header("New status")
+    status_choices = [
+        questionary.Choice("Keep", value="keep"),
+        questionary.Choice("Unsubscribe", value="unsub"),
+        questionary.Choice("Block", value="block"),
+        questionary.Choice("Cancel", value=None),
+    ]
+    new = _styled_select(status_choices)
+
+    if new is not None:
+        _change_sender_status(selected_domain, new, sender=sender_data)
+    console.print()
+
+
+@main.command()
+@click.argument("domain")
+def change(domain: str):
+    """Change a sender's status.
+
+    Example: nothx change marketing.example.com
+    """
+    db.init_db()
+
+    sender = db.get_sender(domain)
+    if not sender:
+        console.print(f"[warning]Sender '{domain}' not found.[/warning]")
+        console.print(f"Try [bold]nothx search {domain}[/bold] to find it.")
+        return
+
+    # Display current info
+    current_status = sender.get("status", "unknown")
+    status_styles = {
+        "unsubscribed": "unsubscribe",
+        "keep": "keep",
+        "blocked": "block",
+        "unknown": "review",
+    }
+    style = status_styles.get(current_status)
+    status_display = (
+        f"[{style}]{current_status.title()}[/{style}]" if style else current_status.title()
+    )
+
+    last_seen = sender.get("last_seen", "")
+    if last_seen:
+        try:
+            last_dt = datetime.fromisoformat(last_seen)
+            last_seen = humanize.naturaltime(last_dt)
+        except (ValueError, TypeError):
+            last_seen = last_seen[:10] if last_seen else "-"
+
+    console.print(f"\n[header]{domain}[/header]")
+    console.print(f"{_L} Status: {status_display}")
+    console.print(f"{_L} Emails: [count]{sender.get('total_emails', 0)}[/count]")
+    if last_seen:
+        console.print(f"{_L} Last seen: {last_seen}")
+
+    # Status picker
+    _select_header("Change status")
+    choices = [
+        questionary.Choice("Keep - Continue receiving", value="keep"),
+        questionary.Choice("Unsubscribe - Stop receiving emails", value="unsub"),
+        questionary.Choice("Block - Block sender entirely", value="block"),
+        questionary.Choice("Cancel", value=None),
+    ]
+    new_status = _styled_select(choices)
+
+    if new_status is None:
+        console.print("[muted]Cancelled.[/muted]")
+        return
+
+    # Check if status actually changed
+    new_status_value = {"keep": "keep", "unsub": "unsubscribed", "block": "blocked"}[new_status]
+    if current_status == new_status_value:
+        console.print("[muted]Status unchanged.[/muted]")
+        return
+
+    _change_sender_status(domain, new_status, sender=sender)
+    console.print()
 
 
 @main.command()
@@ -1717,7 +1886,7 @@ def test_connection():
     for _name, account in config.accounts.items():
         console.print(f"\n[header]Testing connection to {account.email}...[/header]")
 
-        with console.status("Connecting...", spinner_style="white"):
+        with console.status("Connecting...", spinner_style="#ffaf00"):
             success, msg = test_account(account)
 
         if success:
@@ -1879,7 +2048,7 @@ def update(check: bool):
     console.print(f"\n[header]Current version:[/header] {__version__}")
 
     # Check for latest version on PyPI using the JSON API
-    with console.status("Checking for updates...", spinner_style="white"):
+    with console.status("Checking for updates...", spinner_style="#ffaf00"):
         try:
             url = "https://pypi.org/pypi/nothx/json"
             with urllib.request.urlopen(url, timeout=10) as response:
@@ -1937,6 +2106,7 @@ main.add_command(run, name="r")
 main.add_command(status, name="s")
 main.add_command(review, name="rv")
 main.add_command(history, name="h")
+main.add_command(change, name="c")
 
 
 if __name__ == "__main__":

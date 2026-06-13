@@ -233,6 +233,38 @@ class TestAccountCommands:
         assert account.client_id == "client-123"
         assert account.provider == "outlook"
 
+    @patch("webbrowser.open")
+    @patch("nothx.cli.questionary.select")
+    @patch("nothx.cli.questionary.text")
+    @patch("nothx.cli.test_account")
+    @patch("nothx.cli.msauth")
+    def test_account_add_outlook_opens_browser(
+        self, mock_msauth, mock_test, mock_text, mock_select, mock_browser, runner, temp_config_dir
+    ):
+        """The wizard auto-opens the device-login page; a browser failure is non-fatal."""
+        mock_select.return_value.ask.return_value = "outlook"
+        mock_text.return_value.ask.side_effect = ["user@live.com", "client-123"]
+        mock_msauth.start_device_flow.return_value = {
+            "user_code": "ABC123",
+            "device_code": "device-secret",
+            "verification_uri": "https://microsoft.com/devicelogin",
+            "interval": 5,
+            "expires_in": 900,
+        }
+        mock_msauth.poll_for_token.return_value = {
+            "access_token": "tok",
+            "refresh_token": "ref",
+            "expires_in": 3600,
+        }
+        mock_test.return_value = (True, "Connected")
+        mock_browser.side_effect = RuntimeError("no display")
+
+        result = runner.invoke(account_add, [])
+
+        assert result.exit_code == 0
+        assert "Added account" in result.output
+        mock_browser.assert_called_once_with("https://microsoft.com/devicelogin")
+
     @patch("nothx.cli.questionary.select")
     @patch("nothx.cli.questionary.text")
     @patch("nothx.cli.msauth")

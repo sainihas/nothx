@@ -533,6 +533,15 @@ def _outlook_oauth_signin(email: str) -> str | None:
     console.print(f"{_L} 2. Enter code: [bold]{flow['user_code']}[/bold]")
     console.print(f"{_L} 3. Sign in as {email} and approve access")
 
+    # Open the verification page automatically (best effort); the printed
+    # instructions remain the fallback for headless/SSH sessions.
+    try:
+        import webbrowser
+
+        webbrowser.open(flow["verification_uri"])
+    except Exception:  # pragma: no cover - browser availability varies
+        pass
+
     try:
         with console.status("Waiting for sign-in...", spinner_style="#ffaf00"):
             token = msauth.poll_for_token(

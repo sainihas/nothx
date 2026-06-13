@@ -36,7 +36,9 @@ class AccountConfig:
 
     provider: str  # "gmail" or "outlook"
     email: str
-    password: str  # App password for Gmail
+    password: str = ""  # App password (empty for OAuth accounts)
+    auth: str = "password"  # "password" or "oauth" (oauth is outlook-only)
+    client_id: str | None = None  # Azure app client ID for OAuth accounts
 
 
 def validate_api_base(api_base: str | None) -> str | None:

@@ -10,10 +10,12 @@ from datetime import datetime, timedelta
 from email.header import decode_header
 from email.message import Message
 
+from . import msauth
 from .config import AccountConfig
 from .errors import (
     ErrorCode,
     IMAPError,
+    OAuthError,
     RetryConfig,
     retry_with_backoff,
 )
@@ -45,17 +47,89 @@ IMAP_SERVERS = {
     "icloud": "imap.mail.me.com",
 }
 
+# Modern Outlook host — required for OAuth2 (XOAUTH2) connections
+OUTLOOK_OAUTH_SERVER = "outlook.office365.com"
+
+# Warning shown for outlook accounts still configured with password auth
+OUTLOOK_PASSWORD_DEPRECATED_WARNING = (
+    "Microsoft disabled basic auth (including app passwords) for personal "
+    "outlook.com/live.com/hotmail.com accounts in fall 2024 — IMAP login will "
+    "likely fail. Re-add the account with OAuth: run 'nothx account add' and "
+    "choose Outlook to sign in with Microsoft."
+)
+
 
 class IMAPConnection:
     """Manages IMAP connection to email provider."""
 
     def __init__(self, account: AccountConfig):
         self.account = account
-        self.server = IMAP_SERVERS.get(account.provider, account.provider)
+        if account.provider == "outlook" and account.auth == "oauth":
+            self.server = OUTLOOK_OAUTH_SERVER
+        else:
+            self.server = IMAP_SERVERS.get(account.provider, account.provider)
         self.conn: imaplib.IMAP4_SSL | None = None
+
+    def _authenticate_xoauth2(self, access_token: str) -> None:
+        """Authenticate the current connection via SASL XOAUTH2."""
+        assert self.conn is not None
+        sasl = f"user={self.account.email}\x01auth=Bearer {access_token}\x01\x01".encode()
+        self.conn.authenticate("XOAUTH2", lambda _: sasl)
+
+    def _connect_oauth(self) -> None:
+        """Connect and authenticate via OAuth2 (XOAUTH2).
+
+        On AUTHENTICATE failure, forces a token refresh and retries once on a
+        fresh connection.
+        """
+        if not self.account.client_id:
+            raise IMAPError(
+                code=ErrorCode.IMAP_AUTH_FAILED,
+                message=f"OAuth account {self.account.email} has no client_id configured",
+                details={"email": self.account.email},
+            )
+
+        try:
+            access_token = msauth.get_access_token(self.account.email, self.account.client_id)
+            self.conn = imaplib.IMAP4_SSL(self.server)
+            try:
+                self._authenticate_xoauth2(access_token)
+                return
+            except imaplib.IMAP4.error as e:
+                logger.warning(
+                    "XOAUTH2 authentication failed for %s, refreshing token and retrying: %s",
+                    self.account.email,
+                    e,
+                )
+                access_token = msauth.get_access_token(
+                    self.account.email, self.account.client_id, force_refresh=True
+                )
+                self.conn = imaplib.IMAP4_SSL(self.server)
+                self._authenticate_xoauth2(access_token)
+                return
+        except OAuthError as e:
+            raise IMAPError(
+                code=ErrorCode.IMAP_AUTH_FAILED,
+                message=f"OAuth authentication failed for {self.account.email}: {e.message}",
+                details={"server": self.server, "email": self.account.email},
+                cause=e,
+            ) from e
+        except imaplib.IMAP4.error as e:
+            raise IMAPError(
+                code=ErrorCode.IMAP_AUTH_FAILED,
+                message=f"Authentication failed for {self.account.email}",
+                details={"server": self.server, "email": self.account.email},
+                cause=e,
+            ) from e
 
     def connect(self) -> bool:
         """Connect to the IMAP server with retry logic."""
+        if self.account.provider == "outlook" and self.account.auth != "oauth":
+            logger.warning(
+                "Account %s uses password auth: %s",
+                self.account.email,
+                OUTLOOK_PASSWORD_DEPRECATED_WARNING,
+            )
 
         @retry_with_backoff(
             config=IMAP_RETRY_CONFIG,
@@ -67,8 +141,11 @@ class IMAPConnection:
             ),
         )
         def _connect():
-            self.conn = imaplib.IMAP4_SSL(self.server)
-            self.conn.login(self.account.email, self.account.password)
+            if self.account.auth == "oauth":
+                self._connect_oauth()
+            else:
+                self.conn = imaplib.IMAP4_SSL(self.server)
+                self.conn.login(self.account.email, self.account.password)
 
         try:
             _connect()
@@ -81,9 +158,12 @@ class IMAPConnection:
         except imaplib.IMAP4.error as e:
             error_str = str(e).lower()
             if "authentication" in error_str or "login" in error_str:
+                message = f"Authentication failed for {self.account.email}"
+                if self.account.provider == "outlook" and self.account.auth != "oauth":
+                    message = f"{message}. {OUTLOOK_PASSWORD_DEPRECATED_WARNING}"
                 raise IMAPError(
                     code=ErrorCode.IMAP_AUTH_FAILED,
-                    message=f"Authentication failed for {self.account.email}",
+                    message=message,
                     details={"server": self.server, "email": self.account.email},
                     cause=e,
                 ) from e

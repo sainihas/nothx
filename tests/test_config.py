@@ -1,5 +1,6 @@
 """Tests for configuration management."""
 
+import json
 import stat
 import tempfile
 from pathlib import Path
@@ -112,6 +113,44 @@ class TestConfigSaveLoad:
         # Should return default config
         assert config.accounts == {}
         assert config.default_account is None
+
+    def test_load_legacy_account_without_auth_fields(self, temp_config_dir):
+        """Test that old configs without auth/client_id load as password auth."""
+        config_path = temp_config_dir / "config.json"
+        legacy = {
+            "accounts": {
+                "default": {
+                    "provider": "outlook",
+                    "email": "old@live.com",
+                    "password": "app-password",
+                }
+            },
+            "default_account": "default",
+        }
+        with open(config_path, "w") as f:
+            json.dump(legacy, f)
+
+        config = Config.load()
+
+        account = config.accounts["default"]
+        assert account.auth == "password"
+        assert account.client_id is None
+        assert account.password == "app-password"
+
+    def test_save_and_load_oauth_account(self, temp_config_dir):
+        """Test that OAuth account fields round-trip through config.json."""
+        config = Config()
+        config.accounts["outlook"] = AccountConfig(
+            provider="outlook", email="user@live.com", auth="oauth", client_id="client-123"
+        )
+        config.save()
+
+        loaded = Config.load()
+
+        account = loaded.accounts["outlook"]
+        assert account.auth == "oauth"
+        assert account.client_id == "client-123"
+        assert account.password == ""
 
 
 class TestConfigMethods:

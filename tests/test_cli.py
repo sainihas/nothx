@@ -193,6 +193,66 @@ class TestAccountCommands:
         assert "Added account" in result.output
 
     @patch("nothx.cli.questionary.select")
+    @patch("nothx.cli.questionary.text")
+    @patch("nothx.cli.test_account")
+    @patch("nothx.cli.msauth")
+    def test_account_add_outlook_oauth(
+        self, mock_msauth, mock_test, mock_text, mock_select, runner, temp_config_dir
+    ):
+        """Test adding an Outlook account via the OAuth device-code flow."""
+        mock_select.return_value.ask.return_value = "outlook"
+        mock_text.return_value.ask.side_effect = [
+            "user@live.com",  # Email
+            "client-123",  # Azure app client ID
+        ]
+        mock_msauth.start_device_flow.return_value = {
+            "user_code": "ABC123",
+            "device_code": "device-secret",
+            "verification_uri": "https://microsoft.com/devicelogin",
+            "interval": 5,
+            "expires_in": 900,
+        }
+        mock_msauth.poll_for_token.return_value = {
+            "access_token": "tok",
+            "refresh_token": "ref",
+            "expires_in": 3600,
+        }
+        mock_test.return_value = (True, "Connected")
+
+        result = runner.invoke(account_add, [])
+
+        assert result.exit_code == 0
+        assert "Added account" in result.output
+        assert "ABC123" in result.output  # Device code shown to the user
+        mock_msauth.poll_for_token.assert_called_once_with("client-123", "device-secret", 5, 900)
+        mock_msauth.save_token.assert_called_once()
+
+        config = Config.load()
+        account = config.accounts["user"]
+        assert account.auth == "oauth"
+        assert account.client_id == "client-123"
+        assert account.provider == "outlook"
+
+    @patch("nothx.cli.questionary.select")
+    @patch("nothx.cli.questionary.text")
+    @patch("nothx.cli.msauth")
+    def test_account_add_outlook_oauth_cancelled(
+        self, mock_msauth, mock_text, mock_select, runner, temp_config_dir
+    ):
+        """Test cancelling the OAuth flow at the client ID prompt."""
+        mock_select.return_value.ask.return_value = "outlook"
+        mock_text.return_value.ask.side_effect = [
+            "user@live.com",  # Email
+            None,  # Client ID prompt cancelled
+        ]
+
+        result = runner.invoke(account_add, [])
+
+        assert result.exit_code == 0
+        assert "Account not added" in result.output
+        mock_msauth.start_device_flow.assert_not_called()
+
+    @patch("nothx.cli.questionary.select")
     def test_account_remove(self, mock_select, runner, configured_env, temp_config_dir):
         """Test removing an account."""
         mock_select.return_value.ask.side_effect = [
@@ -694,6 +754,24 @@ class TestTestConnectionCommand:
         assert result.exit_code == 0
         assert "failed" in result.output
 
+    @patch("nothx.cli.test_account")
+    def test_test_outlook_password_warns(self, mock_test, runner, temp_config_dir):
+        """Test that outlook password accounts get the app-password warning."""
+        config = Config()
+        config.accounts["old"] = AccountConfig(
+            provider="outlook", email="old@live.com", password="app-password"
+        )
+        config.default_account = "old"
+        config.save()
+        mock_test.return_value = (False, "Authentication failed")
+
+        result = runner.invoke(test_connection, [])
+
+        assert result.exit_code == 0
+        output_lower = result.output.lower()
+        assert "disabled" in output_lower
+        assert "oauth" in output_lower
+
 
 class TestResetCommand:
     """Tests for the reset command."""
@@ -912,11 +990,13 @@ class TestAppPasswordInstructions:
         assert "gmail" in APP_PASSWORD_INSTRUCTIONS
         assert len(APP_PASSWORD_INSTRUCTIONS["gmail"]) > 0
 
-    def test_outlook_instructions_exist(self):
-        """Test Outlook instructions are defined."""
-        from nothx.cli import APP_PASSWORD_INSTRUCTIONS
+    def test_outlook_uses_oauth_instructions(self):
+        """Test Outlook uses OAuth instructions instead of app passwords."""
+        from nothx.cli import APP_PASSWORD_INSTRUCTIONS, OUTLOOK_OAUTH_INSTRUCTIONS
 
-        assert "outlook" in APP_PASSWORD_INSTRUCTIONS
+        assert "outlook" not in APP_PASSWORD_INSTRUCTIONS
+        assert len(OUTLOOK_OAUTH_INSTRUCTIONS) > 0
+        assert any("portal.azure.com" in line for line in OUTLOOK_OAUTH_INSTRUCTIONS)
 
     def test_yahoo_instructions_exist(self):
         """Test Yahoo instructions are defined."""

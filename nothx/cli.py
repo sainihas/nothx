@@ -18,11 +18,12 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.tree import Tree
 
-from . import __version__, db
+from . import __version__, db, msauth
 from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
 from .config import AccountConfig, Config, get_config_dir
-from .imap import test_account
+from .errors import OAuthError
+from .imap import OUTLOOK_PASSWORD_DEPRECATED_WARNING, test_account
 from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
@@ -203,12 +204,6 @@ APP_PASSWORD_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
         "  2. Generate a new password for 'nothx'",
         "  3. Copy the 16-character code\n",
     ),
-    "outlook": (
-        "[warning]For Outlook/Live/Hotmail, you need an App Password:[/warning]",
-        "  1. Go to [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]",
-        "  2. You may need to enable 2FA first at [link=https://account.microsoft.com/security]account.microsoft.com/security[/link]",
-        "  3. Generate a new app password and copy it\n",
-    ),
     "yahoo": (
         "[warning]For Yahoo Mail, you need an App Password:[/warning]",
         "  1. Go to [link=https://login.yahoo.com/account/security]login.yahoo.com/account/security[/link]",
@@ -224,6 +219,17 @@ APP_PASSWORD_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
         "  4. Copy the generated password\n",
     ),
 }
+
+# Outlook OAuth setup instructions (Microsoft disabled app passwords for
+# personal accounts — IMAP requires OAuth2 via a one-time free Azure app)
+OUTLOOK_OAUTH_INSTRUCTIONS: tuple[str, ...] = (
+    "[warning]Outlook/Live/Hotmail requires OAuth — Microsoft disabled app passwords.[/warning]",
+    "You need a free Azure app registration (one-time, ~2 minutes):",
+    "  1. Go to [link=https://portal.azure.com]portal.azure.com[/link] > App registrations > New registration",
+    "  2. Supported account types: 'Personal Microsoft accounts only' (no redirect URI needed)",
+    "  3. After creating: Authentication > 'Allow public client flows' > Yes",
+    "  4. Copy the 'Application (client) ID' from the Overview page\n",
+)
 
 # Provider-specific API key setup instructions
 API_KEY_INSTRUCTIONS: dict[str, tuple[str, ...]] = {
@@ -256,7 +262,9 @@ TROUBLESHOOTING_TIPS: dict[str, tuple[str, ...]] = {
         "  • Verify your app password at [link=https://myaccount.google.com/apppasswords]myaccount.google.com/apppasswords[/link]",
     ),
     "outlook": (
-        "  • Verify your app password at [link=https://account.live.com/proofs/AppPassword]account.live.com/proofs/AppPassword[/link]",
+        "  • Microsoft disabled app passwords for personal accounts — OAuth is required",
+        "  • Re-add the account with 'nothx account add' and sign in with Microsoft",
+        "  • If sign-in fails, check 'Allow public client flows' is Yes in your Azure app",
     ),
     "yahoo": (
         "  • Verify your app password at [link=https://login.yahoo.com/account/security]login.yahoo.com/account/security[/link]",
@@ -495,6 +503,50 @@ def main(ctx):
         _show_welcome_screen()
 
 
+def _outlook_oauth_signin(email: str) -> str | None:
+    """Run the Microsoft device-code sign-in for an Outlook account.
+
+    Prompts for the Azure app client ID, prints the verification URL and code,
+    waits for the user to complete sign-in, and caches the resulting tokens.
+
+    Returns the client_id on success, or None if cancelled or failed.
+    """
+    console.print()
+    for line in OUTLOOK_OAUTH_INSTRUCTIONS:
+        console.print(f"{_L}{line[1:]}" if line.startswith("  ") else line)
+
+    client_id = questionary.text("", qmark="Azure app Client ID:", style=Q_INPUT_STYLE).ask()
+    if not client_id or not client_id.strip():
+        return None
+    client_id = client_id.strip()
+
+    try:
+        flow = msauth.start_device_flow(client_id)
+    except OAuthError as e:
+        console.print(f"[error]Could not start Microsoft sign-in: {e}[/error]")
+        return None
+
+    console.print("\n[header]Sign in with Microsoft[/header]")
+    console.print(
+        f"{_L} 1. Open [link={flow['verification_uri']}]{flow['verification_uri']}[/link]"
+    )
+    console.print(f"{_L} 2. Enter code: [bold]{flow['user_code']}[/bold]")
+    console.print(f"{_L} 3. Sign in as {email} and approve access")
+
+    try:
+        with console.status("Waiting for sign-in...", spinner_style="#ffaf00"):
+            token = msauth.poll_for_token(
+                client_id, flow["device_code"], flow["interval"], flow["expires_in"]
+            )
+    except OAuthError as e:
+        console.print(f"[error]Microsoft sign-in failed: {e}[/error]")
+        return None
+
+    msauth.save_token(email, token)
+    console.print("[success]✓ Signed in with Microsoft[/success]")
+    return client_id
+
+
 def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
     """Interactive flow to add an email account. Returns (name, account) or None if cancelled."""
     # Email provider selection
@@ -521,20 +573,28 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
             break
         console.print("[error]Invalid email format. Please enter a valid email address.[/error]")
 
-    # App password instructions
-    if instructions := APP_PASSWORD_INSTRUCTIONS.get(provider):
-        console.print()
-        for line in instructions:
-            console.print(f"{_L}{line[1:]}" if line.startswith("  ") else line)
+    if provider == "outlook":
+        # Microsoft disabled app passwords for personal accounts — OAuth only
+        client_id = _outlook_oauth_signin(email)
+        if client_id is None:
+            return None
+        account = AccountConfig(provider=provider, email=email, auth="oauth", client_id=client_id)
     else:
-        console.print("\n[warning]Enter your email password or app password.[/warning]\n")
+        # App password instructions
+        if instructions := APP_PASSWORD_INSTRUCTIONS.get(provider):
+            console.print()
+            for line in instructions:
+                console.print(f"{_L}{line[1:]}" if line.startswith("  ") else line)
+        else:
+            console.print("\n[warning]Enter your email password or app password.[/warning]\n")
 
-    password = questionary.password("", qmark="App Password:", style=Q_INPUT_STYLE).ask()
-    if not password:
-        return None
+        password = questionary.password("", qmark="App Password:", style=Q_INPUT_STYLE).ask()
+        if not password:
+            return None
+
+        account = AccountConfig(provider=provider, email=email, password=password)
 
     # Test connection
-    account = AccountConfig(provider=provider, email=email, password=password)
     with console.status("Testing connection...", spinner_style="#ffaf00"):
         success, msg = test_account(account)
 
@@ -830,6 +890,10 @@ def account_remove():
         return
 
     del config.accounts[account_name]
+
+    # Drop cached OAuth tokens for the removed account
+    if acc.auth == "oauth":
+        msauth.delete_token(acc.email)
 
     # Update default if needed
     if config.default_account == account_name:
@@ -1884,6 +1948,9 @@ def test_connection():
     for _name, account in config.accounts.items():
         console.print(f"\n[header]Testing connection to {account.email}...[/header]")
 
+        if account.provider == "outlook" and account.auth != "oauth":
+            console.print(f"[warning]⚠ {OUTLOOK_PASSWORD_DEPRECATED_WARNING}[/warning]")
+
         with console.status("Connecting...", spinner_style="#ffaf00"):
             success, msg = test_account(account)
 
@@ -1937,6 +2004,10 @@ def reset(keep_config: bool):
         if config_path.exists():
             config_path.unlink()
             console.print("[success]✓ Configuration file deleted[/success]")
+        tokens_path = msauth.get_tokens_path()
+        if tokens_path.exists():
+            tokens_path.unlink()
+            console.print("[success]✓ OAuth token cache deleted[/success]")
 
     console.print(
         f"[success]✓ Cleared {senders_deleted} senders and {unsubs_deleted} unsubscribe logs[/success]"

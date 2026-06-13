@@ -220,11 +220,18 @@ pip install nothx
 </details>
 
 <details>
-<summary><strong>Outlook App Password</strong></summary>
+<summary><strong>Outlook / Live / Hotmail (OAuth)</strong></summary>
 
-1. Go to [account.live.com/proofs/AppPassword](https://account.live.com/proofs/AppPassword)
-2. Enable 2FA if not already
-3. Generate and copy the app password
+**App passwords no longer work.** Microsoft permanently disabled basic auth (including app passwords) for personal outlook.com/live.com/hotmail.com accounts in fall 2024. nothx now signs in with OAuth2 instead.
+
+**One-time setup** — register a free Azure app (~2 minutes):
+
+1. Go to [portal.azure.com](https://portal.azure.com) → **App registrations** → **New registration**
+2. Name it anything (e.g. "nothx"), set supported account types to **"Personal Microsoft accounts only"** — no redirect URI needed
+3. After creating, open **Authentication** → set **"Allow public client flows"** to **Yes**
+4. Copy the **Application (client) ID** from the Overview page
+
+**Sign in** — run `nothx init` (or `nothx account add`), choose Outlook, and paste your client ID when prompted. nothx prints a microsoft.com/devicelogin URL and a short code; open the URL, enter the code, and sign in. Tokens are cached locally (`~/.nothx/tokens.json`, owner-only permissions) and refreshed automatically — you only sign in once.
 </details>
 
 <details>
@@ -251,6 +258,7 @@ pip install nothx
 - Verify your App Password (not your regular password)
 - Ensure IMAP is enabled in your email settings
 - For Gmail: Check that 2FA is enabled (required for App Passwords)
+- For Outlook: app passwords no longer work — re-add the account with `nothx account add` to sign in with OAuth (see Setup above)
 - Run `nothx test` to diagnose
 </details>
 

@@ -182,6 +182,9 @@ class UnsubResult:
     http_status: int | None = None
     error: str | None = None
     response_snippet: str | None = None
+    # The endpoint responded with a page that requires further interaction
+    # (e.g. "click to confirm") — not a success, but worth surfacing.
+    needs_confirmation: bool = False
 
 
 @dataclass

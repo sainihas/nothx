@@ -1098,6 +1098,11 @@ def _run_scan(
                     if email:
                         # Use the account the email came from (for correct mailto credentials)
                         account = config.get_account(email.account_name)
+                        if account is None:
+                            logger.warning(
+                                "No account found for %s; mailto unsubscribe unavailable",
+                                sender.domain,
+                            )
                         try:
                             result = unsubscribe(email, config, account)
                         except UnsafeUnsubscribeError:

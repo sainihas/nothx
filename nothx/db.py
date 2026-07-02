@@ -57,6 +57,7 @@ def init_db() -> None:
                 http_status INTEGER,
                 error TEXT,
                 response_snippet TEXT,
+                needs_confirmation INTEGER DEFAULT 0,
                 FOREIGN KEY (domain) REFERENCES senders(domain)
             );
 
@@ -115,6 +116,33 @@ def init_db() -> None:
                 last_updated TEXT
             );
         """)
+        _migrate(conn)
+
+
+# Bump this when adding a migration step below.
+SCHEMA_VERSION = 1
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check whether a column exists on a table."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """Add a column unless it already exists (idempotent)."""
+    if not _column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Upgrade existing databases to the current schema."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
+    if version < 1:
+        _add_column_if_missing(conn, "unsub_log", "needs_confirmation", "INTEGER DEFAULT 0")
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def upsert_sender(
@@ -186,11 +214,11 @@ def get_senders_by_status(status: SenderStatus) -> list[dict]:
 
 
 def get_senders_for_review() -> list[dict]:
-    """Get senders that need manual review."""
+    """Get senders that need manual review, including failed unsubscribes."""
     with get_db() as conn:
         rows = conn.execute("""
             SELECT * FROM senders
-            WHERE status = 'unknown' AND user_override IS NULL
+            WHERE status IN ('unknown', 'failed') AND user_override IS NULL
             ORDER BY total_emails DESC
         """).fetchall()
         return [dict(row) for row in rows]
@@ -203,13 +231,14 @@ def log_unsub_attempt(
     http_status: int | None = None,
     error: str | None = None,
     response_snippet: str | None = None,
+    needs_confirmation: bool = False,
 ) -> None:
     """Log an unsubscribe attempt."""
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO unsub_log (domain, attempted_at, success, method, http_status, error, response_snippet)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO unsub_log (domain, attempted_at, success, method, http_status, error, response_snippet, needs_confirmation)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 domain,
@@ -219,6 +248,7 @@ def log_unsub_attempt(
                 http_status,
                 error,
                 response_snippet,
+                int(needs_confirmation),
             ),
         )
 

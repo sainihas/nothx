@@ -130,10 +130,15 @@ class ClassificationEngine:
             source="uncertain",
         )
 
-    def classify_batch(self, senders: list[SenderStats]) -> dict[str, Classification]:
+    def classify_batch(
+        self, senders: list[SenderStats], persist: bool = True
+    ) -> dict[str, Classification]:
         """
         Classify a batch of senders efficiently.
         Uses AI batch classification for better efficiency.
+
+        When persist is False (dry-run), AI classifications are not written
+        to the database.
         """
         results: dict[str, Classification] = {}
 
@@ -164,7 +169,7 @@ class ClassificationEngine:
 
         # Layer 3: AI batch classification
         if needs_ai and self.ai.is_available():
-            ai_results = self.ai.classify_batch(needs_ai)
+            ai_results = self.ai.classify_batch(needs_ai, persist=persist)
 
             ai_success_count = 0
             ai_low_confidence_count = 0

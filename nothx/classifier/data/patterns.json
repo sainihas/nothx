@@ -16,12 +16,35 @@
     "hello.*",
     "team.*",
     "*.mailchimp.com",
+    "*.mcsv.net",
+    "*.mcdlv.net",
+    "*.rsgsv.net",
+    "*.mailchimpapp.net",
     "*.sendgrid.net",
+    "*.sendgrid.com",
     "*.klaviyo.com",
+    "*.klaviyomail.com",
     "*.sailthru.com",
     "*.exacttarget.com",
+    "*.mc.salesforce.com",
     "*.constantcontact.com",
-    "*.campaign-archive.com"
+    "*.campaign-archive.com",
+    "*.amazonses.com",
+    "*.mailgun.org",
+    "*.mailgun.net",
+    "*.hubspotemail.net",
+    "*.hubspot.com",
+    "*.braze.com",
+    "*.postmarkapp.com",
+    "*.convertkit.com",
+    "*.ck.page",
+    "*.iterable.com",
+    "*.customeriomail.com",
+    "*.customer.io",
+    "*.mailjet.com",
+    "*.sparkpostmail.com",
+    "*.cmail19.com",
+    "*.createsend.com"
   ],
   "keep_patterns": [
     "*.gov",
@@ -58,5 +81,8 @@
     "shipping.*",
     "delivery.*"
   ],
-  "block_patterns": []
+  "block_patterns": [
+    "*.spam.com",
+    "*.junk.com"
+  ]
 }

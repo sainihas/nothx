@@ -18,8 +18,14 @@ _SPAM_SUBJECT_PATTERNS_RAW = [
     r"(winner|won|prize|congratulations)",
     r"(click here|open now|don't miss)",
     r"^\s*re:\s*re:",  # Fake reply chains
-    r"[A-Z]{5,}",  # Excessive caps
     r"[!?]{2,}",  # Excessive punctuation
+]
+
+# Case-sensitive spam signals: these depend on letter case, so they must be
+# matched against the raw subject WITHOUT re.IGNORECASE (which would make
+# "excessive caps" match any 5-letter word).
+_SPAM_SUBJECT_CASE_PATTERNS_RAW = [
+    r"[A-Z]{5,}",  # Excessive caps
 ]
 
 _SPAM_SENDER_PATTERNS_RAW = [
@@ -52,6 +58,7 @@ _COLD_OUTREACH_PATTERNS_RAW = [
 # Pre-compiled patterns for performance
 # Compiling at module load time avoids repeated compilation during scoring
 SPAM_SUBJECT_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SPAM_SUBJECT_PATTERNS_RAW]
+SPAM_SUBJECT_CASE_PATTERNS = [re.compile(p) for p in _SPAM_SUBJECT_CASE_PATTERNS_RAW]
 SPAM_SENDER_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SPAM_SENDER_PATTERNS_RAW]
 SAFE_SUBJECT_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SAFE_SUBJECT_PATTERNS_RAW]
 SAFE_SENDER_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SAFE_SENDER_PATTERNS_RAW]
@@ -126,43 +133,55 @@ class HeuristicScorer:
         # Apply learned volume weight
         score += int(volume_adjustment * volume_weight)
 
-        # Check subject patterns (using pre-compiled regex for performance)
+        # Check subject patterns (using pre-compiled regex for performance).
+        # Case-insensitive patterns match via re.IGNORECASE; the caps pattern
+        # needs the raw subject, so nothing is lowercased here.
         for subject in sender.sample_subjects:
-            subject_lower = subject.lower()
-
             # Spam patterns
-            for pattern in SPAM_SUBJECT_PATTERNS:
-                if pattern.search(subject_lower):
-                    score += cfg.subject_spam_pattern
-                    break
+            if any(p.search(subject) for p in SPAM_SUBJECT_PATTERNS) or any(
+                p.search(subject) for p in SPAM_SUBJECT_CASE_PATTERNS
+            ):
+                score += cfg.subject_spam_pattern
 
             # Safe patterns
-            for pattern in SAFE_SUBJECT_PATTERNS:
-                if pattern.search(subject_lower):
-                    score += cfg.subject_safe_pattern  # Negative value = decreases score
-                    break
+            if any(p.search(subject) for p in SAFE_SUBJECT_PATTERNS):
+                score += cfg.subject_safe_pattern  # Negative value = decreases score
 
             # Cold outreach patterns
-            for pattern in COLD_OUTREACH_PATTERNS:
-                if pattern.search(subject_lower):
-                    score += cfg.subject_cold_outreach
-                    break
+            if any(p.search(subject) for p in COLD_OUTREACH_PATTERNS):
+                score += cfg.subject_cold_outreach
 
-        # Check sender domain patterns (using pre-compiled regex for performance)
-        domain = sender.domain.lower()
-        for pattern in SPAM_SENDER_PATTERNS:
-            if pattern.search(domain):
-                score += cfg.domain_spam_pattern
-                break
+        # Check sender address patterns. These are local-part anchored
+        # (e.g. "^marketing@"), so they must match full addresses, not the
+        # bare domain (which never contains '@').
+        addresses = [addr.lower() for addr in sender.sample_senders]
+        if any(p.search(addr) for addr in addresses for p in SPAM_SENDER_PATTERNS):
+            score += cfg.domain_spam_pattern
 
-        for pattern in SAFE_SENDER_PATTERNS:
-            if pattern.search(domain):
-                score += cfg.domain_safe_pattern  # Negative value = decreases score
-                break
+        if any(p.search(addr) for addr in addresses for p in SAFE_SENDER_PATTERNS):
+            score += cfg.domain_safe_pattern  # Negative value = decreases score
 
         # No unsubscribe link might mean it's important (or spam without proper headers)
         if not sender.has_unsubscribe:
             score += cfg.no_unsubscribe_link  # Negative value = slightly favor keeping
+
+        # Bulk/marketing header signals (RFC 2919/3834/8601, ESP fingerprints).
+        # Summed then capped so legitimate transactional-bulk (receipts, alerts)
+        # isn't shoved past the unsub threshold by signal stacking.
+        bulk_signal = 0
+        if sender.bulk_precedence:
+            bulk_signal += cfg.precedence_bulk
+        if sender.auto_submitted:
+            bulk_signal += cfg.auto_submitted
+        if sender.has_feedback_id:
+            bulk_signal += cfg.feedback_id_present
+        if sender.esp_name:
+            bulk_signal += cfg.esp_fingerprint
+        if sender.list_id:
+            bulk_signal += cfg.list_id_present
+        if sender.return_path_mismatch:
+            bulk_signal += cfg.return_path_mismatch
+        score += min(bulk_signal, cfg.bulk_signal_max)
 
         # Clamp to 0-100
         return max(0, min(100, score))
@@ -186,10 +205,20 @@ class HeuristicScorer:
             # Check for cold outreach specifically
             is_cold = self._is_cold_outreach(sender)
 
+            # Anchor confidence at the auto-act threshold: a score that
+            # clears the score threshold must also clear unsub_confidence,
+            # otherwise scores 75-79 produce classifications nothing acts on.
+            # The ceiling stays at least unsub_confidence so the guarantee
+            # holds even when a user configures a confidence above 0.95.
+            ceiling = max(0.95, self._thresholds.unsub_confidence)
+            confidence = min(
+                ceiling,
+                self._thresholds.unsub_confidence + (score - unsub_threshold) / 100,
+            )
             classification = Classification(
                 email_type=EmailType.COLD_OUTREACH if is_cold else EmailType.MARKETING,
                 action=Action.BLOCK if is_cold else Action.UNSUB,
-                confidence=min(score / 100, 0.90),
+                confidence=confidence,
                 reasoning=f"Heuristic score: {score}/100 (threshold: {unsub_threshold})"
                 + (" (cold outreach detected)" if is_cold else ""),
                 source="heuristics",
@@ -211,10 +240,15 @@ class HeuristicScorer:
 
         elif score <= keep_threshold:
             # Low spam score - likely wanted
+            ceiling = max(0.95, self._thresholds.keep_confidence)
+            confidence = min(
+                ceiling,
+                self._thresholds.keep_confidence + (keep_threshold - score) / 100,
+            )
             classification = Classification(
                 email_type=EmailType.TRANSACTIONAL,
                 action=Action.KEEP,
-                confidence=min((100 - score) / 100, 0.90),
+                confidence=confidence,
                 reasoning=f"Heuristic score: {score}/100 (threshold: {keep_threshold})",
                 source="heuristics",
             )

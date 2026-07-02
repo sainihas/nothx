@@ -309,7 +309,7 @@ We built nothx because:
 ## Contributing
 
 ```bash
-git clone https://github.com/nothx/nothx.git
+git clone https://github.com/sainihas/nothx.git
 cd nothx
 pip install -e ".[dev]"
 pytest

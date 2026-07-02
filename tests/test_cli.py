@@ -265,6 +265,86 @@ class TestRunCommand:
         assert result.exit_code == 0
         assert "not found" in result.output
 
+    @staticmethod
+    def _mock_scan_and_engine(mock_scan, mock_engine_class, sender_stats, classifications):
+        from nothx.models import EmailHeader
+
+        email = EmailHeader(
+            sender="deals@shop.com",
+            subject="Sale",
+            date=datetime(2026, 1, 1),
+            message_id="<x>",
+            list_unsubscribe="<https://shop.com/u>",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+            account_name="default",
+        )
+        mock_scan.return_value = MagicMock(
+            sender_stats=sender_stats, get_email_for_domain=lambda d: email
+        )
+        mock_engine = MagicMock()
+        mock_engine_class.return_value = mock_engine
+        mock_engine.classify_batch.return_value = classifications
+
+    @patch("nothx.cli.unsubscribe")
+    @patch("nothx.cli.scan_inbox")
+    @patch("nothx.cli.ClassificationEngine")
+    def test_run_user_rule_not_deferred_by_min_emails(
+        self, mock_engine_class, mock_scan, mock_unsub, runner, configured_env, temp_config_dir
+    ):
+        """An explicit user rule must be executed even below min_emails_before_action."""
+        from nothx.models import Action, Classification, EmailType, SenderStats, UnsubResult
+
+        # 1 email, below the default min_emails_before_action of 3
+        stats = {"shop.com": SenderStats(domain="shop.com", total_emails=1)}
+        cls = {
+            "shop.com": Classification(
+                email_type=EmailType.MARKETING,
+                action=Action.UNSUB,
+                confidence=1.0,
+                reasoning="Matched user rule",
+                source="user_rule",
+            )
+        }
+        self._mock_scan_and_engine(mock_scan, mock_engine_class, stats, cls)
+        mock_unsub.return_value = UnsubResult(success=True, method=UnsubMethod.ONE_CLICK)
+
+        result = runner.invoke(run, ["--auto"])
+
+        assert result.exit_code == 0
+        # Not deferred to review — the unsubscribe actually ran.
+        assert mock_unsub.called
+
+    @patch("nothx.cli.unsubscribe")
+    @patch("nothx.cli.scan_inbox")
+    @patch("nothx.cli.ClassificationEngine")
+    def test_run_confirm_mode_auto_skips_without_prompt(
+        self, mock_engine_class, mock_scan, mock_unsub, runner, configured_env, temp_config_dir
+    ):
+        """confirm mode + --auto must skip auto-unsubscribe, not open a prompt."""
+        from nothx.models import Action, Classification, EmailType, SenderStats
+
+        configured_env.operation_mode = "confirm"
+        configured_env.save()
+
+        stats = {"shop.com": SenderStats(domain="shop.com", total_emails=50)}
+        cls = {
+            "shop.com": Classification(
+                email_type=EmailType.MARKETING,
+                action=Action.UNSUB,
+                confidence=0.9,
+                reasoning="Heuristic score",
+                source="heuristics",
+            )
+        }
+        self._mock_scan_and_engine(mock_scan, mock_engine_class, stats, cls)
+
+        result = runner.invoke(run, ["--auto"])
+
+        assert result.exit_code == 0
+        assert "Confirm mode is on" in result.output
+        # No prompt, and nothing was executed.
+        assert not mock_unsub.called
+
 
 class TestStatusCommand:
     """Tests for the status command."""

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import sys
 import uuid
 from datetime import datetime
@@ -9,12 +10,26 @@ from typing import Any
 
 from .config import get_config_dir
 
+# Extra-field keys whose values must never be written to logs verbatim.
+_SENSITIVE_KEY_RE = re.compile(
+    r"password|passwd|api[_-]?key|secret|token|credential", re.IGNORECASE
+)
+_REDACTED = "***REDACTED***"
+
+
+def _redact(key: str, value: Any) -> Any:
+    """Redact a value whose key name looks sensitive."""
+    if _SENSITIVE_KEY_RE.search(key):
+        return _REDACTED
+    return value
+
 
 class JSONFormatter(logging.Formatter):
     """JSON formatter for structured logging.
 
     Outputs logs as JSON objects for easy parsing by log aggregation tools.
-    Includes extra fields passed via the `extra` parameter.
+    Includes extra fields passed via the `extra` parameter, redacting any
+    whose key name looks like a secret.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -62,7 +77,7 @@ class JSONFormatter(logging.Formatter):
 
         for key, value in record.__dict__.items():
             if key not in standard_attrs and not key.startswith("_"):
-                log_data[key] = value
+                log_data[key] = _redact(key, value)
 
         return json.dumps(log_data, default=str)
 

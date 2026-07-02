@@ -14,9 +14,14 @@ logger = logging.getLogger("nothx.config")
 
 
 def get_config_dir() -> Path:
-    """Get the nothx config directory."""
+    """Get the nothx config directory (owner-only permissions)."""
     config_dir = Path.home() / ".nothx"
     config_dir.mkdir(parents=True, exist_ok=True)
+    # Restrict to owner: the dir holds credentials and the SQLite database.
+    try:
+        config_dir.chmod(stat.S_IRWXU)  # 0700
+    except OSError:
+        pass
     return config_dir
 
 
@@ -90,7 +95,7 @@ class AIConfig:
     enabled: bool = True
     provider: str = "anthropic"  # "anthropic", "openai", "gemini", "ollama", or "none"
     api_key: str | None = None
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-haiku-4-5"
     confidence_threshold: float = 0.80
     api_base: str | None = None  # Custom API endpoint (for Ollama or proxies)
 
@@ -151,6 +156,17 @@ class ScoringConfig:
     # Other signals
     no_unsubscribe_link: int = -5  # Missing unsubscribe = slightly safer
 
+    # Bulk/marketing header signals (RFC 2919/3834/8601, ESP fingerprints).
+    # Capped in aggregate by bulk_signal_max so legitimate transactional-bulk
+    # (SES receipts, alerts) isn't pushed past the unsub threshold.
+    precedence_bulk: int = 10  # Precedence: bulk/junk/list
+    auto_submitted: int = 5  # Auto-Submitted (also fires on some alerts)
+    feedback_id_present: int = 8  # Gmail FBL header — high-volume ESP mail
+    esp_fingerprint: int = 10  # Known ESP sending infrastructure
+    list_id_present: int = 5  # RFC 2919 mailing-list identity
+    return_path_mismatch: int = 5  # Return-Path/From mismatch (bulk, not spam)
+    bulk_signal_max: int = 25  # Cap on the sum of the above bulk signals
+
     # Keyword boost limits from learning
     keyword_boost_max: int = 30  # Max absolute value for learned keyword boosts
 
@@ -193,15 +209,25 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     scan_days: int = 30
+    # Also surface bulk senders that lack a List-Unsubscribe header (spam,
+    # cron/alert mail) as block/filter candidates. Off by default so the
+    # first scan after upgrading doesn't flood the review queue.
+    scan_bulk_without_unsubscribe: bool = False
 
     def save(self) -> None:
         """Save configuration to disk with secure permissions."""
         config_path = get_config_path()
         data = self._to_dict()
-        with open(config_path, "w") as f:
+        # Create the file 0600 from the start: writing then chmod-ing leaves a
+        # window where credentials are world-readable under a permissive umask.
+        fd = os.open(
+            config_path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
-        # Set file permissions to owner read/write only (0600)
-        # This protects sensitive data like API keys and app passwords
+        # Re-assert 0600 in case the file pre-existed with looser permissions.
         config_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
     def _to_dict(self) -> dict:
@@ -216,6 +242,7 @@ class Config:
             "safety": asdict(self.safety),
             "scoring": asdict(self.scoring),
             "scan_days": self.scan_days,
+            "scan_bulk_without_unsubscribe": self.scan_bulk_without_unsubscribe,
         }
 
     @classmethod
@@ -284,6 +311,7 @@ class Config:
             config.scoring = ScoringConfig(**data["scoring"])
 
         config.scan_days = data.get("scan_days", 30)
+        config.scan_bulk_without_unsubscribe = data.get("scan_bulk_without_unsubscribe", False)
 
         return config
 

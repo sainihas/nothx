@@ -40,14 +40,14 @@ class OpenAIProvider(BaseAIProvider):
 
     @property
     def default_model(self) -> str:
-        return "gpt-4o"
+        # Mini is the cost-effective choice for high-volume header classification
+        return "gpt-4o-mini"
 
     def get_model_options(self) -> list[str]:
         return [
-            "gpt-4o",
             "gpt-4o-mini",
-            "gpt-4-turbo",
-            "gpt-3.5-turbo",
+            "gpt-4o",
+            "gpt-4.1-mini",
         ]
 
     def _get_client(self):

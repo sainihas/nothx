@@ -45,7 +45,7 @@ class FetchResponse:
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Surface every 3xx as an HTTPError so redirects are handled manually."""
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
@@ -57,7 +57,7 @@ _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedire
 def _resolve(hostname: str) -> list[str]:
     """Resolve a hostname to all of its addresses. Seam for tests."""
     infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    return [info[4][0] for info in infos]
+    return [str(info[4][0]) for info in infos]
 
 
 def _open_request(request: urllib.request.Request, timeout: float):
@@ -107,7 +107,7 @@ def _validate_host(hostname: str) -> None:
         except OSError as e:
             raise SSRFBlockedError(f"Cannot resolve host {hostname}: {e}") from e
         if not addresses:
-            raise SSRFBlockedError(f"Host {hostname} resolved to no addresses")
+            raise SSRFBlockedError(f"Host {hostname} resolved to no addresses") from None
     for address in addresses:
         if _forbidden_ip(address):
             raise SSRFBlockedError(f"Host {hostname} resolves to forbidden address {address}")

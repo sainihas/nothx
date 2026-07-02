@@ -8,8 +8,7 @@ import urllib.error
 import urllib.parse
 from email.mime.text import MIMEText
 
-from . import db
-from . import __version__
+from . import __version__, db
 from .config import AccountConfig, Config
 from .errors import RateLimiter, RetryConfig, retry_with_backoff, safe_truncate
 from .models import EmailHeader, SenderStatus, UnsubMethod, UnsubResult
@@ -31,7 +30,9 @@ class InvalidProviderError(Exception):
 logger = logging.getLogger("nothx.unsubscriber")
 
 # User agent for HTTP requests - identifies as nothx email automation tool
-USER_AGENT = f"nothx/{__version__} (Email Unsubscribe Automation; +https://github.com/sainihas/nothx)"
+USER_AGENT = (
+    f"nothx/{__version__} (Email Unsubscribe Automation; +https://github.com/sainihas/nothx)"
+)
 
 # Timeout for HTTP requests
 REQUEST_TIMEOUT = 30
@@ -40,6 +41,7 @@ REQUEST_TIMEOUT = 30
 # Default: 2 requests per second, burst of 5
 # This prevents overwhelming mail servers and getting blocked
 _http_rate_limiter = RateLimiter(requests_per_second=2.0, burst_size=5)
+
 
 class _TransientHTTPFailure(Exception):
     """Wraps a retryable failure (network error or 5xx).
@@ -80,7 +82,9 @@ def _is_protected_domain(domain: str, safety_config) -> bool:
 def _has_one_click(email_header: EmailHeader) -> bool:
     """True if the message advertises RFC 8058 one-click unsubscribe."""
     post_value = email_header.list_unsubscribe_post
-    return bool(post_value) and post_value.strip().lower() == ONE_CLICK_POST_VALUE
+    if not post_value:
+        return False
+    return post_value.strip().lower() == ONE_CLICK_POST_VALUE
 
 
 def unsubscribe(
@@ -106,6 +110,19 @@ def unsubscribe(
         )
 
     domain = email_header.domain
+
+    # Auth gate: if the message explicitly FAILED DKIM or DMARC (per the
+    # user's own provider), don't fetch its URLs — the sender may be spoofed
+    # and the unsubscribe link may be hostile. Unknown auth (None) is allowed
+    # so custom-IMAP users aren't reduced to mailto-only.
+    if email_header.dkim_pass is False or email_header.dmarc_pass is False:
+        logger.warning("Sender %s failed authentication; skipping unsubscribe", domain)
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error="Sender failed authentication (DKIM/DMARC); consider blocking instead",
+        )
+        return _finish(domain, [result], result)
     targets = email_header.list_unsubscribe_targets
     http_targets = [t for t in targets if t.lower().startswith(("https://", "http://"))]
     mailto_targets = [t for t in targets if t.lower().startswith("mailto:")]
@@ -279,7 +296,9 @@ def _execute_get(url: str) -> UnsubResult:
             http_status=response.status,
             response_snippet=snippet,
             needs_confirmation=needs_confirmation,
-            error=None if success or needs_confirmation else "No unsubscribe confirmation in response",
+            error=None
+            if success or needs_confirmation
+            else "No unsubscribe confirmation in response",
         )
     except SSRFBlockedError as e:
         logger.warning("Blocked unsafe GET URL for %s: %s", url, e)

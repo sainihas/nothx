@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 from datetime import datetime
 
 from .. import db
@@ -181,7 +180,11 @@ class AIClassifier:
                 "auto_submitted": sender.auto_submitted,
                 "esp": self._sanitize_for_prompt(sender.esp_name) if sender.esp_name else None,
                 "mailing_list": bool(sender.list_id),
-                "auth": {"spf": sender.spf_pass, "dkim": sender.dkim_pass, "dmarc": sender.dmarc_pass},
+                "auth": {
+                    "spf": sender.spf_pass,
+                    "dkim": sender.dkim_pass,
+                    "dmarc": sender.dmarc_pass,
+                },
             }
             sender_descriptions.append(desc)
 

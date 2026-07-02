@@ -3,6 +3,7 @@
 import functools
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -255,11 +256,26 @@ class RateLimiter:
     burst_size: int = 5
     _tokens: float = field(default=0.0, init=False, repr=False)
     _last_update: float = field(default=0.0, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize tokens to burst size."""
         self._tokens = float(self.burst_size)
         self._last_update = time.time()
+
+    def _refill_and_take(self) -> bool:
+        """Refill tokens and take one if available. Caller must hold the lock."""
+        now = time.time()
+        elapsed = now - self._last_update
+        self._tokens = min(
+            self.burst_size,
+            self._tokens + elapsed * self.requests_per_second,
+        )
+        self._last_update = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        return False
 
     def acquire(self, timeout: float = 30.0) -> bool:
         """Acquire a token, waiting if necessary.
@@ -273,25 +289,17 @@ class RateLimiter:
         start_time = time.time()
 
         while True:
-            # Refill tokens based on elapsed time
-            now = time.time()
-            elapsed = now - self._last_update
-            self._tokens = min(
-                self.burst_size,
-                self._tokens + elapsed * self.requests_per_second,
-            )
-            self._last_update = now
-
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return True
+            with self._lock:
+                if self._refill_and_take():
+                    return True
+                deficit = 1.0 - self._tokens
 
             # Check timeout
             if time.time() - start_time >= timeout:
                 return False
 
-            # Wait a bit before retrying
-            time.sleep(min(0.1, (1.0 - self._tokens) / self.requests_per_second))
+            # Wait a bit before retrying (outside the lock)
+            time.sleep(min(0.1, deficit / self.requests_per_second))
 
     def try_acquire(self) -> bool:
         """Try to acquire a token without waiting.
@@ -299,19 +307,8 @@ class RateLimiter:
         Returns:
             True if token acquired, False otherwise
         """
-        # Refill tokens based on elapsed time
-        now = time.time()
-        elapsed = now - self._last_update
-        self._tokens = min(
-            self.burst_size,
-            self._tokens + elapsed * self.requests_per_second,
-        )
-        self._last_update = now
-
-        if self._tokens >= 1.0:
-            self._tokens -= 1.0
-            return True
-        return False
+        with self._lock:
+            return self._refill_and_take()
 
 
 def safe_truncate(text: str, max_length: int, suffix: str = "...") -> str:

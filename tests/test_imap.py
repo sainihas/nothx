@@ -1,7 +1,7 @@
 """Tests for IMAP header parsing and date handling."""
 
 import email
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 from nothx.config import AccountConfig
@@ -28,8 +28,18 @@ class TestImapDate:
         for month in range(1, 13):
             months.append(_imap_date(datetime(2026, month, 15)).split("-")[1])
         assert months == [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
         ]
 
 
@@ -50,7 +60,7 @@ class TestParseHeader:
         assert header.is_seen is True
         # Dates are normalized to aware UTC
         assert header.date.tzinfo is not None
-        assert header.date == datetime(2026, 6, 30, 8, 0, 0, tzinfo=timezone.utc)
+        assert header.date == datetime(2026, 6, 30, 8, 0, 0, tzinfo=UTC)
 
     def test_encoded_word_subject(self):
         msg = parse_message(
@@ -70,9 +80,7 @@ class TestParseHeader:
         assert header.date.tzinfo is not None
 
     def test_unparseable_date_falls_back_to_aware_now(self):
-        msg = parse_message(
-            "From: x@y.com\r\nSubject: hi\r\nDate: not a date\r\n\r\n"
-        )
+        msg = parse_message("From: x@y.com\r\nSubject: hi\r\nDate: not a date\r\n\r\n")
         header = make_connection()._parse_header(msg, is_seen=False)
         assert header is not None
         assert header.date.tzinfo is not None

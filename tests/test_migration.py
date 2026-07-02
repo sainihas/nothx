@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from nothx import db
 
-
 V0_SCHEMA = """
     CREATE TABLE senders (
         domain TEXT PRIMARY KEY,

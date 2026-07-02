@@ -75,9 +75,7 @@ class TestSenderPatterns:
 
     def test_empty_sample_senders_is_safe(self, scorer):
         """No sender addresses must not crash and must not fire sender weights."""
-        score = scorer.score(
-            SenderStats(domain="brand.com", total_emails=10, seen_emails=5)
-        )
+        score = scorer.score(SenderStats(domain="brand.com", total_emails=10, seen_emails=5))
         assert 0 <= score <= 100
 
 

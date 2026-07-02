@@ -137,8 +137,8 @@ def scan_inbox(
         # Sample sender addresses (distinct, most recent first) for
         # local-part heuristics like "marketing@..."
         sample_senders: list[str] = []
-        for e in sorted_emails:
-            addr = e.sender_address
+        for header in sorted_emails:
+            addr = header.sender_address
             if addr and addr not in sample_senders:
                 sample_senders.append(addr)
             if len(sample_senders) >= 5:

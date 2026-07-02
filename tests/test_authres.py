@@ -53,7 +53,9 @@ class TestUntrustedInstances:
 class TestMicrosoftFormat:
     def test_no_authserv_id(self):
         """Microsoft omits the authserv-id: 'spf=pass; dkim=pass'."""
-        header = "spf=pass (sender IP is 1.2.3.4) smtp.mailfrom=x.com; dkim=pass; dmarc=pass action=none"
+        header = (
+            "spf=pass (sender IP is 1.2.3.4) smtp.mailfrom=x.com; dkim=pass; dmarc=pass action=none"
+        )
         v = parse_authentication_results([header], "outlook")
         assert v.spf is True and v.dkim is True and v.dmarc is True
 

@@ -10,7 +10,7 @@ import pytest
 
 from nothx import db, unsubscriber
 from nothx.config import Config
-from nothx.models import EmailHeader, SenderStatus, UnsubMethod
+from nothx.models import EmailHeader, UnsubMethod
 from nothx.safefetch import FetchResponse, SSRFBlockedError
 from nothx.unsubscriber import (
     UnsafeUnsubscribeError,
@@ -35,9 +35,7 @@ def temp_db():
 @pytest.fixture(autouse=True)
 def fast_rate_limiter(monkeypatch):
     """Never wait on the rate limiter in tests."""
-    monkeypatch.setattr(
-        unsubscriber._http_rate_limiter, "acquire", lambda timeout=None: True
-    )
+    monkeypatch.setattr(unsubscriber._http_rate_limiter, "acquire", lambda timeout=None: True)
 
 
 def make_header(
@@ -191,9 +189,7 @@ class TestAttemptLogging:
 
     def test_each_target_logged(self, temp_db, monkeypatch):
         monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch(status=200, body="nope"))
-        header = make_header(
-            list_unsubscribe="<https://a.shop.com/u>, <https://b.shop.com/u>"
-        )
+        header = make_header(list_unsubscribe="<https://a.shop.com/u>, <https://b.shop.com/u>")
         unsubscribe(header, Config())
 
         with db.get_db() as conn:
@@ -246,9 +242,7 @@ class TestMailto:
         monkeypatch.setattr(unsubscriber, "_execute_mailto", fake_mailto)
         from nothx.config import AccountConfig
 
-        header = make_header(
-            list_unsubscribe="<https://shop.com/unsub>, <mailto:unsub@shop.com>"
-        )
+        header = make_header(list_unsubscribe="<https://shop.com/unsub>, <mailto:unsub@shop.com>")
         account = AccountConfig(provider="gmail", email="me@x.com", password="pw")
         result = unsubscribe(header, Config(), account)
 

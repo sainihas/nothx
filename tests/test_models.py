@@ -84,16 +84,12 @@ class TestListUnsubscribeParsing:
         assert header.list_unsubscribe_targets == [url]
 
     def test_rfc5322_comment_after_bracket(self):
-        header = make_header(
-            list_unsubscribe="<https://example.com/unsub> (click to unsubscribe)"
-        )
+        header = make_header(list_unsubscribe="<https://example.com/unsub> (click to unsubscribe)")
         assert header.list_unsubscribe_targets == ["https://example.com/unsub"]
 
     def test_folded_header_whitespace_inside_url(self):
         """Header folding can leave CRLF+WSP inside the bracketed URL."""
-        header = make_header(
-            list_unsubscribe="<https://example.com/unsub?token=abc\r\n def>"
-        )
+        header = make_header(list_unsubscribe="<https://example.com/unsub?token=abc\r\n def>")
         assert header.list_unsubscribe_targets == ["https://example.com/unsub?token=abcdef"]
 
     def test_bare_url_without_brackets(self):
@@ -107,9 +103,7 @@ class TestListUnsubscribeParsing:
         assert header.list_unsubscribe_url is None
 
     def test_multiple_http_urls(self):
-        header = make_header(
-            list_unsubscribe="<https://a.com/u>, <https://b.com/u>"
-        )
+        header = make_header(list_unsubscribe="<https://a.com/u>, <https://b.com/u>")
         assert header.list_unsubscribe_targets == ["https://a.com/u", "https://b.com/u"]
         assert header.list_unsubscribe_url == "https://a.com/u"
 

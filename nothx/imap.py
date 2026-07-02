@@ -6,10 +6,11 @@ import imaplib
 import logging
 import socket
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.header import decode_header
 from email.message import Message
 
+from .authres import parse_authentication_results
 from .config import AccountConfig
 from .errors import (
     ErrorCode,
@@ -17,7 +18,6 @@ from .errors import (
     RetryConfig,
     retry_with_backoff,
 )
-from .authres import parse_authentication_results
 from .models import EmailHeader
 
 # Exact ESP fingerprint headers -> ESP name. IMAP HEADER.FIELDS takes exact
@@ -58,6 +58,7 @@ _IMAP_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 def _imap_date(dt: datetime) -> str:
     """Format a datetime as an IMAP search date (DD-Mon-YYYY), locale-independent."""
     return f"{dt.day:02d}-{_IMAP_MONTHS[dt.month - 1]}-{dt.year}"
+
 
 logger = logging.getLogger("nothx.imap")
 
@@ -361,11 +362,11 @@ class IMAPConnection:
                     date_str[:50],
                     e,
                 )
-                date = datetime.now(timezone.utc)
+                date = datetime.now(UTC)
             if date.tzinfo is None:
-                date = date.replace(tzinfo=timezone.utc)
+                date = date.replace(tzinfo=UTC)
             else:
-                date = date.astimezone(timezone.utc)
+                date = date.astimezone(UTC)
 
             # Detect ESP by the first fingerprint header present
             esp = next(

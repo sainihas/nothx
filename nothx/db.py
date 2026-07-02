@@ -3,7 +3,7 @@
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 
 from .config import get_db_path
 from .models import Action, RunStats, SenderStatus, UnsubMethod, UserAction, UserPreference
@@ -156,7 +156,7 @@ def upsert_sender(
 ) -> None:
     """Insert or update a sender record."""
     with get_db() as conn:
-        now = datetime.now().isoformat()
+        now = datetime.now(UTC).isoformat()
         first = first_seen.isoformat() if first_seen else now
         last = last_seen.isoformat() if last_seen else now
         subjects_json = "|".join(sample_subjects[:5])  # Store up to 5 samples
@@ -242,7 +242,7 @@ def log_unsub_attempt(
         """,
             (
                 domain,
-                datetime.now().isoformat(),
+                datetime.now(UTC).isoformat(),
                 int(success),
                 method.value if method else None,
                 http_status,
@@ -261,7 +261,7 @@ def log_correction(domain: str, ai_decision: str, user_decision: str) -> None:
             INSERT INTO corrections (domain, ai_decision, user_decision, timestamp)
             VALUES (?, ?, ?, ?)
         """,
-            (domain, ai_decision, user_decision, datetime.now().isoformat()),
+            (domain, ai_decision, user_decision, datetime.now(UTC).isoformat()),
         )
 
 
@@ -330,6 +330,32 @@ def get_recent_unsubscribes(days: int = 30) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def get_post_unsub_offenders(grace_days: int = 7) -> list[dict]:
+    """Find senders still mailing after a successful unsubscribe.
+
+    A sender counts as an offender if its most recent email (last_seen) arrived
+    more than grace_days after our last successful unsubscribe attempt. Gmail
+    and Yahoo allow senders up to ~48h to honor an unsubscribe, so a modest
+    grace window avoids false positives; anything past it is a candidate to
+    escalate to block/filter.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.domain, s.total_emails, s.last_seen,
+                   MAX(u.attempted_at) AS unsubscribed_at
+            FROM senders s
+            JOIN unsub_log u ON u.domain = s.domain
+            WHERE s.status = 'unsubscribed' AND u.success = 1
+            GROUP BY s.domain
+            HAVING datetime(s.last_seen) > datetime(MAX(u.attempted_at), ?)
+            ORDER BY s.total_emails DESC
+        """,
+            (f"+{grace_days} days",),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_unsub_success_rate() -> tuple[int, int]:
     """Get unsubscribe success and failure counts.
 
@@ -356,7 +382,7 @@ def add_rule(pattern: str, action: str) -> None:
             INSERT OR REPLACE INTO rules (pattern, action, created_at)
             VALUES (?, ?, ?)
         """,
-            (pattern, action, datetime.now().isoformat()),
+            (pattern, action, datetime.now(UTC).isoformat()),
         )
 
 

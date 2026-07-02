@@ -119,9 +119,7 @@ class TestSafeFetch:
             safe_fetch("https://example.com/")
 
     def test_blocks_ip_literal_url(self, monkeypatch):
-        monkeypatch.setattr(
-            safefetch, "_open_request", lambda req, timeout: _FakeResponse()
-        )
+        monkeypatch.setattr(safefetch, "_open_request", lambda req, timeout: _FakeResponse())
         with pytest.raises(SSRFBlockedError):
             safe_fetch("https://127.0.0.1:8080/admin")
         with pytest.raises(SSRFBlockedError):

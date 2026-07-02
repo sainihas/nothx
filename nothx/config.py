@@ -14,9 +14,14 @@ logger = logging.getLogger("nothx.config")
 
 
 def get_config_dir() -> Path:
-    """Get the nothx config directory."""
+    """Get the nothx config directory (owner-only permissions)."""
     config_dir = Path.home() / ".nothx"
     config_dir.mkdir(parents=True, exist_ok=True)
+    # Restrict to owner: the dir holds credentials and the SQLite database.
+    try:
+        config_dir.chmod(stat.S_IRWXU)  # 0700
+    except OSError:
+        pass
     return config_dir
 
 
@@ -213,10 +218,16 @@ class Config:
         """Save configuration to disk with secure permissions."""
         config_path = get_config_path()
         data = self._to_dict()
-        with open(config_path, "w") as f:
+        # Create the file 0600 from the start: writing then chmod-ing leaves a
+        # window where credentials are world-readable under a permissive umask.
+        fd = os.open(
+            config_path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
-        # Set file permissions to owner read/write only (0600)
-        # This protects sensitive data like API keys and app passwords
+        # Re-assert 0600 in case the file pre-existed with looser permissions.
         config_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
     def _to_dict(self) -> dict:
@@ -300,9 +311,7 @@ class Config:
             config.scoring = ScoringConfig(**data["scoring"])
 
         config.scan_days = data.get("scan_days", 30)
-        config.scan_bulk_without_unsubscribe = data.get(
-            "scan_bulk_without_unsubscribe", False
-        )
+        config.scan_bulk_without_unsubscribe = data.get("scan_bulk_without_unsubscribe", False)
 
         return config
 

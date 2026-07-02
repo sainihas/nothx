@@ -1,7 +1,7 @@
 """Tests for scanner aggregation of bulk/marketing signals."""
 
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -59,7 +59,7 @@ class TestScanAggregation:
             EmailHeader(
                 sender="promo@shop.com",
                 subject="Sale",
-                date=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                date=datetime(2026, 1, 2, tzinfo=UTC),
                 message_id="<1>",
                 list_unsubscribe="<https://shop.com/u>",
                 precedence="bulk",
@@ -70,7 +70,7 @@ class TestScanAggregation:
             EmailHeader(
                 sender="promo@shop.com",
                 subject="More",
-                date=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                date=datetime(2026, 1, 1, tzinfo=UTC),
                 message_id="<2>",
                 list_unsubscribe="<https://shop.com/u>",
                 dkim_pass=False,  # one failure -> aggregate False

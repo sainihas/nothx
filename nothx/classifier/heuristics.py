@@ -165,6 +165,24 @@ class HeuristicScorer:
         if not sender.has_unsubscribe:
             score += cfg.no_unsubscribe_link  # Negative value = slightly favor keeping
 
+        # Bulk/marketing header signals (RFC 2919/3834/8601, ESP fingerprints).
+        # Summed then capped so legitimate transactional-bulk (receipts, alerts)
+        # isn't shoved past the unsub threshold by signal stacking.
+        bulk_signal = 0
+        if sender.bulk_precedence:
+            bulk_signal += cfg.precedence_bulk
+        if sender.auto_submitted:
+            bulk_signal += cfg.auto_submitted
+        if sender.has_feedback_id:
+            bulk_signal += cfg.feedback_id_present
+        if sender.esp_name:
+            bulk_signal += cfg.esp_fingerprint
+        if sender.list_id:
+            bulk_signal += cfg.list_id_present
+        if sender.return_path_mismatch:
+            bulk_signal += cfg.return_path_mismatch
+        score += min(bulk_signal, cfg.bulk_signal_max)
+
         # Clamp to 0-100
         return max(0, min(100, score))
 

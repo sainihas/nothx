@@ -17,7 +17,38 @@ from .errors import (
     RetryConfig,
     retry_with_backoff,
 )
+from .authres import parse_authentication_results
 from .models import EmailHeader
+
+# Exact ESP fingerprint headers -> ESP name. IMAP HEADER.FIELDS takes exact
+# names only (no wildcards), so each vendor header is enumerated.
+ESP_HEADER_MAP = {
+    "X-SG-EID": "sendgrid",
+    "X-Mailgun-Sid": "mailgun",
+    "X-SES-Outgoing": "amazon-ses",
+    "X-MC-User": "mandrill",
+    "X-PM-Message-Id": "postmark",
+    "X-Campaign": "campaign",
+    "X-HS-Cid": "hubspot",
+}
+
+# Header fields fetched from each message (headers only — never bodies).
+_FETCH_HEADER_FIELDS = [
+    "FROM",
+    "SUBJECT",
+    "DATE",
+    "MESSAGE-ID",
+    "LIST-UNSUBSCRIBE",
+    "LIST-UNSUBSCRIBE-POST",
+    "X-MAILER",
+    "LIST-ID",
+    "PRECEDENCE",
+    "AUTO-SUBMITTED",
+    "FEEDBACK-ID",
+    "AUTHENTICATION-RESULTS",
+    "RETURN-PATH",
+    *ESP_HEADER_MAP.keys(),
+]
 
 # IMAP date-searches require English month abbreviations (RFC 3501);
 # strftime("%b") is locale-dependent and breaks on non-English locales.
@@ -153,11 +184,15 @@ class IMAPConnection:
             return False
 
     def fetch_marketing_emails(
-        self, days: int = 30, folder: str = "INBOX"
+        self, days: int = 30, folder: str = "INBOX", include_bulk: bool = False
     ) -> Iterator[EmailHeader]:
         """
-        Fetch emails with List-Unsubscribe header from the last N days.
-        Only fetches headers, never email bodies.
+        Fetch bulk/marketing emails from the last N days. Only fetches headers.
+
+        By default yields emails carrying a List-Unsubscribe header. When
+        include_bulk is set, also yields emails identified as bulk by other
+        signals (Precedence, Auto-Submitted, Feedback-ID, ESP fingerprints) —
+        these become block/filter candidates even without an unsubscribe link.
         """
         if not self.conn:
             raise RuntimeError("Not connected")
@@ -226,7 +261,7 @@ class IMAPConnection:
                 # Fetch only headers
                 status, msg_data = self.conn.fetch(
                     msg_id,
-                    "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST X-MAILER)])",
+                    f"(FLAGS BODY.PEEK[HEADER.FIELDS ({' '.join(_FETCH_HEADER_FIELDS)})])",
                 )
                 if status != "OK":
                     fetch_errors += 1
@@ -244,15 +279,25 @@ class IMAPConnection:
 
                         msg = email.message_from_bytes(response_part[1])
 
-                        # Only yield emails with List-Unsubscribe header
-                        list_unsub = msg.get("List-Unsubscribe")
-                        if not list_unsub:
+                        header = self._parse_header(msg, is_seen)
+                        if not header:
                             continue
 
-                        header = self._parse_header(msg, is_seen)
-                        if header:
-                            yielded_count += 1
-                            yield header
+                        # Always yield emails with a List-Unsubscribe header.
+                        # Optionally also yield other bulk mail (block/filter
+                        # candidates) when include_bulk is set.
+                        is_unsub = bool(header.list_unsubscribe)
+                        is_bulk = (
+                            header.is_bulk_precedence
+                            or header.is_auto_submitted
+                            or bool(header.feedback_id)
+                            or bool(header.esp)
+                        )
+                        if not is_unsub and not (include_bulk and is_bulk):
+                            continue
+
+                        yielded_count += 1
+                        yield header
 
             except imaplib.IMAP4.error as e:
                 fetch_errors += 1
@@ -322,6 +367,20 @@ class IMAPConnection:
             else:
                 date = date.astimezone(timezone.utc)
 
+            # Detect ESP by the first fingerprint header present
+            esp = next(
+                (name for field, name in ESP_HEADER_MAP.items() if msg.get(field)),
+                None,
+            )
+
+            verdicts = parse_authentication_results(
+                msg.get_all("Authentication-Results", []), self.account.provider
+            )
+
+            def _lower(name: str) -> str | None:
+                value = msg.get(name)
+                return value.strip().lower() if value else None
+
             return EmailHeader(
                 sender=sender,
                 subject=subject,
@@ -331,6 +390,15 @@ class IMAPConnection:
                 list_unsubscribe_post=msg.get("List-Unsubscribe-Post"),
                 x_mailer=msg.get("X-Mailer"),
                 is_seen=is_seen,
+                list_id=msg.get("List-Id"),
+                precedence=_lower("Precedence"),
+                auto_submitted=_lower("Auto-Submitted"),
+                feedback_id=msg.get("Feedback-ID"),
+                return_path=msg.get("Return-Path"),
+                esp=esp,
+                dkim_pass=verdicts.dkim,
+                spf_pass=verdicts.spf,
+                dmarc_pass=verdicts.dmarc,
             )
         except (TypeError, ValueError, AttributeError) as e:
             logger.debug(

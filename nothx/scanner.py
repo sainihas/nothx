@@ -1,11 +1,11 @@
 """Email scanning and sender aggregation for nothx."""
 
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
 from . import db
 from .config import Config
@@ -14,6 +14,20 @@ from .imap import IMAPConnection
 from .models import EmailHeader, SenderStats
 
 logger = logging.getLogger(__name__)
+
+
+def _most_common(values: "Iterable[str | None]") -> str | None:
+    """Return the most frequent non-null value, or None."""
+    counter = Counter(v for v in values if v)
+    return counter.most_common(1)[0][0] if counter else None
+
+
+def _agg_verdict(values: "Iterable[bool | None]") -> bool | None:
+    """Fail-dominant aggregate: any False -> False, else True if any known, else None."""
+    known = [v for v in values if v is not None]
+    if not known:
+        return None
+    return all(known)
 
 
 class ScanResult:
@@ -26,13 +40,27 @@ class ScanResult:
         self.domain_emails = domain_emails
 
     def get_email_for_domain(self, domain: str) -> EmailHeader | None:
-        """Get a sample email with unsubscribe header for a domain."""
+        """Get the best sample email to act on for a domain.
+
+        Prefers a DKIM-passing one-click email (the safest, most reliable
+        unsubscribe path), then any email with an unsubscribe header, then
+        the first email seen.
+        """
         emails = self.domain_emails.get(domain, [])
-        # Prefer emails with unsubscribe links
-        for email in emails:
-            if email.list_unsubscribe:
-                return email
-        return emails[0] if emails else None
+        if not emails:
+            return None
+
+        def rank(e: EmailHeader) -> int:
+            if e.list_unsubscribe and e.list_unsubscribe_post and e.dkim_pass:
+                return 3
+            if e.list_unsubscribe and e.list_unsubscribe_post:
+                return 2
+            if e.list_unsubscribe:
+                return 1
+            return 0
+
+        best = max(emails, key=rank)
+        return best
 
 
 def scan_inbox(
@@ -78,7 +106,10 @@ def scan_inbox(
 
         try:
             with IMAPConnection(account) as conn:
-                for header in conn.fetch_marketing_emails(days=config.scan_days):
+                for header in conn.fetch_marketing_emails(
+                    days=config.scan_days,
+                    include_bulk=config.scan_bulk_without_unsubscribe,
+                ):
                     # Track which account this email came from (for mailto unsubscribes)
                     header.account_name = account_name
                     domain_emails[header.domain].append(header)
@@ -116,6 +147,10 @@ def scan_inbox(
         # Check if any have unsubscribe links
         has_unsub = any(e.list_unsubscribe for e in emails)
 
+        # Aggregate bulk/marketing signals across the sender's emails
+        list_id = _most_common(e.list_id for e in emails)
+        esp_name = _most_common(e.esp for e in emails)
+
         stats = SenderStats(
             domain=domain,
             total_emails=total,
@@ -125,6 +160,15 @@ def scan_inbox(
             sample_subjects=sample_subjects,
             sample_senders=sample_senders,
             has_unsubscribe=has_unsub,
+            list_id=list_id,
+            bulk_precedence=any(e.is_bulk_precedence for e in emails),
+            auto_submitted=any(e.is_auto_submitted for e in emails),
+            has_feedback_id=any(e.feedback_id for e in emails),
+            esp_name=esp_name,
+            return_path_mismatch=any(e.return_path_mismatch for e in emails),
+            dkim_pass=_agg_verdict(e.dkim_pass for e in emails),
+            spf_pass=_agg_verdict(e.spf_pass for e in emails),
+            dmarc_pass=_agg_verdict(e.dmarc_pass for e in emails),
         )
         sender_stats[domain] = stats
 

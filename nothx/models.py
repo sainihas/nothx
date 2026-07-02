@@ -64,6 +64,39 @@ class EmailHeader:
     x_mailer: str | None = None
     is_seen: bool = False
     account_name: str | None = None  # Track which account this email came from
+    # Bulk/marketing signals (headers only — see RFC 2919/3834/8601)
+    list_id: str | None = None
+    precedence: str | None = None
+    auto_submitted: str | None = None
+    feedback_id: str | None = None
+    return_path: str | None = None
+    esp: str | None = None  # detected ESP fingerprint, e.g. "sendgrid"
+    dkim_pass: bool | None = None
+    spf_pass: bool | None = None
+    dmarc_pass: bool | None = None
+
+    @property
+    def is_bulk_precedence(self) -> bool:
+        return (self.precedence or "").strip().lower() in ("bulk", "junk", "list")
+
+    @property
+    def is_auto_submitted(self) -> bool:
+        value = (self.auto_submitted or "").strip().lower()
+        return bool(value) and value != "no"
+
+    @property
+    def return_path_mismatch(self) -> bool:
+        """True if Return-Path domain differs from the From domain (ESP/VERP)."""
+        if not self.return_path:
+            return False
+        rp = self.return_path.strip().strip("<>").lower()
+        if "@" not in rp:
+            return False
+        rp_domain = rp.rsplit("@", 1)[1]
+        from_domain = self.domain
+        if from_domain == "unknown" or not rp_domain:
+            return False
+        return rp_domain != from_domain
 
     @property
     def sender_address(self) -> str:
@@ -154,6 +187,16 @@ class SenderStats:
     sample_subjects: list[str] = field(default_factory=list)
     sample_senders: list[str] = field(default_factory=list)
     has_unsubscribe: bool = False
+    # Aggregated bulk/marketing signals
+    list_id: str | None = None
+    bulk_precedence: bool = False
+    auto_submitted: bool = False
+    has_feedback_id: bool = False
+    esp_name: str | None = None
+    return_path_mismatch: bool = False
+    dkim_pass: bool | None = None
+    spf_pass: bool | None = None
+    dmarc_pass: bool | None = None
 
     @property
     def open_rate(self) -> float:

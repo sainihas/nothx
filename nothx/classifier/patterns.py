@@ -1,85 +1,55 @@
 """Layer 2: Preset pattern matching for classification."""
 
 import json
+import logging
+from importlib import resources
 from pathlib import Path
 
 from ..models import Action, Classification, EmailType, SenderStats
 from .utils import matches_pattern
 
-# Default patterns shipped with nothx
-DEFAULT_PATTERNS = {
+logger = logging.getLogger("nothx.classifier.patterns")
+
+# Minimal in-code fallback used only if the packaged patterns.json can't be
+# loaded (e.g. a broken wheel). The packaged JSON at data/patterns.json is the
+# authoritative, fuller list (ESP domains, etc.).
+FALLBACK_PATTERNS = {
     "unsub_patterns": [
-        # Common marketing prefixes
         "marketing.*",
         "promo.*",
-        "promotions.*",
         "newsletter.*",
-        "news.*",
-        "deals.*",
-        "offers.*",
-        "sales.*",
         "noreply.*",
         "no-reply.*",
-        "donotreply.*",
-        "updates.*",
-        "info.*",
-        "hello.*",
-        "team.*",
-        # Marketing domains
         "*.mailchimp.com",
         "*.sendgrid.net",
-        "*.klaviyo.com",
-        "*.sailthru.com",
-        "*.exacttarget.com",
-        "*.constantcontact.com",
-        "*.campaign-archive.com",
+        "*.amazonses.com",
     ],
     "keep_patterns": [
-        # Government
         "*.gov",
-        "*.gov.uk",
-        "*.gov.au",
-        # Banking and finance
         "*bank*",
-        "*credit*",
-        "*finance*",
-        "*.visa.com",
-        "*.mastercard.com",
-        "*.paypal.com",
-        "*.stripe.com",
-        # Health
         "*health*",
-        "*medical*",
-        "*hospital*",
-        "*clinic*",
-        "*pharmacy*",
-        # Important services
-        "*.amazon.com",  # Transactional emails
-        "*.apple.com",
-        "*.google.com",
-        "*.microsoft.com",
-        "*.github.com",
-        # Security
         "security.*",
-        "alert.*",
-        "alerts.*",
-        "verify.*",
-        "verification.*",
-        "confirm.*",
-        "confirmation.*",
-        "receipt.*",
-        "receipts.*",
-        "order.*",
-        "orders.*",
-        "shipping.*",
-        "delivery.*",
+        "*.paypal.com",
     ],
     "block_patterns": [
-        # Known spam domains (examples)
         "*.spam.com",
         "*.junk.com",
     ],
 }
+
+
+def _load_packaged_patterns() -> dict:
+    """Load the patterns JSON shipped inside the package."""
+    try:
+        with resources.files("nothx.classifier.data").joinpath("patterns.json").open() as f:
+            return json.load(f)
+    except (OSError, ValueError, ModuleNotFoundError) as e:
+        logger.warning("Failed to load packaged patterns, using fallback: %s", e)
+        return FALLBACK_PATTERNS
+
+
+# Loaded once at import time; the packaged JSON is the single source of truth.
+DEFAULT_PATTERNS = _load_packaged_patterns()
 
 
 class PatternMatcher:
@@ -89,7 +59,7 @@ class PatternMatcher:
         self.patterns = self._load_patterns(patterns_file)
 
     def _load_patterns(self, patterns_file: Path | None) -> dict:
-        """Load patterns from file or use defaults."""
+        """Load patterns from a user-provided file, or the packaged defaults."""
         if patterns_file and patterns_file.exists():
             with open(patterns_file) as f:
                 return json.load(f)

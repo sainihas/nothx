@@ -208,8 +208,11 @@ class HeuristicScorer:
             # Anchor confidence at the auto-act threshold: a score that
             # clears the score threshold must also clear unsub_confidence,
             # otherwise scores 75-79 produce classifications nothing acts on.
+            # The ceiling stays at least unsub_confidence so the guarantee
+            # holds even when a user configures a confidence above 0.95.
+            ceiling = max(0.95, self._thresholds.unsub_confidence)
             confidence = min(
-                0.95,
+                ceiling,
                 self._thresholds.unsub_confidence + (score - unsub_threshold) / 100,
             )
             classification = Classification(
@@ -237,8 +240,9 @@ class HeuristicScorer:
 
         elif score <= keep_threshold:
             # Low spam score - likely wanted
+            ceiling = max(0.95, self._thresholds.keep_confidence)
             confidence = min(
-                0.95,
+                ceiling,
                 self._thresholds.keep_confidence + (keep_threshold - score) / 100,
             )
             classification = Classification(

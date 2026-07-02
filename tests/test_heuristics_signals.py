@@ -120,3 +120,26 @@ class TestScoreConfidenceAlignment:
         assert result.action in (Action.UNSUB, Action.BLOCK)
         # Any heuristic unsub must be actionable under the confidence gate
         assert result.confidence >= thresholds.unsub_confidence
+
+    def test_guarantee_holds_for_high_confidence_config(self):
+        """The confidence gate must be met even when configured above 0.95."""
+        from nothx.classifier.heuristics import HeuristicScorer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            with patch("nothx.db.get_db_path", return_value=db_path):
+                db.init_db()
+                reset_learner()
+                thresholds = ThresholdConfig(unsub_confidence=0.99, keep_confidence=0.99)
+                scorer = HeuristicScorer(threshold_config=thresholds)
+                sender = SenderStats(
+                    domain="spam.com",
+                    total_emails=100,
+                    seen_emails=0,
+                    sample_subjects=["SALE 90% OFF ACT NOW", "LAST CHANCE DEALS"],
+                    sample_senders=["promo@spam.com"],
+                )
+                result = scorer.classify(sender)
+                assert result is not None
+                assert result.action in (Action.UNSUB, Action.BLOCK)
+                assert result.confidence >= 0.99

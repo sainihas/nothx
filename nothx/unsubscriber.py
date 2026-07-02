@@ -8,6 +8,7 @@ import urllib.request
 from email.mime.text import MIMEText
 
 from . import db
+from . import __version__
 from .config import AccountConfig, Config
 from .errors import RateLimiter, safe_truncate
 from .models import EmailHeader, SenderStatus, UnsubMethod, UnsubResult
@@ -28,7 +29,7 @@ class InvalidProviderError(Exception):
 logger = logging.getLogger("nothx.unsubscriber")
 
 # User agent for HTTP requests - identifies as nothx email automation tool
-USER_AGENT = "nothx/0.1.0 (Email Unsubscribe Automation; +https://github.com/nothx/nothx)"
+USER_AGENT = f"nothx/{__version__} (Email Unsubscribe Automation; +https://github.com/sainihas/nothx)"
 
 # Timeout for HTTP requests
 REQUEST_TIMEOUT = 30

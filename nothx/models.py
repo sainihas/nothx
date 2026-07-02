@@ -1,8 +1,16 @@
 """Data models for nothx."""
 
+import email.utils
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+
+# RFC 2369: List-Unsubscribe contains one or more angle-bracket-enclosed URIs.
+# Match bracket groups rather than splitting on commas, which appear inside URLs.
+_UNSUB_TARGET_RE = re.compile(r"<([^>]*)>")
+
+_ALLOWED_UNSUB_SCHEMES = ("https://", "http://", "mailto:")
 
 
 class EmailType(Enum):
@@ -58,50 +66,79 @@ class EmailHeader:
     account_name: str | None = None  # Track which account this email came from
 
     @property
+    def sender_address(self) -> str:
+        """Extract the addr-spec from the From header, or '' if invalid."""
+        try:
+            _, addr = email.utils.parseaddr(self.sender)
+            if not addr:
+                # parseaddr rejects malformed input like '<a@b.com> extra';
+                # retry on just the angle-bracket group so protected-domain
+                # checks still see the real domain.
+                match = re.search(r"<([^>]*)>", self.sender or "")
+                if match:
+                    _, addr = email.utils.parseaddr(match.group(1))
+        except (TypeError, AttributeError):
+            return ""
+        addr = addr.lower().strip()
+        if "@" not in addr:
+            return ""
+        domain = addr.rsplit("@", 1)[1]
+        if (
+            not domain
+            or " " in domain
+            or "." not in domain
+            or domain.startswith(".")
+            or domain.endswith(".")
+        ):
+            return ""
+        return addr
+
+    @property
     def domain(self) -> str:
         """Extract domain from sender email.
 
         Returns the domain part of the email address, or 'unknown' if invalid.
         """
-        try:
-            if "<" in self.sender:
-                email = self.sender.split("<")[1].rstrip(">")
-            else:
-                email = self.sender
-
-            if "@" not in email:
-                return "unknown"
-
-            domain = email.split("@")[-1].lower().strip()
-
-            # Basic validation: domain must have at least one dot and no spaces
-            if not domain or " " in domain or "." not in domain:
-                return "unknown"
-
-            return domain
-        except (IndexError, AttributeError):
+        addr = self.sender_address
+        if not addr:
             return "unknown"
+        return addr.rsplit("@", 1)[1]
+
+    @property
+    def list_unsubscribe_targets(self) -> list[str]:
+        """All URIs from List-Unsubscribe, in RFC 2369 preference order.
+
+        Extracts angle-bracket groups (URLs may contain commas, and comments
+        may appear between entries), strips whitespace introduced by header
+        folding, and keeps only http(s)/mailto URIs.
+        """
+        if not self.list_unsubscribe:
+            return []
+        raw_uris = _UNSUB_TARGET_RE.findall(self.list_unsubscribe)
+        if not raw_uris:
+            # Non-compliant senders sometimes omit the angle brackets entirely
+            raw_uris = [self.list_unsubscribe]
+        targets = []
+        for raw in raw_uris:
+            uri = "".join(raw.split())  # folded headers leave WSP/CRLF inside
+            if uri.lower().startswith(_ALLOWED_UNSUB_SCHEMES):
+                targets.append(uri)
+        return targets
 
     @property
     def list_unsubscribe_url(self) -> str | None:
-        """Extract HTTPS URL from List-Unsubscribe header."""
-        if not self.list_unsubscribe:
-            return None
-        for part in self.list_unsubscribe.split(","):
-            part = part.strip().strip("<>")
-            if part.startswith("https://") or part.startswith("http://"):
-                return part
+        """First http(s) URL from List-Unsubscribe, if any."""
+        for uri in self.list_unsubscribe_targets:
+            if uri.lower().startswith(("https://", "http://")):
+                return uri
         return None
 
     @property
     def list_unsubscribe_mailto(self) -> str | None:
-        """Extract mailto from List-Unsubscribe header."""
-        if not self.list_unsubscribe:
-            return None
-        for part in self.list_unsubscribe.split(","):
-            part = part.strip().strip("<>")
-            if part.startswith("mailto:"):
-                return part
+        """First mailto URI from List-Unsubscribe, if any."""
+        for uri in self.list_unsubscribe_targets:
+            if uri.lower().startswith("mailto:"):
+                return uri
         return None
 
 

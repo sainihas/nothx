@@ -6,7 +6,7 @@ import imaplib
 import logging
 import socket
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from email.message import Message
 
@@ -18,6 +18,15 @@ from .errors import (
     retry_with_backoff,
 )
 from .models import EmailHeader
+
+# IMAP date-searches require English month abbreviations (RFC 3501);
+# strftime("%b") is locale-dependent and breaks on non-English locales.
+_IMAP_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _imap_date(dt: datetime) -> str:
+    """Format a datetime as an IMAP search date (DD-Mon-YYYY), locale-independent."""
+    return f"{dt.day:02d}-{_IMAP_MONTHS[dt.month - 1]}-{dt.year}"
 
 logger = logging.getLogger("nothx.imap")
 
@@ -170,7 +179,7 @@ class IMAPConnection:
             ) from e
 
         # Search for emails from the last N days with List-Unsubscribe header
-        since_date = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
+        since_date = _imap_date(datetime.now() - timedelta(days=days))
 
         # First, get all emails from the date range
         try:
@@ -296,7 +305,8 @@ class IMAPConnection:
             subject_raw = msg.get("Subject", "")
             subject = self._decode_header_value(subject_raw)
 
-            # Parse date with fallback
+            # Parse date with fallback. Normalize everything to aware UTC:
+            # mixing naive and aware datetimes makes min()/sorted() raise TypeError.
             date_str = msg.get("Date", "")
             try:
                 date = email.utils.parsedate_to_datetime(date_str)
@@ -306,7 +316,11 @@ class IMAPConnection:
                     date_str[:50],
                     e,
                 )
-                date = datetime.now()
+                date = datetime.now(timezone.utc)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            else:
+                date = date.astimezone(timezone.utc)
 
             return EmailHeader(
                 sender=sender,

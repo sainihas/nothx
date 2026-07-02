@@ -154,6 +154,12 @@ class TestGetExecution:
         result = unsubscribe(make_header(), Config())
         assert result.success is True
 
+    def test_204_no_content_is_success(self, temp_db, monkeypatch):
+        """204 No Content is unconditional success even with an empty body."""
+        monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch(status=204, body=""))
+        result = unsubscribe(make_header(), Config())
+        assert result.success is True
+
     def test_confirmation_page_detected(self, temp_db, monkeypatch):
         monkeypatch.setattr(
             unsubscriber,
@@ -270,6 +276,19 @@ class TestMailto:
             result = unsubscriber._execute_mailto(mailto, account, Config())
             assert result.success is False
             assert "multi-recipient" in (result.error or "")
+
+    def test_mailto_rejects_display_name_redirection(self, temp_db):
+        """A display-name form must not redirect to a hidden address."""
+        from nothx.config import AccountConfig
+
+        account = AccountConfig(provider="gmail", email="me@x.com", password="pw")
+        for mailto in (
+            "mailto:Name <attacker@example.com>",
+            "mailto:unsub@shop.com <attacker@example.com>",
+            "mailto:Name%20%3Cattacker@example.com%3E",  # %20 %3C %3E encoded
+        ):
+            result = unsubscriber._execute_mailto(mailto, account, Config())
+            assert result.success is False
 
     def test_mailto_params_preserved(self, temp_db, monkeypatch):
         sent = {}

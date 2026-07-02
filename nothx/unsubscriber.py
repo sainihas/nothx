@@ -285,8 +285,10 @@ def _execute_get(url: str) -> UnsubResult:
 
         # A 200 alone proves nothing: many unsubscribe pages require another
         # click. Success needs a positive phrase and no confirmation prompt.
+        # A 204 No Content is unconditional success by definition (there is no
+        # body to require a phrase from).
         needs_confirmation = _check_confirmation_indicators(response.body)
-        success = (
+        success = response.status == 204 or (
             200 <= response.status < 300
             and _check_success_indicators(response.body)
             and not needs_confirmation
@@ -328,17 +330,21 @@ def _execute_mailto(mailto: str, account: AccountConfig, config: Config) -> Unsu
         # Header injection guard: no CR/LF in the subject
         subject = subject.replace("\r", " ").replace("\n", " ")
 
-        # The advertised unsubscribe address must be a single addr-spec.
-        # getaddresses splits on commas, so a crafted multi-recipient payload
-        # like "unsub@x.com,attacker@y.com" (or its %2C-encoded form) yields
-        # more than one recipient and is rejected — we must never send to an
-        # attacker-injected address.
+        # The advertised unsubscribe address must be a single bare addr-spec.
+        # A valid mailto "to" (RFC 6068) is comma-separated addr-specs with no
+        # display names, so we reject anything with a comma, whitespace, or
+        # angle brackets in the RAW value — this blocks both multi-recipient
+        # payloads ("unsub@x.com,attacker@y.com", incl. %2C-encoded) and
+        # display-name redirection ("Name <attacker@y.com>", which getaddresses
+        # would otherwise parse to a clean-looking attacker address).
+        forbidden = (",", " ", "\t", "\r", "\n", "<", ">")
         recipients = email.utils.getaddresses([to_address])
         addr = recipients[0][1] if recipients else ""
         if (
             len(recipients) != 1
             or addr.count("@") != 1
-            or any(c in addr for c in (",", " ", "\r", "\n", "<", ">"))
+            or any(c in to_address for c in forbidden)
+            or any(c in addr for c in forbidden)
         ):
             return UnsubResult(
                 success=False,

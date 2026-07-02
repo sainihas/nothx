@@ -31,6 +31,31 @@ AI_RETRY_CONFIG = RetryConfig(
     ),
 )
 
+# Senders per AI request. One giant prompt risks the response being cut off
+# at max_tokens mid-JSON, losing the whole batch.
+AI_BATCH_CHUNK_SIZE = 15
+
+
+def _extract_json_value(text: str, open_char: str) -> list | dict | None:
+    """Extract the first parseable JSON array ('[') or object ('{') from text.
+
+    Scans candidate start positions and uses raw_decode, which is robust to
+    surrounding prose, markdown fences, and trailing content — unlike
+    find/rfind slicing, which breaks when the response contains multiple
+    JSON values or is truncated.
+    """
+    decoder = json.JSONDecoder()
+    index = 0
+    while True:
+        start = text.find(open_char, index)
+        if start == -1:
+            return None
+        try:
+            value, _ = decoder.raw_decode(text[start:])
+            return value
+        except json.JSONDecodeError:
+            index = start + 1
+
 
 CLASSIFICATION_PROMPT = """You are an email classification assistant. Your job is to analyze email senders and classify them to help users manage their inbox.
 
@@ -114,12 +139,12 @@ class AIClassifier:
 
     def classify_batch(self, senders: list[SenderStats]) -> dict[str, Classification]:
         """
-        Classify a batch of senders using AI.
+        Classify a batch of senders using AI, in chunks.
         Returns a dictionary mapping domain -> Classification.
 
-        Raises:
-            AIError: If AI classification fails after retries (only for critical errors).
-                     Non-critical errors return empty dict to allow fallback to heuristics.
+        Chunking keeps each response comfortably under the output token
+        limit; a single oversized request would truncate mid-JSON and lose
+        every classification in it.
         """
         if not self.is_available():
             logger.debug("AI classification unavailable, skipping batch")
@@ -128,6 +153,13 @@ class AIClassifier:
         if not senders:
             return {}
 
+        results: dict[str, Classification] = {}
+        for start in range(0, len(senders), AI_BATCH_CHUNK_SIZE):
+            results.update(self._classify_chunk(senders[start : start + AI_BATCH_CHUNK_SIZE]))
+        return results
+
+    def _classify_chunk(self, senders: list[SenderStats]) -> dict[str, Classification]:
+        """Classify one chunk of senders with a single AI request."""
         provider = self._get_provider()
         assert provider is not None  # Guaranteed by is_available() check above
 
@@ -332,21 +364,10 @@ class AIClassifier:
         errors: list[str] = []
 
         try:
-            # Try to extract JSON from markdown code block first (more robust)
-            match = re.search(r"```json\s*(\[.*?\])\s*```", response_text, re.DOTALL)
-            if match:
-                json_str = match.group(1)
-            else:
-                # Fallback: find raw JSON array
-                json_start = response_text.find("[")
-                json_end = response_text.rfind("]") + 1
-                if json_start == -1 or json_end == 0:
-                    errors.append("No JSON array found in response")
-                    return results, errors
-
-                json_str = response_text[json_start:json_end]
-
-            data = json.loads(json_str)
+            data = _extract_json_value(response_text, "[")
+            if data is None:
+                errors.append("No JSON array found in response")
+                return results, errors
 
             if not isinstance(data, list):
                 errors.append(f"Expected JSON array, got {type(data).__name__}")
@@ -584,23 +605,13 @@ class AIPatternAnalyzer:
     def _parse_analysis(self, response_text: str) -> dict | None:
         """Parse AI analysis response with validation."""
         try:
-            # Try to extract JSON from markdown code block first (more robust)
-            match = re.search(r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL)
-            if match:
-                json_str = match.group(1)
-            else:
-                # Fallback for cases where the AI doesn't use markdown fences
-                json_start = response_text.find("{")
-                json_end = response_text.rfind("}") + 1
-                if json_start == -1 or json_end == 0:
-                    logger.warning(
-                        "No JSON object found in AI analysis response",
-                        extra={"response_preview": response_text[:200]},
-                    )
-                    return None
-                json_str = response_text[json_start:json_end]
-
-            result = json.loads(json_str)
+            result = _extract_json_value(response_text, "{")
+            if result is None:
+                logger.warning(
+                    "No JSON object found in AI analysis response",
+                    extra={"response_preview": response_text[:200]},
+                )
+                return None
 
             # Validate expected structure
             if not isinstance(result, dict):
@@ -610,12 +621,21 @@ class AIPatternAnalyzer:
                 )
                 return None
 
-            # Validate and clamp confidence values in insights
+            # Validate and clamp confidence values in insights. A bad value
+            # in one insight (e.g. "high") must not discard the whole analysis.
             if "insights" in result and isinstance(result["insights"], list):
                 for insight in result["insights"]:
                     if isinstance(insight, dict) and "confidence" in insight:
+                        try:
+                            confidence = float(insight.get("confidence", 0.5))
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                "Invalid confidence %r in AI insight, using 0.5",
+                                insight.get("confidence"),
+                            )
+                            confidence = 0.5
                         insight["confidence"] = validate_confidence(
-                            float(insight.get("confidence", 0.5)),
+                            confidence,
                             context="AI pattern analysis insight",
                         )
 

@@ -103,6 +103,16 @@ def scan_inbox(
         sorted_emails = sorted(emails, key=lambda e: e.date, reverse=True)
         sample_subjects = [e.subject for e in sorted_emails[:5]]
 
+        # Sample sender addresses (distinct, most recent first) for
+        # local-part heuristics like "marketing@..."
+        sample_senders: list[str] = []
+        for e in sorted_emails:
+            addr = e.sender_address
+            if addr and addr not in sample_senders:
+                sample_senders.append(addr)
+            if len(sample_senders) >= 5:
+                break
+
         # Check if any have unsubscribe links
         has_unsub = any(e.list_unsubscribe for e in emails)
 
@@ -113,6 +123,7 @@ def scan_inbox(
             first_seen=first_seen,
             last_seen=last_seen,
             sample_subjects=sample_subjects,
+            sample_senders=sample_senders,
             has_unsubscribe=has_unsub,
         )
         sender_stats[domain] = stats

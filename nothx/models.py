@@ -152,6 +152,7 @@ class SenderStats:
     first_seen: datetime | None = None
     last_seen: datetime | None = None
     sample_subjects: list[str] = field(default_factory=list)
+    sample_senders: list[str] = field(default_factory=list)
     has_unsubscribe: bool = False
 
     @property

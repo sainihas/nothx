@@ -34,14 +34,14 @@ class AnthropicProvider(BaseAIProvider):
 
     @property
     def default_model(self) -> str:
-        return "claude-sonnet-4-20250514"
+        # Haiku is the cost-effective choice for high-volume header classification
+        return "claude-haiku-4-5"
 
     def get_model_options(self) -> list[str]:
         return [
-            "claude-sonnet-4-20250514",
-            "claude-opus-4-20250514",
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-haiku-20241022",
+            "claude-haiku-4-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
         ]
 
     def _get_client(self):

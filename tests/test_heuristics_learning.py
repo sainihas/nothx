@@ -38,8 +38,9 @@ class TestHeuristicScorerBaseline:
         sender = SenderStats(
             domain="example.com",
             total_emails=10,
-            seen_emails=5,  # 50% open rate
+            seen_emails=3,  # 30% open rate -> moderate engagement
             sample_subjects=["Hello from Example"],
+            has_unsubscribe=True,
         )
         score = scorer.score(sender)
         # Should be near neutral (50) since nothing stands out

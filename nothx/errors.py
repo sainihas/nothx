@@ -2,6 +2,7 @@
 
 import functools
 import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -221,6 +222,15 @@ def validate_confidence(confidence: float, context: str = "") -> float:
 
     Logs a warning if the value was out of range.
     """
+    # NaN fails every comparison, so it would pass the range check unchanged
+    if math.isnan(confidence) or math.isinf(confidence):
+        logger.warning(
+            "Confidence value %r is not finite%s, using 0.5",
+            confidence,
+            f" in {context}" if context else "",
+            extra={"original_confidence": str(confidence), "context": context},
+        )
+        return 0.5
     if confidence < 0.0 or confidence > 1.0:
         logger.warning(
             "Confidence value %.4f out of range [0.0, 1.0]%s, clamping",

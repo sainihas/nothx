@@ -3,7 +3,7 @@
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 
 from .config import get_db_path
 from .models import Action, RunStats, SenderStatus, UnsubMethod, UserAction, UserPreference
@@ -57,6 +57,7 @@ def init_db() -> None:
                 http_status INTEGER,
                 error TEXT,
                 response_snippet TEXT,
+                needs_confirmation INTEGER DEFAULT 0,
                 FOREIGN KEY (domain) REFERENCES senders(domain)
             );
 
@@ -115,6 +116,33 @@ def init_db() -> None:
                 last_updated TEXT
             );
         """)
+        _migrate(conn)
+
+
+# Bump this when adding a migration step below.
+SCHEMA_VERSION = 1
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check whether a column exists on a table."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """Add a column unless it already exists (idempotent)."""
+    if not _column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Upgrade existing databases to the current schema."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
+    if version < 1:
+        _add_column_if_missing(conn, "unsub_log", "needs_confirmation", "INTEGER DEFAULT 0")
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def upsert_sender(
@@ -128,7 +156,7 @@ def upsert_sender(
 ) -> None:
     """Insert or update a sender record."""
     with get_db() as conn:
-        now = datetime.now().isoformat()
+        now = datetime.now(UTC).isoformat()
         first = first_seen.isoformat() if first_seen else now
         last = last_seen.isoformat() if last_seen else now
         subjects_json = "|".join(sample_subjects[:5])  # Store up to 5 samples
@@ -185,12 +213,18 @@ def get_senders_by_status(status: SenderStatus) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+# Senders that still need a decision or retry. Unclassified senders count only
+# while the user hasn't decided; failed unsubscribes always count (so a retry
+# that fails again stays visible) until they succeed or are re-categorized.
+_REVIEW_PREDICATE = "(status = 'unknown' AND user_override IS NULL) OR status = 'failed'"
+
+
 def get_senders_for_review() -> list[dict]:
-    """Get senders that need manual review."""
+    """Get senders that need manual review, including failed unsubscribes."""
     with get_db() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT * FROM senders
-            WHERE status = 'unknown' AND user_override IS NULL
+            WHERE {_REVIEW_PREDICATE}
             ORDER BY total_emails DESC
         """).fetchall()
         return [dict(row) for row in rows]
@@ -203,22 +237,24 @@ def log_unsub_attempt(
     http_status: int | None = None,
     error: str | None = None,
     response_snippet: str | None = None,
+    needs_confirmation: bool = False,
 ) -> None:
     """Log an unsubscribe attempt."""
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO unsub_log (domain, attempted_at, success, method, http_status, error, response_snippet)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO unsub_log (domain, attempted_at, success, method, http_status, error, response_snippet, needs_confirmation)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 domain,
-                datetime.now().isoformat(),
+                datetime.now(UTC).isoformat(),
                 int(success),
                 method.value if method else None,
                 http_status,
                 error,
                 response_snippet,
+                int(needs_confirmation),
             ),
         )
 
@@ -231,7 +267,7 @@ def log_correction(domain: str, ai_decision: str, user_decision: str) -> None:
             INSERT INTO corrections (domain, ai_decision, user_decision, timestamp)
             VALUES (?, ?, ?, ?)
         """,
-            (domain, ai_decision, user_decision, datetime.now().isoformat()),
+            (domain, ai_decision, user_decision, datetime.now(UTC).isoformat()),
         )
 
 
@@ -300,6 +336,32 @@ def get_recent_unsubscribes(days: int = 30) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def get_post_unsub_offenders(grace_days: int = 7) -> list[dict]:
+    """Find senders still mailing after a successful unsubscribe.
+
+    A sender counts as an offender if its most recent email (last_seen) arrived
+    more than grace_days after our last successful unsubscribe attempt. Gmail
+    and Yahoo allow senders up to ~48h to honor an unsubscribe, so a modest
+    grace window avoids false positives; anything past it is a candidate to
+    escalate to block/filter.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.domain, s.total_emails, s.last_seen,
+                   MAX(u.attempted_at) AS unsubscribed_at
+            FROM senders s
+            JOIN unsub_log u ON u.domain = s.domain
+            WHERE s.status = 'unsubscribed' AND u.success = 1
+            GROUP BY s.domain
+            HAVING datetime(s.last_seen) > datetime(MAX(u.attempted_at), ?)
+            ORDER BY s.total_emails DESC
+        """,
+            (f"+{grace_days} days",),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_unsub_success_rate() -> tuple[int, int]:
     """Get unsubscribe success and failure counts.
 
@@ -326,7 +388,7 @@ def add_rule(pattern: str, action: str) -> None:
             INSERT OR REPLACE INTO rules (pattern, action, created_at)
             VALUES (?, ?, ?)
         """,
-            (pattern, action, datetime.now().isoformat()),
+            (pattern, action, datetime.now(UTC).isoformat()),
         )
 
 
@@ -355,7 +417,7 @@ def get_stats() -> dict:
             "SELECT COUNT(*) as count FROM senders WHERE status = 'keep'"
         ).fetchone()
         review = conn.execute(
-            "SELECT COUNT(*) as count FROM senders WHERE status = 'unknown' AND user_override IS NULL"
+            f"SELECT COUNT(*) as count FROM senders WHERE {_REVIEW_PREDICATE}"
         ).fetchone()
         runs = conn.execute("SELECT COUNT(*) as count FROM runs").fetchone()
         last_run = conn.execute("SELECT ran_at FROM runs ORDER BY ran_at DESC LIMIT 1").fetchone()

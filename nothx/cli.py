@@ -22,6 +22,7 @@ from . import __version__, db
 from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
 from .config import AccountConfig, Config, get_config_dir
+from .errors import IMAPError
 from .imap import test_account
 from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
@@ -123,13 +124,60 @@ def _styled_confirm(message: str, default: bool = True) -> bool:
     return result == "yes"
 
 
-def _change_sender_status(domain: str, new_status: str, sender: dict | None = None) -> bool:
+def _attempt_unsubscribe_for_domain(config: Config, domain: str, sender: dict) -> None:
+    """Actually attempt to unsubscribe from a domain (used by manual flows).
+
+    unsubscribe() sets the real sender status (UNSUBSCRIBED on success, FAILED
+    otherwise) and logs the attempt, so a failed unsubscribe is never
+    mislabeled as a success.
+    """
+    from .scanner import get_emails_for_domain
+
+    console.print(f"{_L} [muted]Fetching a recent email from {domain}...[/muted]")
+    try:
+        emails = get_emails_for_domain(config, domain)
+    except (IMAPError, OSError) as e:
+        console.print(f"{_L} [error]Could not reach mailbox for {domain}: {e}[/error]")
+        db.update_sender_status(domain, SenderStatus.FAILED)
+        return
+
+    email = next((e for e in emails if e.list_unsubscribe), None)
+    if email is None:
+        console.print(
+            f"{_L} [warning]No unsubscribe link found for {domain}; marked failed[/warning]"
+        )
+        db.update_sender_status(domain, SenderStatus.FAILED)
+        return
+
+    account = config.get_account(email.account_name)
+    try:
+        result = unsubscribe(email, config, account)
+    except UnsafeUnsubscribeError:
+        console.print(f"{_L} [warning]{domain} is a protected domain; not unsubscribing[/warning]")
+        return
+
+    if result.success:
+        console.print(f"{_L} [unsubscribe]→ Unsubscribed[/unsubscribe]")
+    elif result.needs_confirmation:
+        console.print(
+            f"{_L} [warning]{domain} needs manual confirmation on their unsubscribe page[/warning]"
+        )
+    else:
+        console.print(f"{_L} [error]Unsubscribe failed: {result.error}[/error]")
+
+
+def _change_sender_status(
+    domain: str, new_status: str, sender: dict | None = None, config: Config | None = None
+) -> bool:
     """Change a sender's status and log the action for learning.
 
     Args:
         domain: The sender domain to change.
         new_status: One of "keep", "unsub", "block".
         sender: Optional pre-fetched sender dict. If None, fetches from DB.
+        config: When provided and new_status is "unsub", a real unsubscribe is
+            attempted (so the status reflects the actual outcome) instead of
+            optimistically marking the sender unsubscribed.
 
     Returns:
         True if the status was changed, False if sender not found.
@@ -147,7 +195,12 @@ def _change_sender_status(domain: str, new_status: str, sender: dict | None = No
     sender_status, action_enum, style, label = status_map[new_status]
 
     db.set_user_override(domain, new_status)
-    db.update_sender_status(domain, sender_status)
+    if new_status == "unsub" and config is not None:
+        # Perform a real unsubscribe; unsubscribe() sets the actual status.
+        _attempt_unsubscribe_for_domain(config, domain, sender)
+    else:
+        db.update_sender_status(domain, sender_status)
+        console.print(f"{_L} [{style}]→ {label}[/{style}]")
 
     # Build AI recommendation from sender data
     ai_rec = None
@@ -180,7 +233,6 @@ def _change_sender_status(domain: str, new_status: str, sender: dict | None = No
     learner = get_learner()
     learner.update_from_action(action_record)
 
-    console.print(f"{_L} [{style}]\u2192 {label}[/{style}]")
     return True
 
 
@@ -940,6 +992,7 @@ def _run_scan(
             account_names=account_names,
             on_account_start=on_account_start,
             on_account_error=on_account_error,
+            persist=not dry_run,
         )
         sender_stats = scan_result.sender_stats
 
@@ -971,7 +1024,7 @@ def _run_scan(
         transient=True,
     ) as progress:
         task = progress.add_task("Analyzing senders...", total=len(sender_stats))
-        classifications = engine.classify_batch(list(sender_stats.values()))
+        classifications = engine.classify_batch(list(sender_stats.values()), persist=not dry_run)
         progress.update(task, completed=len(sender_stats))
 
     # Process results
@@ -980,8 +1033,27 @@ def _run_scan(
     to_review = []
     to_block = []
 
+    min_emails = config.thresholds.min_emails_before_action
+
     for domain, classification in classifications.items():
         sender = sender_stats[domain]
+
+        # Don't auto-act on senders we've barely seen — defer to review.
+        # Explicit user rules/overrides (source="user_rule") always take
+        # highest priority and are never deferred by the email-count guard.
+        if (
+            classification.action in (Action.UNSUB, Action.BLOCK)
+            and classification.source != "user_rule"
+            and sender.total_emails < min_emails
+        ):
+            logger.debug(
+                "Deferring %s to review: only %d emails (< %d)",
+                domain,
+                sender.total_emails,
+                min_emails,
+            )
+            to_review.append((sender, classification))
+            continue
 
         if classification.action == Action.UNSUB:
             to_unsub.append((sender, classification))
@@ -1073,9 +1145,18 @@ def _run_scan(
             console.print()
             console.print(updated_tree)
 
-    # Phase 3: Execute unsubscribes (if not dry run)
+    # Phase 3: Execute unsubscribes (if not dry run).
+    # In confirm mode with --auto (e.g. a scheduled/non-interactive run) there
+    # is no one to answer a prompt, and --auto must never prompt. So confirm
+    # mode DECLINES auto-action rather than opening a prompt that can't be
+    # answered. Interactive runs (no --auto) still prompt as usual.
     if not dry_run and (to_unsub or to_block):
-        if auto or _styled_confirm(
+        if config.operation_mode == "confirm" and auto:
+            console.print(
+                "\n[warning]Confirm mode is on — skipping auto-unsubscribe. "
+                "Run without --auto to approve interactively.[/warning]"
+            )
+        elif auto or _styled_confirm(
             f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
         ):
             console.print("\n[header]Step 3/3: Unsubscribing[/header]")
@@ -1092,22 +1173,36 @@ def _run_scan(
             ) as progress:
                 task = progress.add_task("Processing...", total=len(to_unsub) + len(to_block))
 
-                for sender, _ in to_unsub + to_block:
+                for sender, classification in to_unsub + to_block:
                     # Get a sample email with unsubscribe header from cache
                     email = scan_result.get_email_for_domain(sender.domain)
-                    if email:
-                        # Use the account the email came from (for correct mailto credentials)
-                        account = config.get_account(email.account_name)
-                        try:
-                            result = unsubscribe(email, config, account)
-                        except UnsafeUnsubscribeError:
-                            logger.info("Skipped protected domain: %s", sender.domain)
-                            progress.advance(task)
-                            continue
-                        if result.success:
-                            stats.auto_unsubbed += 1
-                        else:
-                            stats.failed += 1
+
+                    # A block target with no unsubscribe method: mark it
+                    # blocked directly rather than burning a network attempt
+                    # that would only log a bogus failure.
+                    if email is None or not email.list_unsubscribe:
+                        if classification.action == Action.BLOCK:
+                            db.update_sender_status(sender.domain, SenderStatus.BLOCKED)
+                        progress.advance(task)
+                        continue
+
+                    # Use the account the email came from (for correct mailto credentials)
+                    account = config.get_account(email.account_name)
+                    if account is None:
+                        logger.warning(
+                            "No account found for %s; mailto unsubscribe unavailable",
+                            sender.domain,
+                        )
+                    try:
+                        result = unsubscribe(email, config, account)
+                    except UnsafeUnsubscribeError:
+                        logger.info("Skipped protected domain: %s", sender.domain)
+                        progress.advance(task)
+                        continue
+                    if result.success:
+                        stats.auto_unsubbed += 1
+                    else:
+                        stats.failed += 1
                     progress.advance(task)
 
             console.print(f"\n[success]✓ Unsubscribed from {stats.auto_unsubbed} senders[/success]")
@@ -1121,9 +1216,10 @@ def _run_scan(
     stats.kept = len(to_keep)
     stats.review_queued = len(to_review)
 
-    # Mark keep senders
-    for sender, _ in to_keep:
-        db.update_sender_status(sender.domain, SenderStatus.KEEP)
+    # Mark keep senders (dry-run must not mutate the database)
+    if not dry_run:
+        for sender, _ in to_keep:
+            db.update_sender_status(sender.domain, SenderStatus.KEEP)
 
     # Log run
     if not dry_run:
@@ -1234,6 +1330,20 @@ def status(learning: bool):
     console.print(f"{_L} Pending review: [count]{stats['pending_review']}[/count]")
     console.print(f"{_L} Total runs: [count]{stats['total_runs']}[/count]")
 
+    # Senders still mailing after a "successful" unsubscribe (Gmail/Yahoo allow
+    # ~48h; anything past the grace window is a candidate to escalate to block).
+    offenders = db.get_post_unsub_offenders()
+    if offenders:
+        console.print(
+            f"\n[warning]{len(offenders)} sender(s) still mailing after unsubscribe:[/warning]"
+        )
+        for row in offenders[:10]:
+            console.print(
+                f"{_L} {row['domain']} "
+                f"[muted]({row['total_emails']} emails; unsubscribed {row['unsubscribed_at'][:10]})[/muted]"
+            )
+        console.print("[muted]Consider blocking these: nothx rule <domain> block[/muted]")
+
     if stats["last_run"]:
         try:
             last_run_dt = datetime.fromisoformat(stats["last_run"])
@@ -1326,7 +1436,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
             break
 
         if choice in ("unsub", "keep", "block"):
-            _change_sender_status(domain, choice, sender=sender)
+            _change_sender_status(domain, choice, sender=sender, config=config)
         else:
             console.print(f"{_L} [review]\u2192 Skipped[/review]")
 
@@ -1656,6 +1766,7 @@ def change(domain: str):
     Example: nothx change marketing.example.com
     """
     db.init_db()
+    config = Config.load()
 
     sender = db.get_sender(domain)
     if not sender:
@@ -1704,13 +1815,14 @@ def change(domain: str):
         console.print("[muted]Cancelled.[/muted]")
         return
 
-    # Check if status actually changed
+    # For keep/block, skip a no-op change. For unsub, always proceed — the
+    # user may be retrying a failed (or previously attempted) unsubscribe.
     new_status_value = {"keep": "keep", "unsub": "unsubscribed", "block": "blocked"}[new_status]
-    if current_status == new_status_value:
+    if new_status != "unsub" and current_status == new_status_value:
         console.print("[muted]Status unchanged.[/muted]")
         return
 
-    _change_sender_status(domain, new_status, sender=sender)
+    _change_sender_status(domain, new_status, sender=sender, config=config)
     console.print()
 
 

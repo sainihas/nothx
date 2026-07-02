@@ -61,11 +61,12 @@ dev = [
 nothx = "nothx.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/nothx/nothx"
-Repository = "https://github.com/nothx/nothx"
+Homepage = "https://github.com/sainihas/nothx"
+Repository = "https://github.com/sainihas/nothx"
 
 [tool.hatch.build.targets.wheel]
 packages = ["nothx"]
+include = ["nothx/**/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

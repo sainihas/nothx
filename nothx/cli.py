@@ -1039,8 +1039,11 @@ def _run_scan(
         sender = sender_stats[domain]
 
         # Don't auto-act on senders we've barely seen — defer to review.
+        # Explicit user rules/overrides (source="user_rule") always take
+        # highest priority and are never deferred by the email-count guard.
         if (
             classification.action in (Action.UNSUB, Action.BLOCK)
+            and classification.source != "user_rule"
             and sender.total_emails < min_emails
         ):
             logger.debug(
@@ -1142,11 +1145,18 @@ def _run_scan(
             console.print()
             console.print(updated_tree)
 
-    # Phase 3: Execute unsubscribes (if not dry run)
-    # operation_mode "confirm" always requires confirmation, even with --auto.
-    skip_confirm = auto and config.operation_mode != "confirm"
+    # Phase 3: Execute unsubscribes (if not dry run).
+    # In confirm mode with --auto (e.g. a scheduled/non-interactive run) there
+    # is no one to answer a prompt, and --auto must never prompt. So confirm
+    # mode DECLINES auto-action rather than opening a prompt that can't be
+    # answered. Interactive runs (no --auto) still prompt as usual.
     if not dry_run and (to_unsub or to_block):
-        if skip_confirm or _styled_confirm(
+        if config.operation_mode == "confirm" and auto:
+            console.print(
+                "\n[warning]Confirm mode is on — skipping auto-unsubscribe. "
+                "Run without --auto to approve interactively.[/warning]"
+            )
+        elif auto or _styled_confirm(
             f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
         ):
             console.print("\n[header]Step 3/3: Unsubscribing[/header]")

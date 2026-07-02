@@ -139,14 +139,17 @@ class AIClassifier:
 
         return provider.is_available()
 
-    def classify_batch(self, senders: list[SenderStats]) -> dict[str, Classification]:
+    def classify_batch(
+        self, senders: list[SenderStats], persist: bool = True
+    ) -> dict[str, Classification]:
         """
         Classify a batch of senders using AI, in chunks.
         Returns a dictionary mapping domain -> Classification.
 
         Chunking keeps each response comfortably under the output token
         limit; a single oversized request would truncate mid-JSON and lose
-        every classification in it.
+        every classification in it. When persist is False (dry-run),
+        classifications are not written to the database.
         """
         if not self.is_available():
             logger.debug("AI classification unavailable, skipping batch")
@@ -157,10 +160,14 @@ class AIClassifier:
 
         results: dict[str, Classification] = {}
         for start in range(0, len(senders), AI_BATCH_CHUNK_SIZE):
-            results.update(self._classify_chunk(senders[start : start + AI_BATCH_CHUNK_SIZE]))
+            results.update(
+                self._classify_chunk(senders[start : start + AI_BATCH_CHUNK_SIZE], persist=persist)
+            )
         return results
 
-    def _classify_chunk(self, senders: list[SenderStats]) -> dict[str, Classification]:
+    def _classify_chunk(
+        self, senders: list[SenderStats], persist: bool = True
+    ) -> dict[str, Classification]:
         """Classify one chunk of senders with a single AI request."""
         provider = self._get_provider()
         assert provider is not None  # Guaranteed by is_available() check above
@@ -235,13 +242,14 @@ class AIClassifier:
                     },
                 )
 
-            # Update database with AI classifications
-            for domain, classification in classifications.items():
-                db.update_sender_classification(
-                    domain=domain,
-                    classification=classification.email_type.value,
-                    confidence=classification.confidence,
-                )
+            # Update database with AI classifications (skipped during dry-run)
+            if persist:
+                for domain, classification in classifications.items():
+                    db.update_sender_classification(
+                        domain=domain,
+                        classification=classification.email_type.value,
+                        confidence=classification.confidence,
+                    )
 
             logger.info(
                 "AI classified %d/%d senders successfully",

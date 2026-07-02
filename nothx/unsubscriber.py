@@ -1,5 +1,6 @@
 """Unsubscribe execution for nothx."""
 
+import email.utils
 import fnmatch
 import logging
 import smtplib
@@ -324,16 +325,27 @@ def _execute_mailto(mailto: str, account: AccountConfig, config: Config) -> Unsu
             subject = params.get("subject", [subject])[0]
             body = params.get("body", [body])[0]
 
-        # Header injection guard: no CR/LF in addressing or subject
-        to_address = to_address.replace("\r", "").replace("\n", "")
+        # Header injection guard: no CR/LF in the subject
         subject = subject.replace("\r", " ").replace("\n", " ")
 
-        if "@" not in to_address:
+        # The advertised unsubscribe address must be a single addr-spec.
+        # getaddresses splits on commas, so a crafted multi-recipient payload
+        # like "unsub@x.com,attacker@y.com" (or its %2C-encoded form) yields
+        # more than one recipient and is rejected — we must never send to an
+        # attacker-injected address.
+        recipients = email.utils.getaddresses([to_address])
+        addr = recipients[0][1] if recipients else ""
+        if (
+            len(recipients) != 1
+            or addr.count("@") != 1
+            or any(c in addr for c in (",", " ", "\r", "\n", "<", ">"))
+        ):
             return UnsubResult(
                 success=False,
                 method=UnsubMethod.MAILTO,
-                error=f"Invalid mailto address: {to_address!r}",
+                error=f"Invalid or multi-recipient mailto address: {to_address!r}",
             )
+        to_address = addr
 
         # Create email
         msg = MIMEText(body)

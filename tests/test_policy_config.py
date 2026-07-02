@@ -70,6 +70,82 @@ def temp_db():
             yield db_path
 
 
+class TestReviewRetry:
+    """A manual 'unsub' choice must run a real attempt, not mislabel success."""
+
+    def _sender_row(self):
+        db.upsert_sender("shop.com", 10, 0, ["Sale"], True)
+        db.update_sender_status("shop.com", SenderStatus.FAILED)
+        return db.get_sender("shop.com")
+
+    def test_failed_retry_that_fails_again_stays_failed(self, temp_db, monkeypatch):
+        from nothx import cli
+        from nothx.models import EmailHeader
+
+        sender = self._sender_row()
+        header = EmailHeader(
+            sender="deals@shop.com",
+            subject="Sale",
+            date=datetime(2026, 1, 1),
+            message_id="<x>",
+            list_unsubscribe="<https://shop.com/u>",
+        )
+        monkeypatch.setattr("nothx.scanner.get_emails_for_domain", lambda *a, **k: [header])
+        # The retry attempt fails (server 200 with no confirmation phrase)
+        monkeypatch.setattr(
+            "nothx.unsubscriber._http_rate_limiter.acquire", lambda timeout=None: True
+        )
+        from nothx.safefetch import FetchResponse
+
+        monkeypatch.setattr(
+            "nothx.unsubscriber.safe_fetch",
+            lambda url, **k: FetchResponse(status=200, body="welcome", final_url=url, redirects=0),
+        )
+        config = Config(accounts={"main": AccountConfig("gmail", "me@x.com", "pw")})
+
+        cli._change_sender_status("shop.com", "unsub", sender=sender, config=config)
+
+        # NOT mislabeled as unsubscribed; stays failed and visible in review.
+        assert db.get_sender("shop.com")["status"] == "failed"
+        assert any(r["domain"] == "shop.com" for r in db.get_senders_for_review())
+
+    def test_retry_success_marks_unsubscribed(self, temp_db, monkeypatch):
+        from nothx import cli
+        from nothx.models import EmailHeader
+        from nothx.safefetch import FetchResponse
+
+        sender = self._sender_row()
+        header = EmailHeader(
+            sender="deals@shop.com",
+            subject="Sale",
+            date=datetime(2026, 1, 1),
+            message_id="<x>",
+            list_unsubscribe="<https://shop.com/u>",
+        )
+        monkeypatch.setattr("nothx.scanner.get_emails_for_domain", lambda *a, **k: [header])
+        monkeypatch.setattr(
+            "nothx.unsubscriber._http_rate_limiter.acquire", lambda timeout=None: True
+        )
+        monkeypatch.setattr(
+            "nothx.unsubscriber.safe_fetch",
+            lambda url, **k: FetchResponse(
+                status=200, body="you have been unsubscribed", final_url=url, redirects=0
+            ),
+        )
+        config = Config(accounts={"main": AccountConfig("gmail", "me@x.com", "pw")})
+
+        cli._change_sender_status("shop.com", "unsub", sender=sender, config=config)
+        assert db.get_sender("shop.com")["status"] == "unsubscribed"
+
+    def test_no_config_keeps_optimistic_behavior(self, temp_db):
+        from nothx import cli
+
+        sender = self._sender_row()
+        cli._change_sender_status("shop.com", "unsub", sender=sender)  # no config
+        # Without config, no network attempt — legacy optimistic status set.
+        assert db.get_sender("shop.com")["status"] == "unsubscribed"
+
+
 class TestPostUnsubOffenders:
     def test_detects_sender_still_mailing(self, temp_db):
         # Unsubscribed 30 days ago, but last_seen is now -> offender

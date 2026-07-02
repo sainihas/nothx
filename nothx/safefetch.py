@@ -73,8 +73,13 @@ def _forbidden_ip(address: str) -> bool:
         return True  # unparseable = do not connect
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped  # ::ffff:127.0.0.1 must be judged as 127.0.0.1
+    # `not is_global` is the primary gate: it rejects any address that isn't
+    # globally routable, including carrier-grade NAT / shared space
+    # (100.64.0.0/10) which is neither is_private nor is_reserved. The explicit
+    # flags remain as defense in depth / documentation of intent.
     return (
-        ip.is_loopback
+        not ip.is_global
+        or ip.is_loopback
         or ip.is_private
         or ip.is_link_local  # includes 169.254.169.254 metadata endpoints
         or ip.is_multicast

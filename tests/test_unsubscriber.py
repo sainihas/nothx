@@ -256,7 +256,20 @@ class TestMailto:
         account = AccountConfig(provider="gmail", email="me@x.com", password="pw")
         result = unsubscriber._execute_mailto("mailto:not-an-address", account, Config())
         assert result.success is False
-        assert "Invalid mailto address" in (result.error or "")
+        assert "mailto address" in (result.error or "")
+
+    def test_mailto_rejects_multiple_recipients(self, temp_db):
+        """A %2C-encoded comma must not smuggle in a second recipient."""
+        from nothx.config import AccountConfig
+
+        account = AccountConfig(provider="gmail", email="me@x.com", password="pw")
+        for mailto in (
+            "mailto:unsub@shop.com%2Cattacker@example.com",
+            "mailto:unsub@shop.com,attacker@example.com",
+        ):
+            result = unsubscriber._execute_mailto(mailto, account, Config())
+            assert result.success is False
+            assert "multi-recipient" in (result.error or "")
 
     def test_mailto_params_preserved(self, temp_db, monkeypatch):
         sent = {}

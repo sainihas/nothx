@@ -91,3 +91,37 @@ class TestScanAggregation:
         assert stats.list_id == "<news.shop.com>"
         assert stats.dkim_pass is False  # fail-dominant
         assert stats.sample_senders == ["promo@shop.com"]
+
+    def test_dry_run_does_not_write_senders(self, temp_db):
+        """persist=False (dry-run) must not create any sender rows."""
+        from unittest.mock import MagicMock
+
+        from nothx.config import AccountConfig, Config
+        from nothx.models import EmailHeader
+        from nothx.scanner import scan_inbox
+
+        config = Config(accounts={"main": AccountConfig("gmail", "me@x.com", "pw")})
+        emails = [
+            EmailHeader(
+                sender="promo@shop.com",
+                subject="Sale",
+                date=datetime(2026, 1, 2, tzinfo=UTC),
+                message_id="<1>",
+                list_unsubscribe="<https://shop.com/u>",
+            )
+        ]
+        conn = MagicMock()
+        conn.fetch_marketing_emails.return_value = iter(emails)
+        conn.__enter__ = lambda s: conn
+        conn.__exit__ = lambda *a: None
+
+        with patch("nothx.scanner.IMAPConnection", return_value=conn):
+            result = scan_inbox(config, persist=False)
+
+        # In-memory stats are still produced...
+        assert "shop.com" in result.sender_stats
+        # ...but nothing was written to the database.
+        assert db.get_sender("shop.com") is None
+        with db.get_db() as dbconn:
+            count = dbconn.execute("SELECT COUNT(*) FROM senders").fetchone()[0]
+        assert count == 0

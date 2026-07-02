@@ -68,6 +68,7 @@ def scan_inbox(
     account_names: list[str] | None = None,
     on_account_start: "Callable[[str, str, int, int], None] | None" = None,
     on_account_error: "Callable[[str, str, str], None] | None" = None,
+    persist: bool = True,
 ) -> ScanResult:
     """
     Scan inbox for marketing emails and aggregate by sender domain.
@@ -81,6 +82,7 @@ def scan_inbox(
         account_names: Optional list of account names to scan
         on_account_start: Optional callback(email, name, current, total) called when starting each account
         on_account_error: Optional callback(email, name, error) called when an account fails
+        persist: When False (dry-run), sender rows are NOT written to the database.
     """
     # Determine which accounts to scan
     if account_names:
@@ -172,16 +174,17 @@ def scan_inbox(
         )
         sender_stats[domain] = stats
 
-        # Update database
-        db.upsert_sender(
-            domain=domain,
-            total_emails=total,
-            seen_emails=seen,
-            sample_subjects=sample_subjects,
-            has_unsubscribe=has_unsub,
-            first_seen=first_seen,
-            last_seen=last_seen,
-        )
+        # Update database (skipped during dry-run)
+        if persist:
+            db.upsert_sender(
+                domain=domain,
+                total_emails=total,
+                seen_emails=seen,
+                sample_subjects=sample_subjects,
+                has_unsubscribe=has_unsub,
+                first_seen=first_seen,
+                last_seen=last_seen,
+            )
 
     return ScanResult(sender_stats, dict(domain_emails))
 
@@ -201,12 +204,15 @@ def get_emails_for_domain(
             raise ValueError("No account configured")
 
     emails = []
-    for _, account in accounts_to_scan:
+    for name, account in accounts_to_scan:
         if not account:
             continue
         with IMAPConnection(account) as conn:
             for header in conn.fetch_marketing_emails(days=config.scan_days):
                 if header.domain == domain:
+                    # Track the account so mailto unsubscribes use the right
+                    # SMTP credentials.
+                    header.account_name = name
                     emails.append(header)
 
     return emails

@@ -22,6 +22,7 @@ from . import __version__, db
 from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
 from .config import AccountConfig, Config, get_config_dir
+from .errors import IMAPError
 from .imap import test_account
 from .models import Action, RunStats, SenderStatus, UserAction
 from .scanner import scan_inbox
@@ -123,13 +124,60 @@ def _styled_confirm(message: str, default: bool = True) -> bool:
     return result == "yes"
 
 
-def _change_sender_status(domain: str, new_status: str, sender: dict | None = None) -> bool:
+def _attempt_unsubscribe_for_domain(config: Config, domain: str, sender: dict) -> None:
+    """Actually attempt to unsubscribe from a domain (used by manual flows).
+
+    unsubscribe() sets the real sender status (UNSUBSCRIBED on success, FAILED
+    otherwise) and logs the attempt, so a failed unsubscribe is never
+    mislabeled as a success.
+    """
+    from .scanner import get_emails_for_domain
+
+    console.print(f"{_L} [muted]Fetching a recent email from {domain}...[/muted]")
+    try:
+        emails = get_emails_for_domain(config, domain)
+    except (IMAPError, OSError) as e:
+        console.print(f"{_L} [error]Could not reach mailbox for {domain}: {e}[/error]")
+        db.update_sender_status(domain, SenderStatus.FAILED)
+        return
+
+    email = next((e for e in emails if e.list_unsubscribe), None)
+    if email is None:
+        console.print(
+            f"{_L} [warning]No unsubscribe link found for {domain}; marked failed[/warning]"
+        )
+        db.update_sender_status(domain, SenderStatus.FAILED)
+        return
+
+    account = config.get_account(email.account_name)
+    try:
+        result = unsubscribe(email, config, account)
+    except UnsafeUnsubscribeError:
+        console.print(f"{_L} [warning]{domain} is a protected domain; not unsubscribing[/warning]")
+        return
+
+    if result.success:
+        console.print(f"{_L} [unsubscribe]→ Unsubscribed[/unsubscribe]")
+    elif result.needs_confirmation:
+        console.print(
+            f"{_L} [warning]{domain} needs manual confirmation on their unsubscribe page[/warning]"
+        )
+    else:
+        console.print(f"{_L} [error]Unsubscribe failed: {result.error}[/error]")
+
+
+def _change_sender_status(
+    domain: str, new_status: str, sender: dict | None = None, config: Config | None = None
+) -> bool:
     """Change a sender's status and log the action for learning.
 
     Args:
         domain: The sender domain to change.
         new_status: One of "keep", "unsub", "block".
         sender: Optional pre-fetched sender dict. If None, fetches from DB.
+        config: When provided and new_status is "unsub", a real unsubscribe is
+            attempted (so the status reflects the actual outcome) instead of
+            optimistically marking the sender unsubscribed.
 
     Returns:
         True if the status was changed, False if sender not found.
@@ -147,7 +195,12 @@ def _change_sender_status(domain: str, new_status: str, sender: dict | None = No
     sender_status, action_enum, style, label = status_map[new_status]
 
     db.set_user_override(domain, new_status)
-    db.update_sender_status(domain, sender_status)
+    if new_status == "unsub" and config is not None:
+        # Perform a real unsubscribe; unsubscribe() sets the actual status.
+        _attempt_unsubscribe_for_domain(config, domain, sender)
+    else:
+        db.update_sender_status(domain, sender_status)
+        console.print(f"{_L} [{style}]→ {label}[/{style}]")
 
     # Build AI recommendation from sender data
     ai_rec = None
@@ -180,7 +233,6 @@ def _change_sender_status(domain: str, new_status: str, sender: dict | None = No
     learner = get_learner()
     learner.update_from_action(action_record)
 
-    console.print(f"{_L} [{style}]\u2192 {label}[/{style}]")
     return True
 
 
@@ -940,6 +992,7 @@ def _run_scan(
             account_names=account_names,
             on_account_start=on_account_start,
             on_account_error=on_account_error,
+            persist=not dry_run,
         )
         sender_stats = scan_result.sender_stats
 
@@ -971,7 +1024,7 @@ def _run_scan(
         transient=True,
     ) as progress:
         task = progress.add_task("Analyzing senders...", total=len(sender_stats))
-        classifications = engine.classify_batch(list(sender_stats.values()))
+        classifications = engine.classify_batch(list(sender_stats.values()), persist=not dry_run)
         progress.update(task, completed=len(sender_stats))
 
     # Process results
@@ -1373,7 +1426,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
             break
 
         if choice in ("unsub", "keep", "block"):
-            _change_sender_status(domain, choice, sender=sender)
+            _change_sender_status(domain, choice, sender=sender, config=config)
         else:
             console.print(f"{_L} [review]\u2192 Skipped[/review]")
 
@@ -1703,6 +1756,7 @@ def change(domain: str):
     Example: nothx change marketing.example.com
     """
     db.init_db()
+    config = Config.load()
 
     sender = db.get_sender(domain)
     if not sender:
@@ -1751,13 +1805,14 @@ def change(domain: str):
         console.print("[muted]Cancelled.[/muted]")
         return
 
-    # Check if status actually changed
+    # For keep/block, skip a no-op change. For unsub, always proceed — the
+    # user may be retrying a failed (or previously attempted) unsubscribe.
     new_status_value = {"keep": "keep", "unsub": "unsubscribed", "block": "blocked"}[new_status]
-    if current_status == new_status_value:
+    if new_status != "unsub" and current_status == new_status_value:
         console.print("[muted]Status unchanged.[/muted]")
         return
 
-    _change_sender_status(domain, new_status, sender=sender)
+    _change_sender_status(domain, new_status, sender=sender, config=config)
     console.print()
 
 

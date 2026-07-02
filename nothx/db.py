@@ -213,12 +213,18 @@ def get_senders_by_status(status: SenderStatus) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+# Senders that still need a decision or retry. Unclassified senders count only
+# while the user hasn't decided; failed unsubscribes always count (so a retry
+# that fails again stays visible) until they succeed or are re-categorized.
+_REVIEW_PREDICATE = "(status = 'unknown' AND user_override IS NULL) OR status = 'failed'"
+
+
 def get_senders_for_review() -> list[dict]:
     """Get senders that need manual review, including failed unsubscribes."""
     with get_db() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT * FROM senders
-            WHERE status IN ('unknown', 'failed') AND user_override IS NULL
+            WHERE {_REVIEW_PREDICATE}
             ORDER BY total_emails DESC
         """).fetchall()
         return [dict(row) for row in rows]
@@ -411,7 +417,7 @@ def get_stats() -> dict:
             "SELECT COUNT(*) as count FROM senders WHERE status = 'keep'"
         ).fetchone()
         review = conn.execute(
-            "SELECT COUNT(*) as count FROM senders WHERE status = 'unknown' AND user_override IS NULL"
+            f"SELECT COUNT(*) as count FROM senders WHERE {_REVIEW_PREDICATE}"
         ).fetchone()
         runs = conn.execute("SELECT COUNT(*) as count FROM runs").fetchone()
         last_run = conn.execute("SELECT ran_at FROM runs ORDER BY ran_at DESC LIMIT 1").fetchone()

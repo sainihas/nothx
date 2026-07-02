@@ -32,6 +32,9 @@ class TestForbiddenIp:
             "::ffff:127.0.0.1",  # v4-mapped loopback
             "::ffff:10.0.0.1",  # v4-mapped private
             "224.0.0.1",  # multicast
+            "100.64.0.1",  # carrier-grade NAT (100.64.0.0/10)
+            "100.127.255.254",  # CGNAT upper edge
+            "192.0.0.1",  # IETF protocol assignments (non-global)
             "not-an-ip",
         ],
     )

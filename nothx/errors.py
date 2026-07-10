@@ -33,6 +33,15 @@ class ErrorCode(Enum):
     IMAP_TIMEOUT = "imap_timeout"
     IMAP_FETCH_ERROR = "imap_fetch_error"
 
+    # OAuth errors
+    OAUTH_DEVICE_FLOW_FAILED = "oauth_device_flow_failed"
+    OAUTH_TOKEN_REFRESH_FAILED = "oauth_token_refresh_failed"
+    OAUTH_TOKEN_MISSING = "oauth_token_missing"
+    OAUTH_RECONSENT_REQUIRED = "oauth_reconsent_required"
+    OAUTH_FLOW_CANCELLED = "oauth_flow_cancelled"
+    OAUTH_NETWORK_ERROR = "oauth_network_error"
+    OAUTH_CACHE_ERROR = "oauth_cache_error"
+
     # HTTP errors
     HTTP_CONNECTION_ERROR = "http_connection_error"
     HTTP_TIMEOUT = "http_timeout"
@@ -87,6 +96,30 @@ class AIError(NothxError):
 
 class IMAPError(NothxError):
     """IMAP-related errors."""
+
+    pass
+
+
+class OAuthError(NothxError):
+    """Microsoft OAuth2 authentication error."""
+
+    pass
+
+
+class OAuthTransientError(OAuthError):
+    """Retryable OAuth transport or service error."""
+
+    pass
+
+
+class OAuthReconsentRequired(OAuthError):
+    """Cached authorization cannot satisfy the currently required scopes."""
+
+    pass
+
+
+class OAuthCancelledError(OAuthError):
+    """The user cancelled an in-progress OAuth device flow."""
 
     pass
 

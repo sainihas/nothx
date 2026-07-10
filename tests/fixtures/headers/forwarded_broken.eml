@@ -1,0 +1,7 @@
+From: Community List <list@community.example>
+Subject: July community digest
+Date: Thu, 09 Jul 2026 08:00:00 -0400
+Message-ID: <forwarded-1@community.example>
+List-Id: Community <digest.community.example>
+List-Unsubscribe: <https://community.example/leave?id=opaque>
+Authentication-Results: mx.google.com; arc=pass; dkim=fail header.d=community.example header.s=list; spf=fail smtp.mailfrom=bounce@community.example; dmarc=fail header.from=community.example

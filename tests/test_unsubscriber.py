@@ -9,8 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from nothx import db, unsubscriber
-from nothx.config import Config
-from nothx.models import EmailHeader, UnsubMethod
+from nothx.config import AccountConfig, Config
+from nothx.models import EmailHeader, UnsubMethod, UnsubscribeOutcome
 from nothx.safefetch import FetchResponse, SSRFBlockedError
 from nothx.unsubscriber import (
     UnsafeUnsubscribeError,
@@ -60,6 +60,10 @@ def fake_fetch(status: int = 200, body: str = "", url: str = "https://shop.com/u
     return _fetch
 
 
+def consented_config() -> Config:
+    return Config(unsubscribe_consent_version=unsubscriber.AUTOMATION_CONSENT_VERSION)
+
+
 class TestOneClickDetection:
     def test_correct_value(self):
         header = make_header(list_unsubscribe_post="List-Unsubscribe=One-Click")
@@ -88,7 +92,7 @@ class TestOneClickExecution:
 
         monkeypatch.setattr(unsubscriber, "safe_fetch", _fetch)
         header = make_header(list_unsubscribe_post="List-Unsubscribe=One-Click")
-        result = unsubscribe(header, Config())
+        result = unsubscribe(header, consented_config())
 
         assert result.success is True
         assert result.method == UnsubMethod.ONE_CLICK
@@ -104,7 +108,7 @@ class TestOneClickExecution:
             unsubscriber, "safe_fetch", fake_fetch(status=200, body="click here to confirm")
         )
         header = make_header(list_unsubscribe_post="List-Unsubscribe=One-Click")
-        assert unsubscribe(header, Config()).success is True
+        assert unsubscribe(header, consented_config()).success is True
 
     def test_no_get_fallback_on_oneclick_url(self, temp_db, monkeypatch):
         """When the one-click POST fails, we must not GET the same URL."""
@@ -116,7 +120,7 @@ class TestOneClickExecution:
 
         monkeypatch.setattr(unsubscriber, "safe_fetch", _fetch)
         header = make_header(list_unsubscribe_post="List-Unsubscribe=One-Click")
-        result = unsubscribe(header, Config())
+        result = unsubscribe(header, consented_config())
 
         assert result.success is False
         assert calls == [("POST", "https://shop.com/unsub")]
@@ -132,7 +136,7 @@ class TestOneClickExecution:
 
         monkeypatch.setattr(unsubscriber, "safe_fetch", _fetch)
         header = make_header(list_unsubscribe_post="Maybe")
-        result = unsubscribe(header, Config())
+        result = unsubscribe(header, consented_config())
 
         assert calls == ["GET"]
         assert result.success is True
@@ -142,7 +146,7 @@ class TestOneClickExecution:
 class TestGetExecution:
     def test_200_alone_is_not_success(self, temp_db, monkeypatch):
         monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch(status=200, body="Welcome!"))
-        result = unsubscribe(make_header(), Config())
+        result = unsubscribe(make_header(), consented_config())
         assert result.success is False
 
     def test_200_with_positive_phrase_succeeds(self, temp_db, monkeypatch):
@@ -151,13 +155,13 @@ class TestGetExecution:
             "safe_fetch",
             fake_fetch(status=200, body="You have been unsubscribed."),
         )
-        result = unsubscribe(make_header(), Config())
+        result = unsubscribe(make_header(), consented_config())
         assert result.success is True
 
     def test_204_no_content_is_success(self, temp_db, monkeypatch):
         """204 No Content is unconditional success even with an empty body."""
         monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch(status=204, body=""))
-        result = unsubscribe(make_header(), Config())
+        result = unsubscribe(make_header(), consented_config())
         assert result.success is True
 
     def test_confirmation_page_detected(self, temp_db, monkeypatch):
@@ -166,7 +170,7 @@ class TestGetExecution:
             "safe_fetch",
             fake_fetch(status=200, body="Are you sure? Click the button to unsubscribe."),
         )
-        result = unsubscribe(make_header(), Config())
+        result = unsubscribe(make_header(), consented_config())
         assert result.success is False
         assert result.needs_confirmation is True
 
@@ -175,15 +179,81 @@ class TestGetExecution:
             raise SSRFBlockedError("Host resolves to forbidden address 127.0.0.1")
 
         monkeypatch.setattr(unsubscriber, "safe_fetch", _fetch)
-        result = unsubscribe(make_header(), Config())
+        result = unsubscribe(make_header(), consented_config())
         assert result.success is False
         assert "Blocked unsafe URL" in (result.error or "")
+
+
+class TestContactPolicy:
+    def test_manual_unsubscribe_requires_current_consent_without_contact(
+        self, temp_db, monkeypatch
+    ):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            unsubscriber,
+            "safe_fetch",
+            lambda url, **kwargs: calls.append(f"https:{url}"),
+        )
+        monkeypatch.setattr(
+            unsubscriber,
+            "_send_mailto_message",
+            lambda message, account: calls.append("smtp"),
+        )
+        header = make_header(list_unsubscribe="<https://shop.com/unsub>, <mailto:unsub@shop.com>")
+        account = AccountConfig(provider="gmail", email="me@example.net", password="pw")
+
+        result = unsubscribe(header, Config(), account)
+
+        assert result.outcome is UnsubscribeOutcome.NEEDS_USER
+        assert result.needs_confirmation
+        assert "consent" in (result.error or "").casefold()
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        "signals",
+        [
+            {"keywords": ("$Junk",)},
+            {"keywords": ("$Phishing",)},
+            {"mailbox_role": "junk"},
+            {"provider_threat": "phishing"},
+            {"dkim_pass": False},
+            {"dmarc_pass": False},
+        ],
+    )
+    def test_manual_unsubscribe_suppresses_threats_and_auth_failures(
+        self, temp_db, monkeypatch, signals
+    ):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            unsubscriber,
+            "safe_fetch",
+            lambda url, **kwargs: calls.append(f"https:{url}"),
+        )
+        monkeypatch.setattr(
+            unsubscriber,
+            "_send_mailto_message",
+            lambda message, account: calls.append("smtp"),
+        )
+        header = make_header(list_unsubscribe="<https://shop.com/unsub>, <mailto:unsub@shop.com>")
+        for name, value in signals.items():
+            setattr(header, name, value)
+        account = AccountConfig(provider="gmail", email="me@example.net", password="pw")
+
+        result = unsubscribe(header, consented_config(), account)
+
+        expected = (
+            UnsubscribeOutcome.BLOCKED
+            if header.server_junk or header.server_phishing
+            else UnsubscribeOutcome.NEEDS_USER
+        )
+        assert result.outcome is expected
+        assert calls == []
 
 
 class TestAttemptLogging:
     def test_failure_is_logged(self, temp_db, monkeypatch):
         monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch(status=200, body="nope"))
-        unsubscribe(make_header(), Config())
+        unsubscribe(make_header(), consented_config())
 
         with db.get_db() as conn:
             rows = conn.execute("SELECT * FROM unsub_log").fetchall()
@@ -196,7 +266,7 @@ class TestAttemptLogging:
     def test_each_target_logged(self, temp_db, monkeypatch):
         monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch(status=200, body="nope"))
         header = make_header(list_unsubscribe="<https://a.shop.com/u>, <https://b.shop.com/u>")
-        unsubscribe(header, Config())
+        unsubscribe(header, consented_config())
 
         with db.get_db() as conn:
             rows = conn.execute("SELECT * FROM unsub_log").fetchall()
@@ -207,11 +277,11 @@ class TestAttemptLogging:
             unsubscriber, "safe_fetch", fake_fetch(status=200, body="no longer receive")
         )
         db.upsert_sender("shop.com", 5, 0, ["Sale"], True)
-        unsubscribe(make_header(), Config())
+        unsubscribe(make_header(), consented_config())
         assert db.get_sender("shop.com")["status"] == "unsubscribed"
 
     def test_no_method_available_logged(self, temp_db):
-        result = unsubscribe(make_header(list_unsubscribe=None), Config())
+        result = unsubscribe(make_header(list_unsubscribe=None), consented_config())
         assert result.success is False
         assert "No unsubscribe method" in (result.error or "")
 
@@ -250,7 +320,7 @@ class TestMailto:
 
         header = make_header(list_unsubscribe="<https://shop.com/unsub>, <mailto:unsub@shop.com>")
         account = AccountConfig(provider="gmail", email="me@x.com", password="pw")
-        result = unsubscribe(header, Config(), account)
+        result = unsubscribe(header, consented_config(), account)
 
         assert result.method == UnsubMethod.MAILTO
         assert sent["mailto"] == "mailto:unsub@shop.com"
@@ -327,7 +397,7 @@ class TestMailto:
         assert sent["to"] == "unsub@shop.com"
         assert sent["subject"] == "remove me"
 
-    def test_header_injection_stripped(self, temp_db, monkeypatch):
+    def test_header_injection_rejected(self, temp_db, monkeypatch):
         sent = {}
 
         class FakeSMTP:
@@ -353,9 +423,8 @@ class TestMailto:
         result = unsubscriber._execute_mailto(
             "mailto:unsub@shop.com?subject=hi%0d%0aBcc:victim@x.com", account, Config()
         )
-        assert result.success is True
-        assert "\n" not in sent["subject"]
-        assert "\r" not in sent["subject"]
+        assert result.success is False
+        assert sent == {}
 
 
 class TestSmtpConfig:

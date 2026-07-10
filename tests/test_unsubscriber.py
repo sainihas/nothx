@@ -327,7 +327,7 @@ class TestMailto:
         assert sent["to"] == "unsub@shop.com"
         assert sent["subject"] == "remove me"
 
-    def test_header_injection_stripped(self, temp_db, monkeypatch):
+    def test_header_injection_rejected(self, temp_db, monkeypatch):
         sent = {}
 
         class FakeSMTP:
@@ -353,9 +353,8 @@ class TestMailto:
         result = unsubscriber._execute_mailto(
             "mailto:unsub@shop.com?subject=hi%0d%0aBcc:victim@x.com", account, Config()
         )
-        assert result.success is True
-        assert "\n" not in sent["subject"]
-        assert "\r" not in sent["subject"]
+        assert result.success is False
+        assert sent == {}
 
 
 class TestSmtpConfig:

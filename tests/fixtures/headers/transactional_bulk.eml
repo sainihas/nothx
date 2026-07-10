@@ -1,0 +1,9 @@
+From: Store Receipts <receipts@store.example>
+Subject: Receipt for your purchase #123456
+Date: Thu, 09 Jul 2026 05:00:00 -0400
+Message-ID: <receipt-1@store.example>
+List-Id: Store receipts <receipts.store.example>
+Precedence: bulk
+Auto-Submitted: auto-generated
+Feedback-ID: receipt:store:mail
+Authentication-Results: mx.google.com; dkim=pass header.d=store.example header.s=txn; spf=pass smtp.mailfrom=bounce@store.example; dmarc=pass header.from=store.example

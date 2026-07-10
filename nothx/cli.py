@@ -1,10 +1,13 @@
 """Command-line interface for nothx."""
 
 import csv
+import hashlib
 import json
 import logging
 import re
-from datetime import datetime
+import uuid
+import webbrowser
+from datetime import UTC, datetime
 from typing import Any
 
 import click
@@ -18,17 +21,35 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.tree import Tree
 
-from . import __version__, db
+from . import __version__, db, msauth
 from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
-from .config import AccountConfig, Config, get_config_dir
-from .errors import IMAPError
-from .imap import test_account
-from .models import Action, RunStats, SenderStatus, UserAction
+from .config import (
+    CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
+    CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
+    AccountConfig,
+    Config,
+    get_config_dir,
+)
+from .errors import IMAPError, OAuthError
+from .imap import IMAPConnection, test_account
+from .models import (
+    Action,
+    Classification,
+    EmailHeader,
+    EmailType,
+    MessageRef,
+    RunStats,
+    SenderStats,
+    SenderStatus,
+    UnsubscribeOutcome,
+    UserAction,
+)
+from .safefetch import redacted_url
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
 from .theme import console, print_animated_welcome
-from .unsubscriber import UnsafeUnsubscribeError, unsubscribe
+from .unsubscriber import UnsafeUnsubscribeError, unsubscribe, unsubscribe_subscription
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +187,678 @@ def _attempt_unsubscribe_for_domain(config: Config, domain: str, sender: dict) -
         console.print(f"{_L} [error]Unsubscribe failed: {result.error}[/error]")
 
 
+def _redact_failure_detail(detail: str | None) -> str | None:
+    """Keep useful failure text while removing destinations and opaque tokens."""
+    if not detail:
+        return None
+    redacted = re.sub(r"(?i)https?://[^\s)>]+", "[redacted URL]", detail)
+    redacted = re.sub(r"(?i)mailto:[^\s)>]+", "[redacted mailto]", redacted)
+    return redacted[:500]
+
+
+def _redacted_destination(target: str) -> str:
+    """Use the centralized token-safe URL renderer."""
+    return redacted_url(target)
+
+
+def _safe_persisted_destination(target: str | None) -> str | None:
+    """Mask token-bearing paths before destination metadata reaches SQLite."""
+    if not target:
+        return None
+    if target.casefold().startswith("mailto:"):
+        return "mailto:[redacted]"
+    return _redacted_destination(target)
+
+
+def _subscription_label(sender: SenderStats) -> str:
+    """Return a human-readable, account-scoped subscription label."""
+    account = sender.account_key or "unknown account"
+    if sender.identity_kind == "list_id" and sender.identity_value:
+        identity = f"List-Id {sender.identity_value}"
+    elif sender.identity_value:
+        identity = sender.identity_value
+    else:
+        identity = sender.domain
+    return f"{account} · {identity}"
+
+
+def _learn_subscription_policy(subscription: dict[str, Any], action_value: str) -> None:
+    """Teach from a manual account/list decision using the actual AI action."""
+    domain = subscription.get("sender_domain")
+    if not domain:
+        return
+    if db.get_sender(domain) is None:
+        db.upsert_sender(domain, 0, 0, [], False)
+    try:
+        action = Action(action_value)
+    except ValueError:
+        return
+    recommendation: Action | None = None
+    if recommended := subscription.get("ai_recommended_action"):
+        try:
+            recommendation = Action(recommended)
+        except ValueError:
+            recommendation = None
+    if recommendation is not None and recommendation is not action:
+        db.log_correction(domain, recommendation.value, action.value)
+    record = UserAction(
+        domain=domain,
+        action=action,
+        timestamp=datetime.now(UTC),
+        ai_recommendation=recommendation,
+    )
+    db.log_user_action(record)
+    get_learner().update_from_action(record)
+
+
+def _subscription_has_persisted_threat(subscription_id: int) -> bool:
+    """Return whether stored server evidence forbids contacting this sender."""
+    for message in db.list_message_refs(subscription_id=subscription_id, limit=100_000):
+        if message.get("mailbox_role") == "junk" or message.get("provider_verdict"):
+            return True
+        try:
+            flags = json.loads(message.get("flags_json") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            flags = []
+        normalized = {str(flag).casefold() for flag in flags}
+        if normalized & {"$junk", r"\junk", "$phishing", "spam", r"\spam"}:
+            return True
+    return False
+
+
+def _matching_account(config: Config, headers: list[EmailHeader]) -> AccountConfig | None:
+    """Resolve a scanned subscription back to its configured mailbox."""
+    if not headers:
+        return None
+    first = headers[0]
+    if first.account_name and (account := config.get_account(first.account_name)):
+        return account
+    account_key = (first.account_key or "").casefold()
+    return next(
+        (
+            account
+            for account in config.accounts.values()
+            if account.email.casefold() == account_key
+        ),
+        None,
+    )
+
+
+def _target_fingerprint(value: str) -> str:
+    """Fingerprint an in-memory endpoint without persisting the raw target."""
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _persist_subscription_records(
+    sender: SenderStats,
+    headers: list[EmailHeader],
+    classification: Classification,
+    *,
+    policy_action: str | None = None,
+) -> tuple[dict[str, Any], list[tuple[EmailHeader, dict[str, Any]]]]:
+    """Persist one real subscription and its stable message locators."""
+    if not headers:
+        raise ValueError("A subscription cannot be persisted without a real message")
+    fallback_identity = headers[0].subscription_identity
+    account_key = sender.account_key or fallback_identity.account_key
+    identity_kind = sender.identity_kind or fallback_identity.kind
+    identity_value = sender.identity_value or fallback_identity.value
+    dates = [header.received_at or header.date for header in headers]
+    has_ai_recommendation = classification.source == "ai" or classification.original_source == "ai"
+    subscription = db.upsert_subscription(
+        account_key,
+        identity_kind,
+        identity_value,
+        list_id=identity_value if identity_kind == "list_id" else headers[0].normalized_list_id,
+        from_address=identity_value
+        if identity_kind == "from"
+        else headers[0].sender_address or None,
+        sender_domain=sender.domain,
+        policy_action=policy_action,
+        ai_email_type=classification.email_type.value if has_ai_recommendation else None,
+        ai_recommended_action=(classification.recommended_action or classification.action).value
+        if has_ai_recommendation
+        else None,
+        classification_source=classification.source,
+        unwanted_confidence=classification.confidence,
+        first_seen=min(dates),
+        last_seen=max(dates),
+        last_delivery_at=max(dates),
+    )
+
+    persisted: list[tuple[EmailHeader, dict[str, Any]]] = []
+    for header in headers:
+        locator = header.message_ref
+        if locator is None:
+            continue
+        fingerprints = [
+            _target_fingerprint(target)
+            for target in (
+                *header.list_unsubscribe_targets,
+                *(candidate.uri for candidate in header.footer_unsubscribe_candidates),
+            )
+        ]
+        auth = header.authentication
+        message = db.upsert_message_ref(
+            subscription["id"],
+            locator.account_key,
+            locator.mailbox,
+            header.mailbox_role,
+            locator.uidvalidity,
+            locator.uid,
+            message_id=header.message_id,
+            from_address=header.sender_address or None,
+            list_id=header.normalized_list_id,
+            received_at=header.received_at or header.date,
+            flags=[*header.system_flags, *header.keywords, *header.gmail_labels],
+            auth_evidence={
+                "spf": auth.spf.value,
+                "dkim": auth.dkim.value,
+                "dmarc": auth.dmarc.value,
+                "arc": auth.arc.value,
+                "dkim_domains": list(auth.dkim_domains),
+                "dkim_selectors": list(auth.dkim_selectors),
+                "results": [
+                    {
+                        "method": evidence.method,
+                        "result": evidence.result.value,
+                        "identifier": evidence.identifier,
+                        "domain": evidence.domain,
+                        "selector": evidence.selector,
+                    }
+                    for evidence in auth.results
+                ],
+                "dkim_covers_unsubscribe": header.dkim_covers_unsubscribe,
+                "trusted": auth.trusted,
+            },
+            bulk_evidence={
+                "list_id": header.normalized_list_id,
+                "precedence": header.precedence,
+                "feedback_id": bool(header.feedback_id),
+                "esp": header.esp,
+                "provider_bulk": header.provider_bulk,
+            },
+            provider_verdict=header.provider_threat,
+            endpoint_fingerprints=fingerprints,
+            has_header_method=bool(header.list_unsubscribe_targets),
+            can_unsubscribe=header.server_can_unsubscribe,
+        )
+        persisted.append((header, message))
+    return subscription, persisted
+
+
+def _operation_key(prefix: str, sender: SenderStats, headers: list[EmailHeader]) -> str:
+    """Build an idempotency key from identity and the newest source message."""
+    newest = max(headers, key=lambda header: header.received_at or header.date)
+    locator = newest.message_ref
+    source = (
+        f"{locator.mailbox}:{locator.uidvalidity}:{locator.uid}" if locator else newest.message_id
+    )
+    material = f"{prefix}\0{sender.classification_key}\0{source}"
+    return f"{prefix}-v1-{hashlib.sha256(material.encode()).hexdigest()}"
+
+
+def _record_unsubscribe_result(
+    sender: SenderStats,
+    headers: list[EmailHeader],
+    classification: Classification,
+    result,
+    *,
+    retry_generation: int = 0,
+    operation_id: int | None = None,
+    claim_owner: str | None = None,
+) -> None:
+    """Persist one grouped operation and its redacted endpoint attempts."""
+    subscription, messages = _persist_subscription_records(sender, headers, classification)
+    if operation_id is None:
+        operation = db.get_or_create_unsubscribe_operation(
+            subscription["id"],
+            _operation_key("unsubscribe", sender, headers),
+            kind="unsubscribe",
+            trigger_message_ref_id=messages[0][1]["id"] if messages else None,
+            retry_generation=retry_generation,
+        )
+    else:
+        claimed_operation = db.get_unsubscribe_operation(operation_id)
+        if claimed_operation is None or claimed_operation["subscription_id"] != subscription["id"]:
+            raise ValueError("Claimed operation does not belong to the subscription")
+        operation = claimed_operation
+    outcome = result.outcome or (
+        UnsubscribeOutcome.REQUESTED
+        if result.success
+        else UnsubscribeOutcome.NEEDS_USER
+        if result.needs_confirmation
+        else UnsubscribeOutcome.FAILED
+    )
+    message_ids = {
+        (
+            header.message_ref.account_key,
+            header.message_ref.mailbox,
+            header.message_ref.uidvalidity,
+            header.message_ref.uid,
+        ): message["id"]
+        for header, message in messages
+        if header.message_ref is not None
+    }
+    attempt_results = list(getattr(result, "attempt_results", ()))
+    if not attempt_results:
+        # Policy-only/manual outcomes still get one grouped audit row without
+        # inventing or storing a raw endpoint.
+        fingerprint = _target_fingerprint(
+            f"{result.method.value if result.method else 'none'}:{result.target_display or 'none'}"
+        )
+        db.record_unsubscribe_attempt(
+            operation["id"],
+            f"policy-v1-{fingerprint}",
+            method=result.method.value if result.method else "none",
+            outcome="needs_user"
+            if outcome is UnsubscribeOutcome.NEEDS_USER
+            else "accepted"
+            if outcome is UnsubscribeOutcome.REQUESTED
+            else "permanent_failure",
+            endpoint_fingerprint=fingerprint,
+            message_ref_id=messages[0][1]["id"] if messages else None,
+            destination_redacted=_safe_persisted_destination(result.target_display),
+            http_status=result.http_status,
+            error_code="needs_user"
+            if result.needs_confirmation
+            else "request_failed"
+            if result.error
+            else None,
+        )
+    else:
+        for index, attempt in enumerate(attempt_results, 1):
+            locator = attempt.message_ref
+            message_ref_id = None
+            if locator is not None:
+                message_ref_id = message_ids.get(
+                    (
+                        locator.account_key,
+                        locator.mailbox,
+                        locator.uidvalidity,
+                        locator.uid,
+                    )
+                )
+            db.record_unsubscribe_attempt(
+                operation["id"],
+                f"endpoint-v1-{attempt.endpoint_fingerprint}-{index}",
+                method=attempt.method.value,
+                outcome=attempt.outcome,
+                endpoint_fingerprint=attempt.endpoint_fingerprint,
+                message_ref_id=message_ref_id,
+                destination_redacted=_safe_persisted_destination(attempt.target_display),
+                http_status=attempt.http_status,
+                error_code=attempt.error_code,
+                ambiguous_send=attempt.ambiguous_send,
+            )
+    db.update_unsubscribe_operation_outcome(
+        operation["id"],
+        outcome.value,
+        error_code="needs_user"
+        if result.needs_confirmation
+        else "request_failed"
+        if result.error
+        else None,
+        detail_redacted=_redact_failure_detail(result.error),
+        claim_owner=claim_owner,
+    )
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _unsubscribe_operation_plan(
+    subscription: dict[str, Any],
+) -> tuple[bool, set[str], int, bool]:
+    """Return execute/exclusions/retry/escalate for the 48-hour lifecycle."""
+    operations = db.list_unsubscribe_operations(subscription_id=subscription["id"])
+    attempted_fingerprints: set[str] = set()
+    for operation in operations:
+        for attempt in db.list_unsubscribe_attempts(operation["id"]):
+            attempted_fingerprints.add(attempt["endpoint_fingerprint"])
+
+    outcome = subscription.get("last_outcome")
+    retry_count = int(subscription.get("retry_count") or 0)
+    if outcome == "blocked":
+        return False, attempted_fingerprints, retry_count, False
+
+    latest_operation = operations[0] if operations else {}
+    delivered = _parse_timestamp(subscription.get("last_delivery_at"))
+    last_operation_at = _parse_timestamp(
+        latest_operation.get("verified_at")
+        or latest_operation.get("completed_at")
+        or latest_operation.get("created_at")
+    )
+
+    if outcome == "verified_quiet":
+        if delivered is None or last_operation_at is None or delivered <= last_operation_at:
+            return False, attempted_fingerprints, retry_count, False
+        if retry_count >= 1:
+            return False, attempted_fingerprints, retry_count, True
+        return True, attempted_fingerprints, 1, False
+
+    if outcome == "needs_user":
+        # Manual boundaries (login, form, CAPTCHA, protected identity, unknown
+        # authentication) are never crossed automatically on later scans.
+        if latest_operation.get("error_code") == "unsubscribe_consent_required":
+            # Granting the current versioned consent is an explicit resolution
+            # of this one policy boundary; endpoint safety is still rechecked.
+            return True, attempted_fingerprints, retry_count, False
+        return False, attempted_fingerprints, retry_count, False
+
+    if outcome == "failed":
+        # A non-accepted endpoint is never replayed for the same source
+        # message. One genuinely later delivery may supply a fresh endpoint;
+        # mark it as the sole alternate generation so it cannot loop.
+        if delivered is None or last_operation_at is None or delivered <= last_operation_at:
+            return False, attempted_fingerprints, retry_count, False
+        if retry_count >= 1:
+            return False, attempted_fingerprints, retry_count, outcome == "failed"
+        return True, attempted_fingerprints, 1, False
+
+    if outcome not in {"requested", "ineffective"}:
+        return True, attempted_fingerprints, retry_count, False
+
+    if outcome == "requested":
+        # Only `_reconcile_due_operations` may transition an accepted request,
+        # and it is gated on a complete post-grace Inbox scan. Until then,
+        # accepted work is never replayed, even if a partial scan saw mail.
+        return False, attempted_fingerprints, retry_count, False
+
+    if retry_count >= 1:
+        return False, attempted_fingerprints, retry_count, True
+    return True, attempted_fingerprints, 1, False
+
+
+def _reconcile_due_operations(
+    config: Config,
+    *,
+    allow_mailbox_actions: bool = True,
+    accounts: set[str] | None = None,
+) -> None:
+    """Verify post-grace quietness and escalate a second failed request."""
+    operations = (
+        db.list_operations_due_for_verification()
+        if accounts is None
+        else [
+            operation
+            for account in sorted({value.casefold() for value in accounts})
+            for operation in db.list_operations_due_for_verification(account=account)
+        ]
+    )
+    for operation in operations:
+        delivered = _parse_timestamp(operation.get("last_delivery_at"))
+        grace = _parse_timestamp(operation.get("grace_until"))
+        if delivered is None or grace is None or delivered <= grace:
+            db.update_unsubscribe_operation_outcome(
+                operation["id"],
+                "verified_quiet",
+                verified_at=datetime.now(UTC),
+            )
+            continue
+
+        db.update_unsubscribe_operation_outcome(operation["id"], "ineffective")
+        if int(operation.get("retry_generation") or 0) < 1:
+            # The normal classification/execution pass may now use one fresh
+            # endpoint while excluding every previously accepted fingerprint.
+            continue
+
+        db.set_subscription_policy(operation["subscription_id"], "block")
+        if not allow_mailbox_actions or not config.permits_mailbox_mutation:
+            block_operation = db.get_or_create_unsubscribe_operation(
+                operation["subscription_id"],
+                "post-retry-block-consent-v1",
+                kind="block",
+            )
+            db.update_unsubscribe_operation_outcome(
+                block_operation["id"],
+                "needs_user",
+                error_code="mailbox_approval_required",
+                detail_redacted="Post-retry Junk movement requires consent and approval",
+            )
+            continue
+
+        subscription = db.get_subscription(operation["subscription_id"])
+        if subscription is None:
+            continue
+        block_operation = db.get_or_create_unsubscribe_operation(
+            subscription["id"],
+            f"post-retry-block-v1-{operation['id']}",
+            kind="block",
+        )
+        moved, failed = _move_persisted_subscription_to_junk(
+            config,
+            subscription,
+            block_operation["id"],
+        )
+        sender_domain = subscription.get("sender_domain")
+        if sender_domain and (moved or not failed):
+            db.update_sender_status(sender_domain, SenderStatus.BLOCKED)
+
+
+def _block_subscription(
+    config: Config,
+    sender: SenderStats,
+    headers: list[EmailHeader],
+    classification: Classification,
+) -> tuple[int, int]:
+    """Apply the spam path: move every matching Inbox UID and never unsubscribe."""
+    subscription, messages = _persist_subscription_records(
+        sender,
+        headers,
+        classification,
+        policy_action="block",
+    )
+    operation = db.get_or_create_unsubscribe_operation(
+        subscription["id"],
+        _operation_key("block", sender, headers),
+        kind="block",
+    )
+    del messages
+    return _move_persisted_subscription_to_junk(
+        config,
+        subscription,
+        operation["id"],
+    )
+
+
+def _move_persisted_subscription_to_junk(
+    config: Config,
+    subscription: dict[str, Any],
+    operation_id: int,
+) -> tuple[int, int]:
+    """Move every persisted Inbox locator for one account/list identity."""
+    inbox_messages = db.list_message_refs(
+        subscription_id=subscription["id"],
+        mailbox_role="inbox",
+        limit=100_000,
+    )
+    if not inbox_messages:
+        db.update_unsubscribe_operation_outcome(operation_id, "blocked")
+        return 0, 0
+
+    account = next(
+        (
+            candidate
+            for candidate in config.accounts.values()
+            if candidate.email.casefold() == subscription["account"].casefold()
+        ),
+        None,
+    )
+    if account is None:
+        db.update_unsubscribe_operation_outcome(
+            operation_id,
+            "failed",
+            error_code="account_missing",
+            detail_redacted="The matching mailbox account is unavailable",
+        )
+        return 0, len(inbox_messages)
+
+    moved = 0
+    failed = 0
+    try:
+        with IMAPConnection(account) as connection:
+            if connection.conn is None:
+                raise OSError("IMAP connection was not established")
+            discovery = connection.discover_mailboxes(
+                junk_override=account.junk_mailbox,
+            )
+            if discovery.junk is None:
+                detail = (
+                    "Junk mailbox selection is ambiguous; configure account junk_mailbox"
+                    if discovery.junk_is_ambiguous
+                    else "The server did not advertise an unambiguous Junk mailbox"
+                )
+                db.update_unsubscribe_operation_outcome(
+                    operation_id,
+                    "failed",
+                    error_code="junk_mailbox_unavailable",
+                    detail_redacted=detail,
+                )
+                return 0, len(inbox_messages)
+
+            existing = {
+                (row["message_ref_id"], row["action_key"]): row["outcome"]
+                for row in db.list_mailbox_actions(
+                    subscription_id=subscription["id"],
+                    limit=100_000,
+                )
+            }
+            for message in inbox_messages:
+                action_key = "move-to-junk-v1"
+                previous_outcome = existing.get((message["id"], action_key))
+                if previous_outcome in {"moved", "already_junk", "not_found"}:
+                    moved += 1
+                    continue
+                locator = MessageRef(
+                    message["account"],
+                    message["mailbox"],
+                    int(message["uidvalidity"]),
+                    int(message["uid"]),
+                )
+                action_result = connection.move_message_to_junk(locator, discovery.junk)
+                outcome = action_result.outcome.value
+                db.record_mailbox_action(
+                    subscription["id"],
+                    message["id"],
+                    action_key,
+                    action="move_to_junk",
+                    outcome=outcome,
+                    source_mailbox=locator.mailbox,
+                    target_mailbox=discovery.junk.name,
+                    operation_id=operation_id,
+                    error_code="mailbox_action_failed" if action_result.error else None,
+                    detail_redacted=_redact_failure_detail(action_result.error),
+                )
+                if outcome in {"moved", "already_junk", "not_found"}:
+                    moved += 1
+                else:
+                    failed += 1
+    except (IMAPError, OSError) as error:
+        failed = len(inbox_messages)
+        db.update_unsubscribe_operation_outcome(
+            operation_id,
+            "failed",
+            error_code="mailbox_transport_failed",
+            detail_redacted=_redact_failure_detail(str(error)),
+        )
+        return moved, failed
+
+    db.update_unsubscribe_operation_outcome(
+        operation_id,
+        "blocked" if failed == 0 else "failed",
+        error_code="partial_mailbox_failure" if failed else None,
+        detail_redacted=f"{failed} message action(s) failed" if failed else None,
+    )
+    return moved, failed
+
+
+def _record_block_needs_consent(
+    sender: SenderStats,
+    headers: list[EmailHeader],
+    classification: Classification,
+) -> None:
+    """Persist durable local BLOCK policy without performing an IMAP write."""
+    subscription, _messages = _persist_subscription_records(
+        sender,
+        headers,
+        classification,
+        policy_action="block",
+    )
+    _record_persisted_block_needs_consent(subscription)
+
+
+def _record_persisted_block_needs_consent(subscription: dict[str, Any]) -> None:
+    """Queue the mailbox portion of an already-durable BLOCK policy."""
+    operation = db.get_or_create_unsubscribe_operation(
+        subscription["id"],
+        "block-consent-v1",
+        kind="block",
+    )
+    db.update_unsubscribe_operation_outcome(
+        operation["id"],
+        "needs_user",
+        error_code="mailbox_consent_required",
+        detail_redacted="IMAP Junk movement requires current mailbox-action consent",
+    )
+
+
+def _apply_manual_subscription_block(
+    config: Config,
+    subscription: dict[str, Any],
+) -> tuple[int, int]:
+    """Apply an explicitly approved account/list BLOCK to persisted Inbox refs."""
+    db.set_subscription_policy(subscription["id"], "block")
+    if not config.permits_mailbox_mutation:
+        _record_persisted_block_needs_consent(subscription)
+        return 0, 0
+    operation = db.get_or_create_unsubscribe_operation(
+        subscription["id"],
+        "manual-block-v1",
+        kind="block",
+    )
+    return _move_persisted_subscription_to_junk(
+        config,
+        subscription,
+        operation["id"],
+    )
+
+
+def _record_unsubscribe_needs_consent(
+    sender: SenderStats,
+    headers: list[EmailHeader],
+    classification: Classification,
+) -> None:
+    """Queue an account/list review without issuing unsubscribe traffic."""
+    subscription, messages = _persist_subscription_records(
+        sender,
+        headers,
+        classification,
+        policy_action="review",
+    )
+    operation = db.get_or_create_unsubscribe_operation(
+        subscription["id"],
+        f"unsubscribe-consent-v1-{sender.classification_key}",
+        kind="unsubscribe",
+        trigger_message_ref_id=messages[0][1]["id"] if messages else None,
+    )
+    db.update_unsubscribe_operation_outcome(
+        operation["id"],
+        "needs_user",
+        error_code="unsubscribe_consent_required",
+        detail_redacted="Automatic unsubscribe requires current versioned consent",
+    )
+
+
 def _change_sender_status(
     domain: str, new_status: str, sender: dict | None = None, config: Config | None = None
 ) -> bool:
@@ -198,6 +891,21 @@ def _change_sender_status(
     if new_status == "unsub" and config is not None:
         # Perform a real unsubscribe; unsubscribe() sets the actual status.
         _attempt_unsubscribe_for_domain(config, domain, sender)
+    elif new_status == "block":
+        block_config = config or Config.load()
+        moved = 0
+        failed = 0
+        for subscription in db.list_subscriptions(limit=10_000):
+            if (subscription.get("sender_domain") or "").casefold() != domain.casefold():
+                continue
+            subscription_moved, subscription_failed = _apply_manual_subscription_block(
+                block_config,
+                subscription,
+            )
+            moved += subscription_moved
+            failed += subscription_failed
+        db.update_sender_status(domain, sender_status)
+        console.print(f"{_L} [block]→ Blocked[/block] ({moved} moved, {failed} partial/failed)")
     else:
         db.update_sender_status(domain, sender_status)
         console.print(f"{_L} [{style}]→ {label}[/{style}]")
@@ -573,6 +1281,75 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
             break
         console.print("[error]Invalid email format. Please enter a valid email address.[/error]")
 
+    # Microsoft consumer mail supports IMAP/SMTP through OAuth device flow.
+    # Keep password auth available for existing/custom deployments, but make
+    # its compatibility limitations explicit.
+    if provider == "outlook":
+        _select_header("Choose Outlook authentication")
+        auth_method = _styled_select(
+            [
+                questionary.Choice("Microsoft sign-in (recommended)", value="oauth"),
+                questionary.Choice("App password (legacy)", value="password"),
+            ]
+        )
+        if auth_method is None:
+            return None
+        if auth_method == "oauth":
+            client_id = questionary.text(
+                "",
+                qmark="Microsoft public-client application ID:",
+                style=Q_INPUT_STYLE,
+            ).ask()
+            if not client_id or not client_id.strip():
+                console.print("[warning]A Microsoft application client ID is required.[/warning]")
+                return None
+            try:
+                flow = msauth.start_device_flow(client_id.strip())
+                verification_uri = str(flow["verification_uri"])
+                console.print("\n[header]Authorize nothx with Microsoft[/header]")
+                console.print(f"{_L} Open: [link={verification_uri}]{verification_uri}[/link]")
+                console.print(f"{_L} Enter code: [bold]{flow['user_code']}[/bold]")
+                # Browser launch is convenience only; the printed URI/code is
+                # always sufficient when launch is unavailable.
+                try:
+                    if not webbrowser.open(
+                        str(flow.get("verification_uri_complete") or verification_uri)
+                    ):
+                        console.print(f"{_L} [muted]Open the link above in any browser.[/muted]")
+                except Exception as error:
+                    logger.debug("Could not open OAuth browser: %s", type(error).__name__)
+                    console.print(f"{_L} [muted]Open the link above in any browser.[/muted]")
+                token = msauth.poll_for_token(
+                    client_id.strip(),
+                    str(flow["device_code"]),
+                    int(flow.get("interval", 5)),
+                    int(flow["expires_in"]),
+                )
+                msauth.save_token(email, token, client_id.strip())
+            except (OAuthError, OSError, ValueError) as error:
+                console.print(f"[error]Microsoft sign-in failed: {error}[/error]")
+                return None
+
+            account = AccountConfig(
+                provider=provider,
+                email=email,
+                auth="oauth",
+                client_id=client_id.strip(),
+            )
+            with console.status("Testing connection...", spinner_style="#ffaf00"):
+                success, msg = test_account(account)
+            if not success:
+                msauth.delete_token(email)
+                console.print(f"[error]Connection failed: {msg}[/error]")
+                return None
+            console.print("[success]✓ Connected with Microsoft OAuth![/success]\n")
+            return _unique_account_name(config, email), account
+
+        console.print(
+            "[warning]Microsoft may reject basic/app-password IMAP authentication. "
+            "OAuth is recommended and is required for XOAUTH2 SMTP unsubscribe mail.[/warning]"
+        )
+
     # App password instructions
     if instructions := APP_PASSWORD_INSTRUCTIONS.get(provider):
         console.print()
@@ -596,7 +1373,11 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
 
     console.print("[success]✓ Connected![/success]\n")
 
-    # Generate account name from email
+    return _unique_account_name(config, email), account
+
+
+def _unique_account_name(config: Config, email: str) -> str:
+    """Generate a stable, collision-free account name from an address."""
     account_name = email.split("@")[0] if "@" in email else "default"
     # Make unique if name exists
     base_name = account_name
@@ -605,7 +1386,7 @@ def _add_email_account(config: Config) -> tuple[str, AccountConfig] | None:
         account_name = f"{base_name}_{counter}"
         counter += 1
 
-    return account_name, account
+    return account_name
 
 
 @main.command()
@@ -763,11 +1544,18 @@ def init(ctx):
     if _styled_confirm("Run first scan now?", default=True):
         _run_scan(config, verbose=True, dry_run=True)
 
-    # Schedule setup
-    schedule_runs = _styled_confirm("Auto-schedule monthly runs?", default=True)
+    console.print("\n[warning]Automation is disabled until you explicitly grant consent.[/warning]")
+    console.print(
+        "Run [bold]nothx consent --all --yes[/bold] after reviewing the network and "
+        "mailbox-write permissions."
+    )
+
+    # Schedule setup. Daily scanning makes stored BLOCK policies effective on
+    # new deliveries and permits complete post-grace verification.
+    schedule_runs = _styled_confirm("Auto-schedule daily runs?", default=True)
 
     if schedule_runs:
-        success, msg = install_schedule("monthly")
+        success, msg = install_schedule("daily")
         if success:
             console.print(f"[success]✓ {msg}[/success]")
         else:
@@ -843,11 +1631,12 @@ def account_list():
     table.add_column("Name")
     table.add_column("Email")
     table.add_column("Provider")
+    table.add_column("Auth")
     table.add_column("Default")
 
     for name, acc in config.accounts.items():
         is_default = "✓" if name == config.default_account else ""
-        table.add_row(name, acc.email, acc.provider, is_default)
+        table.add_row(name, acc.email, acc.provider, acc.auth, is_default)
 
     console.print(table)
 
@@ -881,6 +1670,9 @@ def account_remove():
         console.print("Cancelled.")
         return
 
+    # Remove any stale OAuth cache entry as well (the account may previously
+    # have used OAuth even if its current config says password).
+    msauth.delete_token(acc.email)
     del config.accounts[account_name]
 
     # Update default if needed
@@ -899,13 +1691,32 @@ def account_remove():
 @click.option("--dry-run", is_flag=True, help="Show what would happen without taking action")
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed output")
 @click.option(
+    "--full-history",
+    is_flag=True,
+    help="Scan all available history instead of only incremental/new messages",
+)
+@click.option(
+    "--rescan",
+    is_flag=True,
+    help="Bypass incremental cursors and repeat the configured lookback",
+)
+@click.option(
     "--account",
     "-a",
     multiple=True,
     help="Scan specific account(s) - can be specified multiple times (default: all)",
 )
-def run(auto: bool, dry_run: bool, verbose: bool, account: tuple[str, ...]):
+def run(
+    auto: bool,
+    dry_run: bool,
+    verbose: bool,
+    full_history: bool,
+    rescan: bool,
+    account: tuple[str, ...],
+):
     """Scan inbox and process marketing emails."""
+    if full_history and rescan:
+        raise click.UsageError("--full-history and --rescan are mutually exclusive")
     config = Config.load()
 
     if not config.is_configured():
@@ -937,7 +1748,15 @@ def run(auto: bool, dry_run: bool, verbose: bool, account: tuple[str, ...]):
     if dry_run:
         console.print("[warning]DRY RUN - no changes will be made[/warning]\n")
 
-    _run_scan(config, verbose=verbose, dry_run=dry_run, auto=auto, account_names=accounts_to_scan)
+    _run_scan(
+        config,
+        verbose=verbose,
+        dry_run=dry_run,
+        auto=auto,
+        account_names=accounts_to_scan,
+        full_history=full_history,
+        rescan=rescan,
+    )
 
 
 def _run_scan(
@@ -946,6 +1765,8 @@ def _run_scan(
     dry_run: bool = False,
     auto: bool = False,
     account_names: list[str] | None = None,
+    full_history: bool = False,
+    rescan: bool = False,
 ):
     """Run the main scan and classification process."""
     stats = RunStats(
@@ -993,12 +1814,35 @@ def _run_scan(
             on_account_start=on_account_start,
             on_account_error=on_account_error,
             persist=not dry_run,
+            full_history=full_history,
+            rescan=rescan,
         )
-        sender_stats = scan_result.sender_stats
+        # The account/List-Id (or account/From) grouping is authoritative.
+        # A narrow fallback keeps third-party callers using a pre-v2 ScanResult
+        # working without merging real scanner results by domain.
+        subscription_stats = getattr(scan_result, "subscription_stats", None)
+        authoritative = isinstance(subscription_stats, dict)
+        sender_stats = subscription_stats if authoritative else scan_result.sender_stats
 
     if scan_errors:
         for err in scan_errors:
             console.print(f"[warning]! Skipped account: {err}[/warning]")
+
+    if not dry_run:
+        verification_accounts = (
+            {
+                config.accounts[name].email.casefold()
+                for name in account_names
+                if name in config.accounts
+            }
+            if account_names
+            else None
+        )
+        _reconcile_due_operations(
+            config,
+            allow_mailbox_actions=config.operation_mode != "confirm",
+            accounts=verification_accounts,
+        )
 
     if not sender_stats:
         console.print("[success]✓ No marketing emails found.[/success]")
@@ -1027,6 +1871,93 @@ def _run_scan(
         classifications = engine.classify_batch(list(sender_stats.values()), persist=not dry_run)
         progress.update(task, completed=len(sender_stats))
 
+    # Persist AI's content type and its recommended action as separate facts,
+    # even when authentication/safety policy transformed the executable action
+    # to REVIEW or BLOCK. This keeps later corrections grounded in what AI
+    # actually recommended rather than the final local disposition.
+    if authoritative and not dry_run:
+        for key, sender in sender_stats.items():
+            classification = classifications.get(sender.classification_key) or classifications.get(
+                key
+            )
+            if classification is None or not (
+                classification.source == "ai" or classification.original_source == "ai"
+            ):
+                continue
+            if not (sender.account_key and sender.identity_kind and sender.identity_value):
+                continue
+            subscription = db.get_subscription(
+                account=sender.account_key,
+                identity_kind=sender.identity_kind,
+                identity_value=sender.identity_value,
+            )
+            if subscription is not None:
+                db.update_subscription_classification(
+                    subscription["id"],
+                    ai_email_type=classification.email_type.value,
+                    ai_recommended_action=(
+                        classification.recommended_action or classification.action
+                    ).value,
+                    classification_source="ai",
+                    unwanted_confidence=classification.confidence,
+                )
+
+    # Durable account/list policy wins on future scans. This keeps accepted
+    # unsubscribe lifecycles from being reclassified away and makes BLOCK
+    # suppress every later matching Inbox delivery.
+    if authoritative:
+        for _key, sender in sender_stats.items():
+            if not (sender.account_key and sender.identity_kind and sender.identity_value):
+                continue
+            subscription = db.get_subscription(
+                account=sender.account_key,
+                identity_kind=sender.identity_kind,
+                identity_value=sender.identity_value,
+            )
+            policy = subscription.get("policy_action") if subscription else None
+            if policy in {"block", "keep", "unsub"}:
+                if policy == "keep" and (
+                    sender.provider_threat
+                    or sender.phishing_emails
+                    or sender.junk_emails
+                    or sender.junk_keyword_emails
+                ):
+                    continue
+                action = Action(policy)
+                classifications[sender.classification_key] = Classification(
+                    email_type=EmailType.UNKNOWN,
+                    action=action,
+                    confidence=1.0,
+                    reasoning=f"Stored subscription policy: {policy}",
+                    source="user_rule",
+                )
+
+            # Threat evidence is an unconditional local disposition. It must
+            # never be turned into unsubscribe traffic by an old domain rule.
+            if (
+                sender.provider_threat
+                or sender.phishing_emails
+                or (
+                    not sender.not_junk_emails
+                    and (sender.junk_emails or sender.junk_keyword_emails)
+                )
+            ):
+                classifications[sender.classification_key] = Classification(
+                    email_type=EmailType.COLD_OUTREACH,
+                    action=Action.BLOCK,
+                    confidence=1.0,
+                    reasoning="Provider junk/phishing evidence requires local suppression",
+                    source="provider_policy",
+                )
+            elif sender.authentication_failed_emails:
+                classifications[sender.classification_key] = Classification(
+                    email_type=EmailType.UNKNOWN,
+                    action=Action.BLOCK,
+                    confidence=1.0,
+                    reasoning="Trusted authentication failure requires local suppression",
+                    source="auth_policy",
+                )
+
     # Process results
     to_unsub = []
     to_keep = []
@@ -1034,9 +1965,22 @@ def _run_scan(
     to_block = []
 
     min_emails = config.thresholds.min_emails_before_action
+    deterministic_block_sources = {
+        "user_rule",
+        "provider_policy",
+        "auth_policy",
+        "method_policy",
+        "retry_policy",
+    }
 
-    for domain, classification in classifications.items():
-        sender = sender_stats[domain]
+    for key, sender in sender_stats.items():
+        classification = classifications.get(sender.classification_key)
+        if classification is None:
+            # Compatibility for classifiers that still return their input key.
+            classification = classifications.get(key)
+        if classification is None:
+            logger.warning("No classification returned for %s", sender.classification_key)
+            continue
 
         # Don't auto-act on senders we've barely seen — defer to review.
         # Explicit user rules/overrides (source="user_rule") always take
@@ -1044,25 +1988,32 @@ def _run_scan(
         if (
             classification.action in (Action.UNSUB, Action.BLOCK)
             and classification.source != "user_rule"
+            and not (
+                classification.action is Action.BLOCK
+                and (
+                    classification.source in deterministic_block_sources
+                    or classification.email_type is EmailType.COLD_OUTREACH
+                )
+            )
             and sender.total_emails < min_emails
         ):
             logger.debug(
                 "Deferring %s to review: only %d emails (< %d)",
-                domain,
+                sender.classification_key,
                 sender.total_emails,
                 min_emails,
             )
-            to_review.append((sender, classification))
+            to_review.append((key, sender, classification))
             continue
 
         if classification.action == Action.UNSUB:
-            to_unsub.append((sender, classification))
+            to_unsub.append((key, sender, classification))
         elif classification.action == Action.KEEP:
-            to_keep.append((sender, classification))
+            to_keep.append((key, sender, classification))
         elif classification.action == Action.BLOCK:
-            to_block.append((sender, classification))
+            to_block.append((key, sender, classification))
         else:
-            to_review.append((sender, classification))
+            to_review.append((key, sender, classification))
 
     # Summary as tree
     tree = Tree("[success]✓ Classification complete[/success]")
@@ -1083,7 +2034,7 @@ def _run_scan(
 
             # Review items marked for unsubscribe
             review_cancelled = False
-            for sender, classification in to_unsub[:]:  # Slice to allow modification
+            for key, sender, classification in to_unsub[:]:  # Slice to allow modification
                 action = questionary.select(
                     f"[{sender.total_emails} emails] {sender.domain}",
                     choices=[
@@ -1101,17 +2052,17 @@ def _run_scan(
                     break
 
                 if action == "keep":
-                    to_unsub.remove((sender, classification))
-                    to_keep.append((sender, classification))
+                    to_unsub.remove((key, sender, classification))
+                    to_keep.append((key, sender, classification))
                     console.print(f"{_L} [keep]→ Changed to keep[/keep]")
                 elif action == "skip":
-                    to_unsub.remove((sender, classification))
-                    to_review.append((sender, classification))
+                    to_unsub.remove((key, sender, classification))
+                    to_review.append((key, sender, classification))
                     console.print(f"{_L} [review]→ Moved to review[/review]")
 
             # Review items marked to keep (only if not cancelled)
             if not review_cancelled:
-                for sender, classification in to_keep[:]:  # Slice to allow modification
+                for key, sender, classification in to_keep[:]:  # Slice to allow modification
                     action = questionary.select(
                         f"[{sender.total_emails} emails] {sender.domain}",
                         choices=[
@@ -1128,12 +2079,12 @@ def _run_scan(
                         break
 
                     if action == "unsub":
-                        to_keep.remove((sender, classification))
-                        to_unsub.append((sender, classification))
+                        to_keep.remove((key, sender, classification))
+                        to_unsub.append((key, sender, classification))
                         console.print(f"{_L} [unsubscribe]→ Changed to unsubscribe[/unsubscribe]")
                     elif action == "skip":
-                        to_keep.remove((sender, classification))
-                        to_review.append((sender, classification))
+                        to_keep.remove((key, sender, classification))
+                        to_review.append((key, sender, classification))
                         console.print(f"{_L} [review]→ Moved to review[/review]")
 
             # Updated summary
@@ -1145,21 +2096,19 @@ def _run_scan(
             console.print()
             console.print(updated_tree)
 
-    # Phase 3: Execute unsubscribes (if not dry run).
-    # In confirm mode with --auto (e.g. a scheduled/non-interactive run) there
-    # is no one to answer a prompt, and --auto must never prompt. So confirm
-    # mode DECLINES auto-action rather than opening a prompt that can't be
-    # answered. Interactive runs (no --auto) still prompt as usual.
+    # Phase 3: execute two strictly separate paths. BLOCK is a mailbox action
+    # and must never fall through to the network unsubscribe executor.
     if not dry_run and (to_unsub or to_block):
         if config.operation_mode == "confirm" and auto:
             console.print(
-                "\n[warning]Confirm mode is on — skipping auto-unsubscribe. "
+                "\n[warning]Confirm mode is on — skipping network and mailbox actions. "
                 "Run without --auto to approve interactively.[/warning]"
             )
         elif auto or _styled_confirm(
-            f"Unsubscribe from {len(to_unsub) + len(to_block)} senders?", default=True
+            f"Apply {len(to_unsub)} unsubscribe and {len(to_block)} Junk/block actions?",
+            default=True,
         ):
-            console.print("\n[header]Step 3/3: Unsubscribing[/header]")
+            console.print("\n[header]Step 3/3: Applying approved actions[/header]")
 
             with Progress(
                 SpinnerColumn(style="#ffaf00"),
@@ -1173,53 +2122,226 @@ def _run_scan(
             ) as progress:
                 task = progress.add_task("Processing...", total=len(to_unsub) + len(to_block))
 
-                for sender, classification in to_unsub + to_block:
-                    # Get a sample email with unsubscribe header from cache
-                    email = scan_result.get_email_for_domain(sender.domain)
-
-                    # A block target with no unsubscribe method: mark it
-                    # blocked directly rather than burning a network attempt
-                    # that would only log a bogus failure.
-                    if email is None or not email.list_unsubscribe:
-                        if classification.action == Action.BLOCK:
-                            db.update_sender_status(sender.domain, SenderStatus.BLOCKED)
+                for key, sender, classification in to_block:
+                    headers = scan_result.get_emails_for_subscription(key) if authoritative else []
+                    if not headers:
+                        sample = scan_result.get_email_for_domain(sender.domain)
+                        headers = [sample] if sample else []
+                    if not headers:
+                        stats.failed += 1
                         progress.advance(task)
                         continue
-
-                    # Use the account the email came from (for correct mailto credentials)
-                    account = config.get_account(email.account_name)
-                    if account is None:
-                        logger.warning(
-                            "No account found for %s; mailto unsubscribe unavailable",
-                            sender.domain,
+                    if not config.permits_mailbox_mutation:
+                        if authoritative:
+                            _record_block_needs_consent(sender, headers, classification)
+                        console.print(
+                            f"[warning]Skipped block for {_subscription_label(sender)}: "
+                            "mailbox-action consent is missing. Run "
+                            "`nothx consent --mailbox-actions --yes`.[/warning]"
                         )
+                        stats.review_queued += 1
+                        progress.advance(task)
+                        continue
+                    moved, move_failed = _block_subscription(
+                        config, sender, headers, classification
+                    )
+                    if moved or not move_failed:
+                        db.update_sender_status(sender.domain, SenderStatus.BLOCKED)
+                    stats.failed += move_failed
+                    progress.advance(task)
+
+                for key, sender, classification in to_unsub:
+                    headers = scan_result.get_emails_for_subscription(key) if authoritative else []
+                    if not headers:
+                        sample = scan_result.get_email_for_domain(sender.domain)
+                        headers = [sample] if sample else []
+                    if not headers:
+                        stats.failed += 1
+                        progress.advance(task)
+                        continue
+                    if authoritative and not config.permits_automatic_unsubscribe:
+                        _record_unsubscribe_needs_consent(
+                            sender,
+                            headers,
+                            classification,
+                        )
+                        console.print(
+                            f"[warning]Skipped unsubscribe for {_subscription_label(sender)}: "
+                            "network automation consent is missing. Run "
+                            "`nothx consent --unsubscribe --yes`.[/warning]"
+                        )
+                        stats.review_queued += 1
+                        progress.advance(task)
+                        continue
+                    account_config = _matching_account(config, headers)
                     try:
-                        result = unsubscribe(email, config, account)
+                        if authoritative:
+                            subscription, messages = _persist_subscription_records(
+                                sender, headers, classification
+                            )
+                            db.set_subscription_policy(subscription["id"], "unsub")
+                            execute, exclusions, retry_generation, escalate = (
+                                _unsubscribe_operation_plan(subscription)
+                            )
+                            if escalate:
+                                if config.permits_mailbox_mutation:
+                                    moved, move_failed = _block_subscription(
+                                        config, sender, headers, classification
+                                    )
+                                    if moved or not move_failed:
+                                        db.update_sender_status(sender.domain, SenderStatus.BLOCKED)
+                                    stats.failed += move_failed
+                                else:
+                                    console.print(
+                                        f"[warning]{_subscription_label(sender)} is still "
+                                        "mailing after the allowed retry and needs Junk/block "
+                                        "consent.[/warning]"
+                                    )
+                                    stats.review_queued += 1
+                                progress.advance(task)
+                                continue
+                            if not execute:
+                                logger.info(
+                                    "Not repeating an accepted or in-grace request for %s",
+                                    sender.classification_key,
+                                )
+                                progress.advance(task)
+                                continue
+                            claim_owner = uuid.uuid4().hex
+                            claimed_operation, acquired = db.claim_unsubscribe_operation(
+                                subscription["id"],
+                                _operation_key("unsubscribe", sender, headers),
+                                claim_owner,
+                                trigger_message_ref_id=(messages[0][1]["id"] if messages else None),
+                                retry_generation=retry_generation,
+                            )
+                            if not acquired:
+                                if claimed_operation.get("outcome") == "needs_user":
+                                    stats.review_queued += 1
+                                logger.info(
+                                    "Unsubscribe source is already claimed or completed for %s",
+                                    sender.classification_key,
+                                )
+                                progress.advance(task)
+                                continue
+                            result = unsubscribe_subscription(
+                                headers,
+                                config,
+                                account_config,
+                                automatic=True,
+                                exclude_fingerprints=exclusions,
+                            )
+                            exhausted_retry = (
+                                retry_generation >= 1
+                                and result.attempts == 0
+                                and result.error
+                                in {
+                                    "No fresh unsubscribe endpoint is available",
+                                    "No safe unsubscribe method is available",
+                                }
+                            )
+                            if exhausted_retry:
+                                result.outcome = UnsubscribeOutcome.FAILED
+                                result.needs_confirmation = False
+                            _record_unsubscribe_result(
+                                sender,
+                                headers,
+                                classification,
+                                result,
+                                retry_generation=retry_generation,
+                                operation_id=claimed_operation["id"],
+                                claim_owner=claim_owner,
+                            )
+                            if exhausted_retry:
+                                block_classification = Classification(
+                                    email_type=EmailType.UNKNOWN,
+                                    action=Action.BLOCK,
+                                    confidence=1.0,
+                                    reasoning="No fresh endpoint remained after the allowed retry",
+                                    source="retry_policy",
+                                )
+                                if config.permits_mailbox_mutation:
+                                    moved, move_failed = _block_subscription(
+                                        config,
+                                        sender,
+                                        headers,
+                                        block_classification,
+                                    )
+                                    if moved or not move_failed:
+                                        db.update_sender_status(sender.domain, SenderStatus.BLOCKED)
+                                    stats.failed += move_failed
+                                else:
+                                    _record_block_needs_consent(
+                                        sender,
+                                        headers,
+                                        block_classification,
+                                    )
+                                    stats.review_queued += 1
+                                progress.advance(task)
+                                continue
+                        else:
+                            # Legacy ScanResult compatibility for callers that
+                            # have not yet adopted subscription grouping.
+                            result = unsubscribe(headers[0], config, account_config)
                     except UnsafeUnsubscribeError:
-                        logger.info("Skipped protected domain: %s", sender.domain)
+                        logger.info("Protected subscription needs review: %s", sender.domain)
+                        stats.review_queued += 1
                         progress.advance(task)
                         continue
                     if result.success:
                         stats.auto_unsubbed += 1
+                    elif result.needs_confirmation:
+                        stats.review_queued += 1
                     else:
                         stats.failed += 1
                     progress.advance(task)
 
-            console.print(f"\n[success]✓ Unsubscribed from {stats.auto_unsubbed} senders[/success]")
+            console.print(
+                f"\n[success]✓ {stats.auto_unsubbed} unsubscribe request(s) accepted[/success]"
+            )
             if stats.failed:
-                console.print(f"[warning]! {stats.failed} failed (logged for retry)[/warning]")
-
-            # Undo reminder
-            console.print("\n[muted]⏱  Run `nothx undo` to restore if needed[/muted]")
+                console.print(f"[warning]! {stats.failed} action(s) failed[/warning]")
+            if to_block:
+                console.print(
+                    "[muted]Portable IMAP Junk movement is best-effort; provider spam "
+                    "training is not guaranteed.[/muted]"
+                )
+            console.print(
+                "\n[muted]`nothx undo` changes future local policy; it cannot resubscribe "
+                "you with an external sender.[/muted]"
+            )
 
     # Update stats
     stats.kept = len(to_keep)
-    stats.review_queued = len(to_review)
+    stats.review_queued += len(to_review)
+
+    # REVIEW is authoritative per account/list. Without this row, the legacy
+    # domain queue can merge independent lists and hide one behind another's
+    # KEEP decision.
+    if not dry_run and authoritative:
+        for key, sender, classification in to_review:
+            headers = scan_result.get_emails_for_subscription(key)
+            if headers:
+                _persist_subscription_records(
+                    sender,
+                    headers,
+                    classification,
+                    policy_action="review",
+                )
 
     # Mark keep senders (dry-run must not mutate the database)
     if not dry_run:
-        for sender, _ in to_keep:
+        for key, sender, classification in to_keep:
             db.update_sender_status(sender.domain, SenderStatus.KEEP)
+            if authoritative:
+                headers = scan_result.get_emails_for_subscription(key)
+                if headers:
+                    _persist_subscription_records(
+                        sender,
+                        headers,
+                        classification,
+                        policy_action="keep",
+                    )
 
     # Log run
     if not dry_run:
@@ -1236,12 +2358,14 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
     if to_unsub:
         console.print("\n[bold red]To Unsubscribe:[/bold red]")
         table = Table(show_header=True)
+        table.add_column("Account / List identity")
         table.add_column("Domain")
         table.add_column("Emails")
         table.add_column("Open Rate")
         table.add_column("Reason")
-        for sender, classification in to_unsub[:10]:
+        for _key, sender, classification in to_unsub[:10]:
             table.add_row(
+                _subscription_label(sender),
                 sender.domain,
                 str(sender.total_emails),
                 f"{sender.open_rate:.0f}%",
@@ -1252,15 +2376,33 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
     if to_keep:
         console.print("\n[bold green]To Keep:[/bold green]")
         table = Table(show_header=True)
+        table.add_column("Account / List identity")
         table.add_column("Domain")
         table.add_column("Emails")
         table.add_column("Open Rate")
         table.add_column("Reason")
-        for sender, classification in to_keep[:10]:
+        for _key, sender, classification in to_keep[:10]:
             table.add_row(
+                _subscription_label(sender),
                 sender.domain,
                 str(sender.total_emails),
                 f"{sender.open_rate:.0f}%",
+                classification.reasoning[:50],
+            )
+        console.print(table)
+
+    if to_block:
+        console.print("\n[bold red]To Block / Move to Junk:[/bold red]")
+        table = Table(show_header=True)
+        table.add_column("Account / List identity")
+        table.add_column("Domain")
+        table.add_column("Inbox")
+        table.add_column("Reason")
+        for _key, sender, classification in to_block[:10]:
+            table.add_row(
+                _subscription_label(sender),
+                sender.domain,
+                str(sender.inbox_emails),
                 classification.reasoning[:50],
             )
         console.print(table)
@@ -1330,6 +2472,56 @@ def status(learning: bool):
     console.print(f"{_L} Pending review: [count]{stats['pending_review']}[/count]")
     console.print(f"{_L} Total runs: [count]{stats['total_runs']}[/count]")
 
+    grouped = db.get_grouped_metrics()
+    outcomes = grouped["operations"]
+    active_manual = [
+        subscription
+        for subscription in db.list_subscriptions(outcome="needs_user", limit=10_000)
+        if subscription.get("policy_action") != "keep"
+    ]
+    if any(outcomes.values()) or active_manual:
+        console.print("\n[header]Subscription operations[/header]")
+        console.print(
+            f"{_L} Requested: [count]{outcomes['requested']}[/count] · "
+            f"Verified quiet: [count]{outcomes['verified_quiet']}[/count] · "
+            f"Ineffective: [count]{outcomes['ineffective']}[/count]"
+        )
+        console.print(
+            f"{_L} Blocked: [count]{outcomes['blocked']}[/count] · "
+            f"Needs user: [count]{outcomes['needs_user']}[/count] · "
+            f"Failed: [count]{outcomes['failed']}[/count]"
+        )
+        console.print(f"{_L} Manual-action queue: [count]{len(active_manual)}[/count]")
+        console.print(
+            f"{_L} [muted]Requested means the endpoint accepted delivery; it does not "
+            "guarantee mail has stopped. verified_quiet requires a complete post-grace "
+            "scan.[/muted]"
+        )
+
+        recent_subscriptions = db.list_subscriptions(limit=10)
+        if recent_subscriptions:
+            table = Table(show_header=True)
+            table.add_column("ID")
+            table.add_column("Account")
+            table.add_column("List identity")
+            table.add_column("Policy")
+            table.add_column("Outcome")
+            for subscription in recent_subscriptions:
+                table.add_row(
+                    str(subscription["id"]),
+                    subscription["account"],
+                    f"{subscription['identity_kind']}:{subscription['identity_value']}",
+                    subscription.get("policy_action") or "—",
+                    subscription.get("last_outcome") or "—",
+                )
+            console.print(table)
+            if active_manual:
+                console.print(
+                    f"{_L} [muted]For a needs_user row, run "
+                    "`nothx open-unsubscribe <ID>` to rescan and explicitly open "
+                    "a page.[/muted]"
+                )
+
     # Senders still mailing after a "successful" unsubscribe (Gmail/Yahoo allow
     # ~48h; anything past the grace window is a candidate to escalate to block).
     offenders = db.get_post_unsub_offenders()
@@ -1358,9 +2550,15 @@ def status(learning: bool):
         console.print("\n[header]Schedule[/header]")
         console.print(f"{_L} Type: {schedule['type']}")
         console.print(f"{_L} Frequency: {schedule['frequency']}")
+        if schedule["frequency"] != "daily":
+            console.print(
+                f"{_L} [warning]Daily scans are recommended so BLOCK policies and "
+                "48-hour verification run promptly. Upgrade with "
+                "`nothx schedule --daily`.[/warning]"
+            )
     else:
         console.print("\n[warning]No automatic schedule configured[/warning]")
-        console.print("Run [bold]nothx schedule --monthly[/bold] to set up")
+        console.print("Run [bold]nothx schedule --daily[/bold] to set up")
 
     console.print()
 
@@ -1383,6 +2581,83 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
 
     db.init_db()
 
+    manual_subscriptions: list[dict[str, Any]] = []
+    handled_manual_domains: set[str] = set()
+    if not show_keep and not show_unsub:
+        by_id: dict[int, dict[str, Any]] = {}
+        for subscription in (
+            *db.list_subscriptions(outcome="needs_user", limit=500),
+            *db.list_subscriptions(policy_action="review", limit=500),
+        ):
+            if subscription.get("policy_action") != "keep":
+                by_id[subscription["id"]] = subscription
+        manual_subscriptions = list(by_id.values())
+
+    if manual_subscriptions:
+        console.print(
+            f"\n[header]{len(manual_subscriptions)} subscription(s) need manual action[/header]"
+        )
+        table = Table(show_header=True)
+        table.add_column("ID")
+        table.add_column("Account")
+        table.add_column("List identity")
+        table.add_column("Outcome")
+        for subscription in manual_subscriptions:
+            table.add_row(
+                str(subscription["id"]),
+                subscription["account"],
+                f"{subscription['identity_kind']}:{subscription['identity_value']}",
+                subscription.get("last_outcome") or "review",
+            )
+        console.print(table)
+
+        for subscription in manual_subscriptions:
+            identity = f"{subscription['identity_kind']}:{subscription['identity_value']}"
+            choices = []
+            if (
+                subscription.get("policy_action") != "block"
+                and subscription.get("last_outcome") != "blocked"
+                and not _subscription_has_persisted_threat(subscription["id"])
+            ):
+                choices.append(
+                    questionary.Choice("Rescan and open an unsubscribe page", value="open")
+                )
+            choices.extend(
+                [
+                    questionary.Choice("Keep future mail", value="keep"),
+                    questionary.Choice("Block future mail / move to Junk", value="block"),
+                    questionary.Choice("Skip", value="skip"),
+                ]
+            )
+            choice = questionary.select(
+                f"{subscription['account']} · {identity}",
+                choices=choices,
+                **Q_COMMON,
+            ).ask()
+            if choice is None:
+                break
+            if choice == "open":
+                click.get_current_context().invoke(
+                    open_unsubscribe,
+                    subscription_id=subscription["id"],
+                    yes=False,
+                )
+            elif choice == "block":
+                moved, failed = _apply_manual_subscription_block(config, subscription)
+                _learn_subscription_policy(subscription, choice)
+                if domain := subscription.get("sender_domain"):
+                    handled_manual_domains.add(domain.casefold())
+                if not config.permits_mailbox_mutation:
+                    console.print(f"{_L} Future BLOCK stored; Junk movement needs consent")
+                else:
+                    console.print(f"{_L} Blocked: {moved} moved, {failed} partial/failed")
+            elif choice == "keep":
+                db.set_subscription_policy(subscription["id"], choice)
+                _learn_subscription_policy(subscription, choice)
+                if domain := subscription.get("sender_domain"):
+                    handled_manual_domains.add(domain.casefold())
+                console.print(f"{_L} Future policy set to {choice}")
+
     # Determine which senders to show
     if show_keep:
         senders = db.get_senders_by_status(SenderStatus.KEEP)
@@ -1398,8 +2673,17 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         senders = db.get_senders_for_review()
         filter_label = "needing review"
 
-    if not senders:
+    # A manual account/list decision may create/update its compatibility
+    # sender row for learning. Do not immediately ask for (and execute) the
+    # same domain-level decision a second time in this review invocation.
+    senders = [
+        sender for sender in senders if sender["domain"].casefold() not in handled_manual_domains
+    ]
+
+    if not senders and not manual_subscriptions:
         console.print(f"[success]No senders {filter_label}![/success]")
+        return
+    if not senders:
         return
 
     _select_header(f"{len(senders)} senders {filter_label}")
@@ -1443,10 +2727,130 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
         console.print()
 
 
+@main.command("open-unsubscribe")
+@click.argument("subscription_id", type=int)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Open the first rescanned HTTPS destination without another prompt",
+)
+def open_unsubscribe(subscription_id: int, yes: bool):
+    """Rescan and explicitly open a manual unsubscribe page in your browser.
+
+    The raw URL exists only in memory and is passed directly to the browser.
+    Terminal output and database history show only a hashed host and redacted path.
+    """
+    config = Config.load()
+    db.init_db()
+    subscription = db.get_subscription(subscription_id)
+    if subscription is None:
+        console.print("[error]Subscription not found.[/error]")
+        return
+    if (
+        subscription.get("policy_action") == "block"
+        or subscription.get("last_outcome") == "blocked"
+        or _subscription_has_persisted_threat(subscription_id)
+    ):
+        console.print(
+            "[warning]This subscription is blocked or has Junk/phishing evidence; "
+            "nothx will not contact its unsubscribe destination.[/warning]"
+        )
+        return
+
+    account_entry = next(
+        (
+            (name, account)
+            for name, account in config.accounts.items()
+            if account.email.casefold() == subscription["account"].casefold()
+        ),
+        None,
+    )
+    if account_entry is None:
+        console.print("[error]The matching configured account is unavailable.[/error]")
+        return
+    account_name, _account = account_entry
+    try:
+        scanned = scan_inbox(
+            config,
+            account_names=[account_name],
+            persist=False,
+            rescan=True,
+        )
+    except (IMAPError, OSError) as error:
+        console.print(f"[error]Mailbox rescan failed: {_redact_failure_detail(str(error))}[/error]")
+        return
+
+    candidates: list[str] = []
+    for key, sender in scanned.subscription_stats.items():
+        if not (
+            sender.account_key == subscription["account"]
+            and sender.identity_kind == subscription["identity_kind"]
+            and sender.identity_value == subscription["identity_value"]
+        ):
+            continue
+        matching_headers = scanned.get_emails_for_subscription(key)
+        if any(header.server_junk or header.server_phishing for header in matching_headers):
+            console.print(
+                "[warning]The rescan found Junk/phishing evidence; no destination was opened.[/warning]"
+            )
+            return
+        for header in sorted(
+            matching_headers,
+            key=lambda item: item.received_at or item.date,
+            reverse=True,
+        ):
+            for target in header.list_unsubscribe_targets:
+                if target.casefold().startswith("https://") and target not in candidates:
+                    candidates.append(target)
+            for footer in header.footer_unsubscribe_candidates:
+                if footer.uri.casefold().startswith("https://") and footer.uri not in candidates:
+                    candidates.append(footer.uri)
+            if len(candidates) >= 5:
+                break
+        break
+
+    candidates = candidates[:5]
+    if not candidates:
+        console.print(
+            "[warning]No HTTPS unsubscribe page was found in the bounded rescan.[/warning]"
+        )
+        return
+
+    target = candidates[0]
+    if not yes:
+        choices = [
+            questionary.Choice(_redacted_destination(candidate), value=candidate)
+            for candidate in candidates
+        ]
+        choices.append(questionary.Choice("Cancel", value=None))
+        _select_header("Choose a rescanned destination to open")
+        selected = _styled_select(choices)
+        if selected is None:
+            console.print("Cancelled.")
+            return
+        target = selected
+        if not _styled_confirm(
+            f"Open {_redacted_destination(target)} in your browser?", default=False
+        ):
+            console.print("Cancelled.")
+            return
+
+    console.print(f"Opening [bold]{_redacted_destination(target)}[/bold]")
+    try:
+        opened = webbrowser.open(target)
+    except Exception as error:
+        logger.debug("Could not open manual unsubscribe browser: %s", type(error).__name__)
+        opened = False
+    if not opened:
+        console.print(
+            "[warning]The browser could not be opened automatically. No URL was logged.[/warning]"
+        )
+
+
 @main.command()
 @click.argument("domain", required=False)
 def undo(domain: str | None):
-    """Undo recent unsubscribes."""
+    """Change future local policy; this cannot externally resubscribe you."""
     db.init_db()
 
     if domain:
@@ -1454,6 +2858,10 @@ def undo(domain: str | None):
         db.set_user_override(domain, "keep")
         db.update_sender_status(domain, SenderStatus.KEEP)
         db.log_correction(domain, "unsub", "keep")
+        authoritative_updates = 0
+        for subscription in db.list_subscriptions(limit=10_000):
+            if (subscription.get("sender_domain") or "").casefold() == domain.casefold():
+                authoritative_updates += int(db.set_subscription_policy(subscription["id"], "keep"))
 
         # Get sender info for learning
         sender = db.get_sender(domain)
@@ -1479,7 +2887,15 @@ def undo(domain: str | None):
             learner.update_from_action(action_record)
 
         console.print(f"[success]✓ Marked {domain} as 'keep'[/success]")
-        console.print("[muted]Learning from this correction.[/muted]")
+        console.print(
+            "[muted]Learning from this correction. Any external unsubscribe request "
+            "already sent cannot be undone here.[/muted]"
+        )
+        if authoritative_updates:
+            console.print(
+                f"[muted]Updated future policy for {authoritative_updates} account/list "
+                "subscription(s).[/muted]"
+            )
         return
 
     # Show recent unsubscribes
@@ -1502,17 +2918,26 @@ def undo(domain: str | None):
 @main.command()
 @click.option("--monthly", is_flag=True, help="Schedule monthly runs")
 @click.option("--weekly", is_flag=True, help="Schedule weekly runs")
+@click.option("--daily", is_flag=True, help="Schedule daily runs (recommended)")
 @click.option("--off", is_flag=True, help="Disable scheduled runs")
 @click.option("--status", "show_status", is_flag=True, help="Show current schedule")
-def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
+def schedule(monthly: bool, weekly: bool, daily: bool, off: bool, show_status: bool):
     """Manage automatic scheduling."""
-    if show_status or (not monthly and not weekly and not off):
+    selected = sum((monthly, weekly, daily, off))
+    if selected > 1:
+        raise click.UsageError("Choose only one schedule frequency or --off")
+    if show_status or (not monthly and not weekly and not daily and not off):
         status = get_schedule_status()
         if status:
             console.print("\n[header]Current Schedule[/header]")
             console.print(f"{_L} Type: {status['type']}")
             console.print(f"{_L} Frequency: {status['frequency']}")
             console.print(f"{_L} Path: {status['path']}")
+            if status["frequency"] != "daily":
+                console.print(
+                    f"{_L} [warning]Daily is recommended for prompt spam suppression and "
+                    "unsubscribe verification.[/warning]"
+                )
         else:
             console.print("[warning]No schedule configured[/warning]")
         return
@@ -1525,7 +2950,7 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
             console.print(f"[red]{msg}[/red]")
         return
 
-    frequency = "monthly" if monthly else "weekly"
+    frequency = "monthly" if monthly else "weekly" if weekly else "daily"
     success, msg = install_schedule(frequency)
 
     if success:
@@ -1538,9 +2963,14 @@ def schedule(monthly: bool, weekly: bool, off: bool, show_status: bool):
 @click.option("--show", is_flag=True, help="Show current config")
 @click.option("--ai", type=click.Choice(["on", "off"]), help="Enable/disable AI")
 @click.option(
+    "--footer-scan",
+    type=click.Choice(["on", "off"]),
+    help="Enable/disable bounded local footer fallback scanning",
+)
+@click.option(
     "--mode", type=click.Choice(["hands_off", "notify", "confirm"]), help="Set operation mode"
 )
-def config_cmd(show: bool, ai: str | None, mode: str | None):
+def config_cmd(show: bool, ai: str | None, footer_scan: str | None, mode: str | None):
     """View or modify configuration."""
     config = Config.load()
 
@@ -1554,15 +2984,107 @@ def config_cmd(show: bool, ai: str | None, mode: str | None):
         config.save()
         console.print(f"Mode: {mode}")
 
-    if show or (not ai and not mode):
+    if footer_scan:
+        config.footer_scan_enabled = footer_scan == "on"
+        config.save()
+        state = "enabled" if config.footer_scan_enabled else "disabled"
+        console.print(f"Footer scan: {state} (local-only, bounded, and never sent to AI)")
+
+    if show or (not ai and not mode and not footer_scan):
         console.print("\n[header]Current Configuration[/header]")
         console.print(f"{_L} Config dir: {get_config_dir()}")
         console.print(f"{_L} AI enabled: {config.ai.enabled}")
         console.print(f"{_L} AI provider: {config.ai.provider}")
         console.print(f"{_L} Operation mode: {config.operation_mode}")
         console.print(f"{_L} Scan days: {config.scan_days}")
+        console.print(f"{_L} Scan Junk: {config.scan_junk}")
+        console.print(f"{_L} Footer scan: {config.footer_scan_enabled}")
+        console.print(f"{_L} Automatic unsubscribe consent: {config.permits_automatic_unsubscribe}")
+        console.print(f"{_L} Mailbox mutation consent: {config.permits_mailbox_mutation}")
         console.print(f"{_L} Unsub confidence: {config.thresholds.unsub_confidence}")
         console.print(f"{_L} Keep confidence: {config.thresholds.keep_confidence}")
+
+
+@main.command()
+@click.option(
+    "--unsubscribe/--no-unsubscribe",
+    default=None,
+    help="Grant/revoke automatic HTTPS or SMTP unsubscribe requests",
+)
+@click.option(
+    "--mailbox-actions/--no-mailbox-actions",
+    default=None,
+    help="Grant/revoke IMAP flag and move-to-Junk writes",
+)
+@click.option("--all", "grant_all", is_flag=True, help="Grant both current permissions")
+@click.option("--revoke-all", is_flag=True, help="Revoke both permissions")
+@click.option("--yes", is_flag=True, help="Confirm the requested consent change non-interactively")
+def consent(
+    unsubscribe: bool | None,
+    mailbox_actions: bool | None,
+    grant_all: bool,
+    revoke_all: bool,
+    yes: bool,
+):
+    """View or explicitly change versioned automation consent.
+
+    Unsubscribe consent permits outbound HTTPS/SMTP requests to authenticated
+    subscription endpoints. Mailbox-action consent permits IMAP flag changes
+    and moving exact UIDs to the server-advertised Junk mailbox.
+    """
+    config = Config.load()
+    if grant_all and revoke_all:
+        raise click.UsageError("--all and --revoke-all cannot be combined")
+    if grant_all:
+        unsubscribe = True
+        mailbox_actions = True
+    if revoke_all:
+        unsubscribe = False
+        mailbox_actions = False
+
+    if unsubscribe is None and mailbox_actions is None:
+        console.print("\n[header]Automation Consent[/header]")
+        console.print(
+            f"{_L} Outbound unsubscribe requests: "
+            f"{'granted' if config.permits_automatic_unsubscribe else 'not granted'}"
+        )
+        console.print(
+            f"{_L} IMAP flag/Junk mailbox writes: "
+            f"{'granted' if config.permits_mailbox_mutation else 'not granted'}"
+        )
+        console.print(
+            "\n[muted]Grant explicitly with `nothx consent --all --yes`; "
+            "revoke with `nothx consent --revoke-all --yes`.[/muted]"
+        )
+        return
+
+    changes: list[str] = []
+    if unsubscribe is not None:
+        changes.append(
+            "allow outbound HTTPS/SMTP unsubscribe requests"
+            if unsubscribe
+            else "revoke outbound unsubscribe permission"
+        )
+    if mailbox_actions is not None:
+        changes.append(
+            "allow IMAP flag changes and exact-UID moves to Junk"
+            if mailbox_actions
+            else "revoke IMAP mailbox-write permission"
+        )
+    if not yes and not click.confirm("Confirm: " + "; ".join(changes) + "?", default=False):
+        console.print("Cancelled.")
+        return
+
+    if unsubscribe is not None:
+        config.unsubscribe_consent_version = (
+            CURRENT_UNSUBSCRIBE_CONSENT_VERSION if unsubscribe else 0
+        )
+    if mailbox_actions is not None:
+        config.mailbox_mutation_consent_version = (
+            CURRENT_MAILBOX_MUTATION_CONSENT_VERSION if mailbox_actions else 0
+        )
+    config.save()
+    console.print("[success]✓ Automation consent updated[/success]")
 
 
 @main.command()
@@ -1886,18 +3408,50 @@ def history(limit: int, failures: bool, as_json: bool):
     """Show recent activity log."""
     db.init_db()
 
-    activity = db.get_activity_log(limit=limit, failures_only=failures)
+    activity = [
+        {
+            **entry,
+            "error": _redact_failure_detail(entry.get("error")),
+        }
+        for entry in db.get_activity_log(limit=limit, failures_only=failures)
+    ]
+    operations = db.list_unsubscribe_operations(
+        outcome="failed" if failures else None,
+        limit=limit,
+    )
 
-    if not activity:
+    if not activity and not operations:
         console.print("[muted]No activity recorded yet.[/muted]")
         return
 
     if as_json:
-        click.echo(json.dumps(activity, indent=2, default=str))
+        # Both sources contain redacted destinations/details only. Preserve
+        # the historical list-shaped JSON interface while tagging new rows.
+        operation_rows = [
+            {"type": "subscription_operation", **operation} for operation in operations
+        ]
+        click.echo(json.dumps([*operation_rows, *activity], indent=2, default=str))
         return
 
     label = " (failures only)" if failures else ""
     console.print(f"\n[header]Recent Activity{label}[/header]\n")
+
+    for operation in operations:
+        timestamp = operation.get("completed_at") or operation.get("created_at") or ""
+        try:
+            date_str = datetime.fromisoformat(timestamp).strftime("%b %d, %I:%M %p")
+        except (ValueError, TypeError):
+            date_str = timestamp
+        identity = f"{operation['identity_kind']}:{operation['identity_value']}"
+        outcome = operation.get("outcome") or "in progress"
+        detail = _redact_failure_detail(operation.get("detail_redacted"))
+        line = (
+            f"[muted]{date_str}[/muted]  {operation['account']} · {identity} "
+            f"→ [bold]{outcome}[/bold]"
+        )
+        if detail:
+            line += f" [muted]({detail})[/muted]"
+        console.print(line)
 
     for entry in activity:
         timestamp = entry.get("timestamp", "")
@@ -1924,7 +3478,7 @@ def history(limit: int, failures: bool, as_json: bool):
                     f"[muted]{date_str}[/muted]  [success]✓[/success] Unsubscribed from [domain]{domain}[/domain]"
                 )
             else:
-                error = entry.get("error", "unknown error")
+                error = entry.get("error") or "unknown error"
                 console.print(
                     f"[muted]{date_str}[/muted]  [error]✗[/error] Failed to unsubscribe from [domain]{domain}[/domain] ({error[:30]})"
                 )
@@ -1956,7 +3510,26 @@ def export(type_: str, output: str):
             "sample_subjects",
         ]
     else:
-        data = db.get_activity_log(limit=1000)
+        legacy_data = [
+            {
+                **entry,
+                "error": _redact_failure_detail(entry.get("error")),
+            }
+            for entry in db.get_activity_log(limit=1000)
+        ]
+        operation_data = [
+            {
+                "type": "subscription_operation",
+                "timestamp": operation.get("completed_at") or operation.get("created_at"),
+                "account": operation.get("account"),
+                "identity_kind": operation.get("identity_kind"),
+                "identity_value": operation.get("identity_value"),
+                "outcome": operation.get("outcome"),
+                "error": _redact_failure_detail(operation.get("detail_redacted")),
+            }
+            for operation in db.list_unsubscribe_operations(limit=1000)
+        ]
+        data = [*operation_data, *legacy_data]
         if not data:
             console.print("[warning]No history to export.[/warning]")
             return
@@ -1967,6 +3540,10 @@ def export(type_: str, output: str):
             "success",
             "method",
             "error",
+            "account",
+            "identity_kind",
+            "identity_value",
+            "outcome",
             "emails_scanned",
             "unique_senders",
             "auto_unsubbed",
@@ -1996,6 +3573,23 @@ def test_connection():
     for _name, account in config.accounts.items():
         console.print(f"\n[header]Testing connection to {account.email}...[/header]")
 
+        if account.provider == "outlook" and not account.uses_oauth:
+            console.print(
+                "[warning]This Outlook account uses legacy password authentication. "
+                "Microsoft OAuth is recommended; remove and re-add the account to authorize "
+                "IMAP and SMTP safely.[/warning]"
+            )
+        elif account.uses_oauth and account.client_id:
+            consent_status = msauth.get_consent_status(account.email, account.client_id)
+            if not consent_status.ready:
+                missing = ", ".join(consent_status.missing_scopes)
+                detail = f" Missing scopes: {missing}." if missing else ""
+                console.print(
+                    f"[warning]Microsoft re-consent is required ({consent_status.reason})."
+                    f"{detail} Remove and re-add this account to authorize IMAP, SMTP, "
+                    "and offline access.[/warning]"
+                )
+
         with console.status("Connecting...", spinner_style="#ffaf00"):
             success, msg = test_account(account)
 
@@ -2011,6 +3605,11 @@ def test_connection():
                 for tip in tips:
                     console.print(f"{_L}{tip[1:]}" if tip.startswith("  ") else tip)
             console.print(f"{_L} • Make sure IMAP is enabled in your email settings")
+
+
+# This exported Click command is imported by CLI tests; prevent pytest from
+# mistaking the command object for a test function solely because of its name.
+test_connection.__dict__["__test__"] = False
 
 
 @main.command()
@@ -2049,6 +3648,7 @@ def reset(keep_config: bool):
         if config_path.exists():
             config_path.unlink()
             console.print("[success]✓ Configuration file deleted[/success]")
+        msauth.clear_token_cache()
 
     console.print(
         f"[success]✓ Cleared {senders_deleted} senders and {unsubs_deleted} unsubscribe logs[/success]"

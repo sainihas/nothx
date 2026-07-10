@@ -10,9 +10,9 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
 ![Status: Beta](https://img.shields.io/badge/status-beta-yellow.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
-![Privacy](https://img.shields.io/badge/privacy-100%25%20local-success.svg)
+![Privacy](https://img.shields.io/badge/privacy-local%20mailbox%20processing-success.svg)
 
-nothx (no thanks) hunts down marketing emails, uses AI to sort the noise from the signal, and actually clicks unsubscribe for you. It runs on your machine, learns your preferences, and never touches your data.
+nothx (no thanks) separates legitimate subscriptions from spam and phishing, then takes the safe action: unsubscribe from authenticated lists or suppress dangerous mail in Junk without contacting its sender. Mailbox access and body inspection stay on your machine. If you enable a cloud AI provider, only a bounded summary of locally selected marketing/spam headers is sent for preference classification—never message bodies or unrelated personal mail.
 
 Your inbox, uncrowded.
 
@@ -37,12 +37,12 @@ That's it. The wizard handles everything else.
 
 | The Problem | How nothx fixes it |
 |-------------|-------------------|
-| Unroll.me sells your data | 100% local — your data never leaves home |
-| Most tools just filter emails | Actually clicks unsubscribe links |
+| Mailbox-cleanup services require inbox access | IMAP scanning and state remain on your machine |
+| Most tools treat all unwanted mail alike | Safe subscriptions are unsubscribed; spam/phishing is never contacted |
 | Manual unsubscribing is tedious | AI classifies hundreds of senders in seconds |
 | One-size-fits-all rules | **Learns your preferences** over time |
 | Yet another app to run | Uses native OS scheduling (launchd/systemd) |
-| What if AI gets it wrong? | Undo anything — and it learns from the correction |
+| What if AI gets it wrong? | Correct future local policy and teach the classifier |
 
 ---
 
@@ -50,18 +50,19 @@ That's it. The wizard handles everything else.
 
 ### Core
 - **AI-Powered** — Claude, GPT, Gemini, or local models via Ollama
-- **Actually Unsubscribes** — RFC 8058 one-click, GET requests, or mailto
-- **Privacy First** — Never reads email bodies. Only headers. All data stays local.
+- **Authenticated Unsubscribe** — strict RFC 8058 one-click, vetted HTTPS GET, or constrained mailto
+- **Real Spam Suppression** — consumes provider Junk/phishing verdicts and safely moves exact IMAP UIDs to the discovered Junk mailbox
+- **Privacy First** — header-only by default; the optional footer scanner is local, bounded, and never sends footer content to AI
 
 ### Smart
 - **Learns From You** — Gets smarter every time you disagree with a decision
 - **5-Layer Classification** — Rules → Patterns → AI → Heuristics → Manual review
-- **Protected Categories** — Banks, government, healthcare never auto-unsubscribed
+- **Guarded Automation** — unknown authentication, conflicting verdicts, and protected identities go to review
 
 ### Practical
 - **Multi-Account** — Scan Gmail + Outlook simultaneously
 - **Native Scheduling** — No daemon needed. Uses launchd (macOS) or systemd (Linux).
-- **Undo Anything** — Changed your mind? `nothx undo domain.com`
+- **Future Policy Corrections** — `nothx undo domain.com` changes nothx's future decision; it cannot externally resubscribe you
 
 ### Beautiful
 - **Rich CLI** — Animated banner, progress bars, colored output
@@ -89,30 +90,30 @@ nothx status --learning   # See your learned preferences
 ## How It Works
 
 ```
-Email arrives
+Email arrives in Inbox or Junk
       ↓
 ┌─────────────────┐
-│  USER RULES     │  Your explicit keep/unsub patterns
+│ PROVIDER POLICY │  Junk, phishing, authentication, mailbox flags
 └────────┬────────┘
          ↓
 ┌─────────────────┐
-│  PATTERNS       │  Known marketing domains, safe categories
+│  USER RULES     │  Your exact keep, unsubscribe, and block choices
 └────────┬────────┘
          ↓
 ┌─────────────────┐
-│  AI ANALYSIS    │  AI examines headers (never bodies)
+│ LOCAL CANDIDATE │  List/bulk, engagement, and cold-outreach evidence
 └────────┬────────┘
          ↓
 ┌─────────────────┐
-│  HEURISTICS     │  Open rates, frequency, spam patterns
+│ AI / HEURISTICS │  Preference classification for selected candidates
 └────────┬────────┘
          ↓
 ┌─────────────────┐
-│  REVIEW QUEUE   │  Uncertain? You decide.
+│ SAFE DISPOSITION│  Keep, review, unsubscribe, or move to Junk
 └─────────────────┘
 ```
 
-Each layer can make a final call or pass to the next. Your rules always win.
+Provider threat evidence and explicit block rules are resolved before AI. Bulk mail is not automatically spam, and an unsubscribe link is not automatically safe.
 
 ---
 
@@ -134,19 +135,22 @@ Each layer can make a final call or pass to the next. Your rules always win.
 |---------|--------------|
 | `nothx senders` | List all tracked senders |
 | `nothx search <pattern>` | Find a specific sender |
-| `nothx undo [domain]` | Undo an unsubscribe |
-| `nothx history` | View activity log |
+| `nothx undo [domain]` | Change future local policy (does not resubscribe) |
+| `nothx history` | View grouped, redacted operation history |
 | `nothx export` | Export data to CSV |
 
 ### Configuration
 
 | Command | What it does |
 |---------|--------------|
-| `nothx rule "pattern" keep/unsub` | Add a classification rule |
+| `nothx rule "pattern" keep/unsub/block` | Add a classification rule |
 | `nothx rules` | List all classification rules |
-| `nothx schedule --monthly` | Set automatic run frequency |
+| `nothx schedule --daily` | Set the recommended automatic run frequency |
 | `nothx account add/remove` | Manage email accounts |
 | `nothx config --show` | View current config |
+| `nothx consent` | Explicitly grant or revoke versioned network/mailbox automation consent |
+| `nothx run --full-history` | Explicitly scan all UIDs instead of the incremental cursor |
+| `nothx run --rescan` | Repeat the configured lookback without rewinding the cursor |
 | `nothx update` | Check for and install updates |
 | `nothx completion` | Generate shell completion |
 
@@ -220,11 +224,21 @@ pip install nothx
 </details>
 
 <details>
-<summary><strong>Outlook App Password</strong></summary>
+<summary><strong>Outlook / Live / Hotmail OAuth</strong></summary>
 
-1. Go to [account.live.com/proofs/AppPassword](https://account.live.com/proofs/AppPassword)
-2. Enable 2FA if not already
-3. Generate and copy the app password
+Microsoft personal accounts no longer accept basic authentication or app
+passwords for IMAP. nothx uses OAuth2 device sign-in instead; it never needs
+your Microsoft password.
+
+1. In [Azure App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade), create a public-client app that supports **Personal Microsoft accounts only**.
+2. Under **Authentication**, enable **Allow public client flows**. No client secret or redirect URI is needed.
+3. Copy the **Application (client) ID** and provide it when `nothx init` or `nothx account add` asks for it.
+4. Open the displayed Microsoft device-login URL, enter its short code, and approve IMAP and SMTP access.
+
+The access and refresh tokens are stored separately in
+`~/.nothx/tokens.json` with owner-only permissions. If an older token granted
+IMAP but not SMTP, nothx asks you to sign in once more before it sends an
+unsubscribe email.
 </details>
 
 <details>
@@ -241,6 +255,23 @@ pip install nothx
 *Without AI, nothx uses heuristic scoring. Still works, just less smart.*
 </details>
 
+### Safety and privacy defaults
+
+- Inbox and the unambiguously advertised IMAP `\Junk` mailbox are scanned. nothx does not guess localized Junk folder names; configure an override if your server advertises none or several.
+- Initial runs use the configured lookback. Later runs use `(account, mailbox, UIDVALIDITY, UID)` cursors. Full history is always explicit.
+- Body fetching is disabled by default. The optional footer scanner examines at most two inline text tails (64 KiB each, 128 KiB total) for authenticated list/bulk candidates. It skips attachments, nested messages, images, scripts, and forms.
+- One-click POST requires compliant headers plus `$canunsubscribe` or a correlated passing DKIM signature that covers both unsubscribe headers. Automatic network and mailbox actions require separate, versioned consent.
+- HTTP requests are HTTPS-only, proxy/cookie/auth/referrer-free, redirect constrained, SSRF checked, and connected to an already validated public IP while preserving TLS hostname verification.
+- Stored targets are fingerprints and hashed destination labels. Complete hosts, paths, queries, mailto recipients/bodies, and HTTP response bodies are excluded from normal history and exports.
+
+### What an outcome means
+
+- `requested`: the endpoint accepted a one-click/GET request, or SMTP accepted the mail for delivery. It does **not** guarantee mail will stop.
+- `needs_user`: safe automation reached a login, form, JavaScript flow, preference center, CAPTCHA, or another manual boundary.
+- `verified_quiet`: a complete post-grace scan found no later matching delivery.
+- `ineffective`: matching mail arrived after the 48-hour grace period. One fresh-token or alternate-method retry is allowed; another post-grace delivery is blocked.
+- `blocked`: nothx sent no unsubscribe traffic and applied its local spam path. Portable IMAP Junk movement is best effort; provider-side spam training is not guaranteed.
+
 ---
 
 ## Troubleshooting
@@ -251,6 +282,7 @@ pip install nothx
 - Verify your App Password (not your regular password)
 - Ensure IMAP is enabled in your email settings
 - For Gmail: Check that 2FA is enabled (required for App Passwords)
+- For Outlook/Live/Hotmail: re-add the account to renew OAuth consent; app passwords do not work
 - Run `nothx test` to diagnose
 </details>
 
@@ -266,7 +298,7 @@ pip install nothx
 <summary><strong>Still getting emails after unsubscribe</strong></summary>
 
 - Some senders ignore unsubscribe requests (bad actors)
-- Run `nothx run` again — it escalates repeat offenders to blocking
+- Daily runs verify accepted requests after 48 hours and escalate repeat offenders to Junk
 - Add manually: `nothx rule "domain.com" block`
 </details>
 
@@ -286,7 +318,7 @@ nothx reset --keep-config # Keep accounts, clear history
 | Feature | Unroll.me | SaneBox | Leave Me Alone | **nothx** |
 |---------|-----------|---------|----------------|-----------|
 | Price | Free | $84-432/yr | $48/yr | **Free** |
-| Privacy | Sells data | Cloud | Cloud | **100% local** |
+| Mailbox processing | Cloud | Cloud | Cloud | **Local** |
 | Actually unsubscribes | No | Yes | Yes | **Yes** |
 | AI classification | No | Yes | Basic | **Yes (multi-provider)** |
 | Learns your preferences | No | Limited | No | **Yes** |
@@ -302,7 +334,7 @@ We built nothx because:
 1. **Your email is yours.** Not a product to sell.
 2. **AI should adapt to you.** Not the other way around.
 3. **Automation should be invisible.** Set once, forget forever.
-4. **You can always change your mind.** Every action is reversible.
+4. **Words matter.** A request is not verified cessation, and changing local policy cannot externally resubscribe an address.
 
 ---
 

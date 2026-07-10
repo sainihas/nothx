@@ -12,24 +12,17 @@ logger = logging.getLogger("nothx.classifier.patterns")
 
 # Minimal in-code fallback used only if the packaged patterns.json can't be
 # loaded (e.g. a broken wheel). The packaged JSON at data/patterns.json is the
-# authoritative, fuller list (ESP domains, etc.).
+# authoritative list; intentionally avoid terminal rules for whole ESP/vendor
+# domains because those hosts serve many unrelated subscriptions.
 FALLBACK_PATTERNS = {
     "unsub_patterns": [
         "marketing.*",
         "promo.*",
         "newsletter.*",
-        "noreply.*",
-        "no-reply.*",
-        "*.mailchimp.com",
-        "*.sendgrid.net",
-        "*.amazonses.com",
     ],
     "keep_patterns": [
         "*.gov",
-        "*bank*",
-        "*health*",
         "security.*",
-        "*.paypal.com",
     ],
     "block_patterns": [
         "*.spam.com",
@@ -83,15 +76,18 @@ class PatternMatcher:
                     source="preset",
                 )
 
-        # Check keep patterns
+        # Broad built-in safety patterns are deliberately non-terminal.  A
+        # domain shape such as ``security.*`` or ``*.gov`` is not proof that a
+        # particular delivery is wanted, and must never override phishing or
+        # authentication evidence.  It only keeps automation behind review.
         for pattern in self.patterns.get("keep_patterns", []):
             if matches_pattern(domain, pattern):
                 return Classification(
-                    email_type=EmailType.TRANSACTIONAL,
-                    action=Action.KEEP,
-                    confidence=0.90,
-                    reasoning=f"Matched keep pattern: {pattern}",
-                    source="preset",
+                    email_type=EmailType.UNKNOWN,
+                    action=Action.REVIEW,
+                    confidence=0.50,
+                    reasoning=f"Matched protected review pattern: {pattern}",
+                    source="safety_policy",
                 )
 
         # Check unsub patterns

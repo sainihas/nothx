@@ -29,9 +29,11 @@ from nothx.cli import (
     search,
     senders,
     status,
-    test_connection,
     undo,
     update,
+)
+from nothx.cli import (
+    test_connection as connection_command,
 )
 from nothx.config import AccountConfig, Config
 from nothx.models import (
@@ -749,7 +751,7 @@ class TestTestConnectionCommand:
 
     def test_test_no_accounts(self, runner, temp_config_dir):
         """Test when no accounts configured."""
-        result = runner.invoke(test_connection, [])
+        result = runner.invoke(connection_command, [])
 
         assert result.exit_code == 0
         assert "No accounts configured" in result.output
@@ -759,7 +761,7 @@ class TestTestConnectionCommand:
         """Test successful connection test."""
         mock_test.return_value = (True, "Connected successfully")
 
-        result = runner.invoke(test_connection, [])
+        result = runner.invoke(connection_command, [])
 
         assert result.exit_code == 0
         assert "successful" in result.output
@@ -769,7 +771,7 @@ class TestTestConnectionCommand:
         """Test failed connection test."""
         mock_test.return_value = (False, "Authentication failed")
 
-        result = runner.invoke(test_connection, [])
+        result = runner.invoke(connection_command, [])
 
         assert result.exit_code == 0
         assert "failed" in result.output

@@ -58,7 +58,7 @@ def _extract_json_value(text: str, open_char: str) -> list | dict | None:
 
 CLASSIFICATION_PROMPT = """You are an email classification assistant. Your job is to analyze email senders and classify them to help users manage their inbox.
 
-For each sender, you'll receive: domain, number of emails, open rate, sample subject lines, whether they have a working unsubscribe link, and header-derived bulk signals (bulk precedence, auto-submitted, ESP fingerprint, mailing-list id, SPF/DKIM/DMARC authentication results).
+For each sender, you'll receive: domain, number of emails, open rate, sample subject lines, whether they advertise an unsubscribe method, and header-derived bulk signals (bulk precedence, auto-submitted, ESP fingerprint, mailing-list id, SPF/DKIM/DMARC authentication results).
 
 Classify each sender into one of these types:
 - marketing: Promotional emails, sales, deals, advertising
@@ -93,6 +93,7 @@ Respond with a JSON array of classifications:
 ```json
 [
   {{
+    "key": "stable-key-from-input",
     "domain": "example.com",
     "type": "marketing",
     "action": "unsub",
@@ -176,6 +177,7 @@ class AIClassifier:
         sender_descriptions = []
         for sender in senders:
             desc = {
+                "key": sender.classification_key,
                 "domain": self._sanitize_for_prompt(sender.domain),
                 "total_emails": sender.total_emails,
                 "open_rate": f"{sender.open_rate:.1f}%",
@@ -213,21 +215,32 @@ class AIClassifier:
 
             # Validate domains - only accept classifications for domains we asked about
             # This prevents prompt injection attacks from classifying arbitrary domains
-            requested_domains = {s.domain.lower() for s in senders}
-            unexpected_domains = set(classifications.keys()) - requested_domains
-            if unexpected_domains:
+            requested_keys = {s.classification_key for s in senders}
+            legacy_domain_keys = {
+                sender.domain.casefold(): sender.classification_key
+                for sender in senders
+                if sum(other.domain.casefold() == sender.domain.casefold() for other in senders)
+                == 1
+            }
+            normalized: dict[str, Classification] = {}
+            unexpected_keys: list[str] = []
+            for key, classification in classifications.items():
+                resolved = key if key in requested_keys else legacy_domain_keys.get(key.casefold())
+                if resolved is None:
+                    unexpected_keys.append(key)
+                else:
+                    normalized[resolved] = classification
+            classifications = normalized
+            if unexpected_keys:
                 logger.warning(
-                    "AI returned %d unexpected domains not in request: %s",
-                    len(unexpected_domains),
-                    list(unexpected_domains)[:5],  # Log first 5
+                    "AI returned %d unexpected subscription keys: %s",
+                    len(unexpected_keys),
+                    unexpected_keys[:5],
                     extra={
-                        "unexpected_domains": list(unexpected_domains),
-                        "requested_count": len(requested_domains),
+                        "unexpected_keys": unexpected_keys,
+                        "requested_count": len(requested_keys),
                     },
                 )
-                # Remove unexpected domains
-                for domain in unexpected_domains:
-                    del classifications[domain]
 
             # Log any parse errors
             if parse_errors:
@@ -244,9 +257,10 @@ class AIClassifier:
 
             # Update database with AI classifications (skipped during dry-run)
             if persist:
-                for domain, classification in classifications.items():
+                sender_by_key = {sender.classification_key: sender for sender in senders}
+                for key, classification in classifications.items():
                     db.update_sender_classification(
-                        domain=domain,
+                        domain=sender_by_key[key].domain,
                         classification=classification.email_type.value,
                         confidence=classification.confidence,
                     )
@@ -352,7 +366,7 @@ class AIClassifier:
     def classify_single(self, sender: SenderStats) -> Classification | None:
         """Classify a single sender."""
         results = self.classify_batch([sender])
-        return results.get(sender.domain)
+        return results.get(sender.classification_key)
 
     def _get_correction_context(self) -> str:
         """Get user corrections to include in prompt for learning."""
@@ -435,12 +449,15 @@ class AIClassifier:
                 # Validate and clamp confidence to [0.0, 1.0]
                 confidence = validate_confidence(confidence, context=f"AI response for {domain}")
 
-                results[domain] = Classification(
+                key = str(item.get("key") or domain).strip()
+                results[key] = Classification(
                     email_type=email_type,
                     action=action,
                     confidence=confidence,
                     reasoning=str(item.get("reasoning", ""))[:500],  # Limit length
                     source="ai",
+                    recommended_action=action,
+                    original_source="ai",
                 )
 
         except json.JSONDecodeError as e:

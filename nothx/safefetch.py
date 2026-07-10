@@ -4,16 +4,17 @@ Unsubscribe URLs come from email headers, i.e. from the sender. This module
 guards every request against SSRF: scheme allowlisting, private/loopback/
 link-local address blocking (for every resolved address), no environment
 proxies, no cookies, no auth, and full re-validation on every redirect hop.
-
-Known residual risk: the hostname is resolved once for validation and again
-by urllib for the connection, so a DNS-rebinding attacker with a sub-second
-TTL could pass validation and connect elsewhere. True IP pinning requires a
-custom HTTPSConnection; out of proportion to the threat model here.
+The actual socket is connected to one of the already validated IP addresses,
+while TLS SNI and certificate verification continue to use the original
+hostname.  This closes the DNS-rebinding gap between validation and connect.
 """
 
+import hashlib
+import http.client
 import ipaddress
 import logging
 import socket
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,6 +33,12 @@ class SSRFBlockedError(Exception):
     pass
 
 
+class ResolutionError(OSError):
+    """A retryable DNS resolution failure, distinct from an SSRF verdict."""
+
+    pass
+
+
 @dataclass
 class FetchResponse:
     """Result of a safe_fetch call."""
@@ -42,16 +49,80 @@ class FetchResponse:
     redirects: int
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Surface every 3xx as an HTTPError so redirects are handled manually."""
+_SENSITIVE_HEADERS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "proxy-connection",
+        "referer",
+    }
+)
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTP connection whose socket can only use pre-validated addresses."""
+
+    def __init__(self, host: str, addresses: tuple[str, ...], **kwargs):
+        self._pinned_addresses = addresses
+        self._pinned_timeout: float | None = kwargs.get("timeout")
+        self._pinned_source_address: tuple[str, int] | None = kwargs.get("source_address")
+        super().__init__(host, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = _connect_pinned(
+            self._pinned_addresses,
+            self.port,
+            self._pinned_timeout,
+            self._pinned_source_address,
+        )
 
 
-# No proxies from the environment (an SSRF vector of its own), no cookie
-# processor (RFC 8058: the request must not carry cookies or auth context).
-_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Pinned socket with normal PKIX verification and hostname-bound SNI."""
+
+    def __init__(self, host: str, addresses: tuple[str, ...], **kwargs):
+        self._pinned_addresses = addresses
+        self._pinned_timeout: float | None = kwargs.get("timeout")
+        self._pinned_source_address: tuple[str, int] | None = kwargs.get("source_address")
+        self._pinned_context: ssl.SSLContext = kwargs.get("context") or ssl.create_default_context()
+        kwargs["context"] = self._pinned_context
+        super().__init__(host, **kwargs)
+
+    def connect(self) -> None:
+        raw_socket = _connect_pinned(
+            self._pinned_addresses,
+            self.port,
+            self._pinned_timeout,
+            self._pinned_source_address,
+        )
+        try:
+            # ``self.host`` is the original URL hostname, never the pinned IP.
+            # HTTPSConnection creates a default verifying SSLContext for us.
+            self.sock = self._pinned_context.wrap_socket(raw_socket, server_hostname=self.host)
+        except Exception:
+            raw_socket.close()
+            raise
+
+
+def _connect_pinned(
+    addresses: tuple[str, ...],
+    port: int,
+    timeout: float | None,
+    source_address: tuple[str, int] | None,
+) -> socket.socket:
+    """Connect to one of the exact addresses that passed SSRF validation."""
+    last_error: OSError | None = None
+    for address in addresses:
+        try:
+            return socket.create_connection(
+                (address, port), timeout=timeout, source_address=source_address
+            )
+        except OSError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise OSError("no validated address available")
 
 
 def _resolve(hostname: str) -> list[str]:
@@ -61,8 +132,55 @@ def _resolve(hostname: str) -> list[str]:
 
 
 def _open_request(request: urllib.request.Request, timeout: float):
-    """Perform the actual network call. Seam for tests."""
-    return _opener.open(request, timeout=timeout)
+    """Perform a proxy-free request over the request's validated IP set.
+
+    ``safe_fetch`` annotates the Request only after resolving and validating
+    every address.  Keeping this as a two-argument seam preserves simple unit
+    tests while production connections cannot perform a second DNS lookup.
+    """
+    parsed = urllib.parse.urlsplit(request.full_url)
+    hostname = parsed.hostname
+    addresses = getattr(request, "_nothx_validated_addresses", None)
+    if not hostname or not isinstance(addresses, tuple) or not addresses:
+        raise SSRFBlockedError("request has no validated destination")
+
+    try:
+        port = parsed.port or (443 if parsed.scheme.casefold() == "https" else 80)
+    except ValueError as exc:
+        raise SSRFBlockedError("URL has an invalid port") from exc
+
+    connection_type = (
+        _PinnedHTTPSConnection if parsed.scheme.casefold() == "https" else _PinnedHTTPConnection
+    )
+    connection = connection_type(hostname, addresses, port=port, timeout=timeout)
+    request_headers = {
+        key: value
+        for key, value in request.header_items()
+        if key.casefold() not in _SENSITIVE_HEADERS
+    }
+    request_headers["Connection"] = "close"
+    selector = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    try:
+        connection.request(
+            request.get_method(),
+            selector,
+            body=request.data,
+            headers=request_headers,
+        )
+        response = connection.getresponse()
+    except Exception:
+        connection.close()
+        raise
+
+    if response.status >= 300:
+        raise urllib.error.HTTPError(
+            request.full_url,
+            response.status,
+            response.reason,
+            response.headers,
+            response,
+        )
+    return response
 
 
 def _forbidden_ip(address: str) -> bool:
@@ -101,8 +219,8 @@ def _validate_url(url: str, allow_http: bool) -> urllib.parse.SplitResult:
     return parsed
 
 
-def _validate_host(hostname: str) -> None:
-    """Reject hostnames that are, or resolve to, forbidden addresses."""
+def _validate_host(hostname: str) -> tuple[str, ...]:
+    """Reject unsafe resolutions and return the exact public addresses."""
     try:
         ipaddress.ip_address(hostname)
         addresses = [hostname]
@@ -110,12 +228,48 @@ def _validate_host(hostname: str) -> None:
         try:
             addresses = _resolve(hostname)
         except OSError as e:
-            raise SSRFBlockedError(f"Cannot resolve host {hostname}: {e}") from e
+            raise ResolutionError("DNS resolution failed") from e
         if not addresses:
-            raise SSRFBlockedError(f"Host {hostname} resolved to no addresses") from None
+            raise ResolutionError("DNS resolution returned no addresses") from None
     for address in addresses:
         if _forbidden_ip(address):
             raise SSRFBlockedError(f"Host {hostname} resolves to forbidden address {address}")
+    # De-duplicate without changing resolver preference order.
+    return tuple(dict.fromkeys(addresses))
+
+
+def redacted_host(hostname: str) -> str:
+    """Return a stable opaque host label without leaking subdomain tokens."""
+    candidate = hostname.strip().casefold().rstrip(".")
+    if not candidate:
+        raise ValueError("empty hostname")
+    try:
+        normalized = ipaddress.ip_address(candidate.split("%", 1)[0]).compressed
+    except ValueError:
+        normalized = candidate.encode("idna").decode("ascii").casefold()
+    digest = hashlib.sha256(normalized.encode("ascii")).hexdigest()[:12]
+    return f"host-{digest}.redacted"
+
+
+def redacted_url(url: str, *, include_scheme: bool = True) -> str:
+    """Render a stable destination without host, path, query, or fragment tokens."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        scheme = parsed.scheme.casefold()
+        if scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("unsupported URL")
+        host = redacted_host(parsed.hostname)
+    except (UnicodeError, ValueError):
+        return "[invalid URL]"
+    prefix = f"{scheme}://" if include_scheme else ""
+    # Parentheses render literally in Rich terminals; square brackets would
+    # be consumed as an unknown markup tag by CLI callers.
+    return f"{prefix}{host}/(redacted)"
+
+
+def _redacted_url(url: str) -> str:
+    """Backward-compatible internal wrapper used by redirect logging."""
+    return redacted_url(url, include_scheme=False)
 
 
 def safe_fetch(
@@ -134,6 +288,7 @@ def safe_fetch(
 
     Raises:
         SSRFBlockedError: If any hop fails safety validation.
+        ResolutionError: If DNS resolution fails transiently.
         urllib.error.HTTPError: For non-redirect HTTP error statuses.
         urllib.error.URLError / OSError: For network failures.
     """
@@ -144,7 +299,7 @@ def safe_fetch(
 
     while True:
         parsed = _validate_url(current_url, allow_http)
-        _validate_host(parsed.hostname)  # type: ignore[arg-type]
+        addresses = _validate_host(parsed.hostname)  # type: ignore[arg-type]
 
         request = urllib.request.Request(
             current_url,
@@ -152,6 +307,9 @@ def safe_fetch(
             headers=dict(headers or {}),
             method=current_method,
         )
+        # urllib Request deliberately has no public extension metadata slot;
+        # this private marker is local to this module and never serialized.
+        request._nothx_validated_addresses = addresses  # type: ignore[attr-defined]
         try:
             with _open_request(request, timeout) as response:
                 body = response.read(max_body).decode("utf-8", errors="replace")
@@ -178,4 +336,4 @@ def safe_fetch(
                 current_method = "GET"
                 current_data = None
             redirects += 1
-            logger.debug("Following redirect %d to %s", redirects, current_url)
+            logger.debug("Following redirect %d to %s", redirects, _redacted_url(current_url))

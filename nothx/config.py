@@ -12,6 +12,11 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger("nothx.config")
 
+# Bump these whenever the corresponding operation gains materially broader
+# side effects. Stored zero means the user has not granted durable consent.
+CURRENT_UNSUBSCRIBE_CONSENT_VERSION = 1
+CURRENT_MAILBOX_MUTATION_CONSENT_VERSION = 1
+
 
 def get_config_dir() -> Path:
     """Get the nothx config directory (owner-only permissions)."""
@@ -41,7 +46,25 @@ class AccountConfig:
 
     provider: str  # "gmail" or "outlook"
     email: str
-    password: str  # App password for Gmail
+    # Password remains the default so existing Gmail/Yahoo/iCloud and custom
+    # provider configurations continue to load unchanged. OAuth accounts keep
+    # this empty and store refresh credentials only in tokens.json.
+    password: str = ""
+    auth: str = "password"  # "password" or "oauth"
+    client_id: str | None = None  # Microsoft public-client application ID
+    junk_mailbox: str | None = None  # Explicit override when SPECIAL-USE is ambiguous
+    extra_scan_mailboxes: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Normalize and validate the authentication selector."""
+        self.auth = self.auth.strip().lower()
+        if self.auth not in {"password", "oauth"}:
+            raise ValueError(f"Unsupported account authentication method: {self.auth}")
+
+    @property
+    def uses_oauth(self) -> bool:
+        """Return whether this account authenticates with OAuth2."""
+        return self.auth == "oauth"
 
 
 def validate_api_base(api_base: str | None) -> str | None:
@@ -209,9 +232,15 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     scan_days: int = 30
-    # Also surface bulk senders that lack a List-Unsubscribe header (spam,
-    # cron/alert mail) as block/filter candidates. Off by default so the
-    # first scan after upgrading doesn't flood the review queue.
+    scan_junk: bool = True
+    footer_scan_enabled: bool = False
+    # Consent is deliberately versioned: new network or mailbox mutation
+    # capabilities must be acknowledged instead of inheriting older consent.
+    unsubscribe_consent_version: int = 0
+    mailbox_mutation_consent_version: int = 0
+    # Deprecated compatibility key. Every recent header is now admitted to
+    # local policy regardless of this value; retain it only so older config
+    # files round-trip without a destructive migration.
     scan_bulk_without_unsubscribe: bool = False
 
     def save(self) -> None:
@@ -242,6 +271,10 @@ class Config:
             "safety": asdict(self.safety),
             "scoring": asdict(self.scoring),
             "scan_days": self.scan_days,
+            "scan_junk": self.scan_junk,
+            "footer_scan_enabled": self.footer_scan_enabled,
+            "unsubscribe_consent_version": self.unsubscribe_consent_version,
+            "mailbox_mutation_consent_version": self.mailbox_mutation_consent_version,
             "scan_bulk_without_unsubscribe": self.scan_bulk_without_unsubscribe,
         }
 
@@ -261,7 +294,7 @@ class Config:
         for name, acc_data in data.get("accounts", {}).items():
             try:
                 config.accounts[name] = AccountConfig(**acc_data)
-            except (TypeError, KeyError) as e:
+            except (TypeError, KeyError, ValueError) as e:
                 logger.warning(
                     "Failed to load account '%s': %s. Skipping.",
                     name,
@@ -311,6 +344,10 @@ class Config:
             config.scoring = ScoringConfig(**data["scoring"])
 
         config.scan_days = data.get("scan_days", 30)
+        config.scan_junk = data.get("scan_junk", True)
+        config.footer_scan_enabled = data.get("footer_scan_enabled", False)
+        config.unsubscribe_consent_version = data.get("unsubscribe_consent_version", 0)
+        config.mailbox_mutation_consent_version = data.get("mailbox_mutation_consent_version", 0)
         config.scan_bulk_without_unsubscribe = data.get("scan_bulk_without_unsubscribe", False)
 
         return config
@@ -324,6 +361,16 @@ class Config:
         if self.accounts:
             return next(iter(self.accounts.values()))
         return None
+
+    @property
+    def permits_automatic_unsubscribe(self) -> bool:
+        """Return whether current-version network automation was accepted."""
+        return self.unsubscribe_consent_version == CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+
+    @property
+    def permits_mailbox_mutation(self) -> bool:
+        """Return whether current-version Junk/mailbox writes were accepted."""
+        return self.mailbox_mutation_consent_version == CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
 
     def is_configured(self) -> bool:
         """Check if nothx is configured."""

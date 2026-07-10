@@ -8,6 +8,7 @@ fallbacks never use the mailbox-wide EXPUNGE command.
 
 from __future__ import annotations
 
+import imaplib
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -108,6 +109,7 @@ class MailboxActionResult:
     junk_keyword_set: bool = False
     not_junk_keyword_removed: bool = False
     error: str | None = None
+    retryable: bool = True
 
 
 class MailboxParseError(ValueError):
@@ -544,7 +546,22 @@ def move_uid_to_junk(
 
     capabilities = _capabilities(client)
     if "MOVE" in capabilities:
-        status, _ = client.uid("MOVE", str(locator.uid), quoted_destination)
+        try:
+            status, _ = client.uid("MOVE", str(locator.uid), quoted_destination)
+        except (imaplib.IMAP4.error, OSError, ValueError) as error:
+            return MailboxActionResult(
+                MailboxActionOutcome.PARTIAL,
+                locator,
+                destination,
+                method="uid-move",
+                destination_created=True,
+                retryable=False,
+                junk_keyword_set=set_junk,
+                not_junk_keyword_removed=removed_not_junk,
+                error=(
+                    f"UID MOVE completion is ambiguous ({type(error).__name__}); retry suppressed"
+                ),
+            )
         if _is_ok(status):
             return MailboxActionResult(
                 MailboxActionOutcome.MOVED,
@@ -568,7 +585,22 @@ def move_uid_to_junk(
             error="UID MOVE failed; COPY fallback suppressed because completion is ambiguous",
         )
 
-    status, _ = client.uid("COPY", str(locator.uid), quoted_destination)
+    try:
+        status, _ = client.uid("COPY", str(locator.uid), quoted_destination)
+    except (imaplib.IMAP4.error, OSError, ValueError) as error:
+        # A transport failure does not reveal whether the server committed
+        # COPY. Replaying could create another Junk copy, so fail closed.
+        return MailboxActionResult(
+            MailboxActionOutcome.PARTIAL,
+            locator,
+            destination,
+            method="uid-copy",
+            destination_created=True,
+            retryable=False,
+            junk_keyword_set=set_junk,
+            not_junk_keyword_removed=removed_not_junk,
+            error=f"UID COPY completion is ambiguous ({type(error).__name__}); retry suppressed",
+        )
     if not _is_ok(status):
         return MailboxActionResult(
             MailboxActionOutcome.FAILED,
@@ -580,7 +612,23 @@ def move_uid_to_junk(
             error="UID COPY failed",
         )
 
-    deleted = _store_flag(client, locator.uid, "+FLAGS.SILENT", r"\Deleted")
+    try:
+        deleted = _store_flag(client, locator.uid, "+FLAGS.SILENT", r"\Deleted")
+    except (imaplib.IMAP4.error, OSError, ValueError) as error:
+        return MailboxActionResult(
+            MailboxActionOutcome.PARTIAL,
+            locator,
+            destination,
+            method="uid-copy",
+            destination_created=True,
+            retryable=False,
+            junk_keyword_set=set_junk,
+            not_junk_keyword_removed=removed_not_junk,
+            error=(
+                "copied to Junk but marking the source is ambiguous "
+                f"({type(error).__name__}); retry suppressed"
+            ),
+        )
     if not deleted:
         return MailboxActionResult(
             MailboxActionOutcome.PARTIAL,
@@ -588,6 +636,7 @@ def move_uid_to_junk(
             destination,
             method="uid-copy",
             destination_created=True,
+            retryable=False,
             junk_keyword_set=set_junk,
             not_junk_keyword_removed=removed_not_junk,
             error="copied to Junk but could not mark the source UID deleted",
@@ -601,12 +650,30 @@ def move_uid_to_junk(
             method="uid-copy-delete",
             destination_created=True,
             source_marked_deleted=True,
+            retryable=False,
             junk_keyword_set=set_junk,
             not_junk_keyword_removed=removed_not_junk,
             error="copied and marked deleted; UIDPLUS unavailable, so source was not expunged",
         )
 
-    status, _ = client.uid("EXPUNGE", str(locator.uid))
+    try:
+        status, _ = client.uid("EXPUNGE", str(locator.uid))
+    except (imaplib.IMAP4.error, OSError, ValueError) as error:
+        return MailboxActionResult(
+            MailboxActionOutcome.PARTIAL,
+            locator,
+            destination,
+            method="uid-copy-delete",
+            destination_created=True,
+            source_marked_deleted=True,
+            retryable=False,
+            junk_keyword_set=set_junk,
+            not_junk_keyword_removed=removed_not_junk,
+            error=(
+                "copied and marked deleted, but UID EXPUNGE completion is ambiguous "
+                f"({type(error).__name__}); retry suppressed"
+            ),
+        )
     if not _is_ok(status):
         return MailboxActionResult(
             MailboxActionOutcome.PARTIAL,
@@ -615,6 +682,7 @@ def move_uid_to_junk(
             method="uid-copy-delete",
             destination_created=True,
             source_marked_deleted=True,
+            retryable=False,
             junk_keyword_set=set_junk,
             not_junk_keyword_removed=removed_not_junk,
             error="copied and marked deleted, but UID EXPUNGE failed",

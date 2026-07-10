@@ -77,6 +77,10 @@ class TestAuthoritativeSchema:
             }
             assert "url" not in columns
             assert "body" not in columns
+            mailbox_action_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(mailbox_actions)").fetchall()
+            }
+            assert "retryable" in mailbox_action_columns
 
     def test_account_and_list_identity_are_independent(self, state_db):
         first = _subscription()
@@ -191,6 +195,141 @@ class TestMailboxAndMessages:
         assert preserved_absent["outcome"] == "not_found"
         assert preserved_absent["error_code"] is None
 
+        copied_message = _message(subscription["id"], uid=3)
+        copied = db.record_mailbox_action(
+            subscription["id"],
+            copied_message["id"],
+            "move-to-junk-v1",
+            action="move_to_junk",
+            outcome="partial",
+            source_mailbox="INBOX",
+            target_mailbox="Junk",
+            retryable=False,
+            error_code="source_marked_deleted",
+        )
+        assert copied["outcome"] == "partial"
+        assert copied["retryable"] == 0
+
+        preserved_copied = db.record_mailbox_action(
+            subscription["id"],
+            copied_message["id"],
+            "move-to-junk-v1",
+            action="move_to_junk",
+            outcome="moved",
+            source_mailbox="INBOX",
+            target_mailbox="Junk",
+        )
+        assert preserved_copied["outcome"] == "partial"
+        assert preserved_copied["retryable"] == 0
+        assert preserved_copied["error_code"] == "source_marked_deleted"
+        assert db.get_grouped_metrics()["mailbox_actions"]["partial"] == 1
+
+        claimed_message = _message(subscription["id"], uid=4)
+        owner_operation, owner_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "block-owner",
+            "owner-worker",
+            kind="block",
+        )
+        assert owner_acquired is True
+        other_operation = db.get_or_create_unsubscribe_operation(
+            subscription["id"],
+            "block-other",
+            kind="block",
+        )
+        claimed = db.record_mailbox_action(
+            subscription["id"],
+            claimed_message["id"],
+            "move-to-junk-v1",
+            action="move_to_junk",
+            outcome="claimed",
+            source_mailbox="INBOX",
+            target_mailbox="Junk",
+            operation_id=owner_operation["id"],
+            claim_owner="owner-worker",
+            retryable=False,
+        )
+        assert claimed["outcome"] == "claimed"
+
+        with pytest.raises(ValueError, match="not owned"):
+            db.record_mailbox_action(
+                subscription["id"],
+                claimed_message["id"],
+                "move-to-junk-v1",
+                action="move_to_junk",
+                outcome="moved",
+                source_mailbox="INBOX",
+                target_mailbox="Junk",
+                operation_id=other_operation["id"],
+            )
+
+        completed_claim = db.record_mailbox_action(
+            subscription["id"],
+            claimed_message["id"],
+            "move-to-junk-v1",
+            action="move_to_junk",
+            outcome="moved",
+            source_mailbox="INBOX",
+            target_mailbox="Junk",
+            operation_id=owner_operation["id"],
+            claim_owner="owner-worker",
+            retryable=True,
+        )
+        assert completed_claim["outcome"] == "moved"
+        assert completed_claim["retryable"] == 1
+
+    def test_expired_operation_cannot_complete_stale_mailbox_action(self, state_db):
+        subscription = _subscription()
+        message = _message(subscription["id"])
+        old = datetime.now(UTC) - timedelta(hours=2)
+        operation, acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "stale-block",
+            "stale-worker",
+            kind="block",
+            lease_seconds=1,
+            claimed_at=old,
+        )
+        assert acquired is True
+        db.record_mailbox_action(
+            subscription["id"],
+            message["id"],
+            "move-to-junk-v1",
+            action="move_to_junk",
+            outcome="claimed",
+            source_mailbox="INBOX",
+            target_mailbox="Junk",
+            operation_id=operation["id"],
+            claim_owner="stale-worker",
+            retryable=False,
+        )
+        expired, replacement_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "stale-block",
+            "replacement-worker",
+            kind="block",
+            claimed_at=datetime.now(UTC),
+        )
+        assert replacement_acquired is False
+        assert expired["outcome"] == "needs_user"
+        assert expired["claim_owner"] is None
+
+        with pytest.raises(ValueError, match="not owned"):
+            db.record_mailbox_action(
+                subscription["id"],
+                message["id"],
+                "move-to-junk-v1",
+                action="move_to_junk",
+                outcome="moved",
+                source_mailbox="INBOX",
+                target_mailbox="Junk",
+                operation_id=operation["id"],
+                claim_owner="stale-worker",
+            )
+        action = db.list_mailbox_actions(subscription_id=subscription["id"])[0]
+        assert action["outcome"] == "claimed"
+        assert action["retryable"] == 0
+
 
 class TestGroupedOperations:
     def test_execution_claim_is_atomic_and_owner_checked(self, state_db):
@@ -217,6 +356,8 @@ class TestGroupedOperations:
 
         with pytest.raises(ValueError, match="not owned"):
             db.update_unsubscribe_operation_outcome(first["id"], "failed", claim_owner="worker-two")
+        with pytest.raises(ValueError, match="not owned"):
+            db.update_unsubscribe_operation_outcome(first["id"], "failed")
         completed = db.update_unsubscribe_operation_outcome(
             first["id"], "requested", claim_owner="worker-one"
         )
@@ -254,6 +395,234 @@ class TestGroupedOperations:
         assert requested_acquired is False
         assert requested_conflict["id"] == first["id"]
         assert requested_conflict["outcome"] == "requested"
+
+    @pytest.mark.parametrize("outcome", ["needs_user", "failed"])
+    def test_same_generation_completed_source_blocks_stale_claim(self, state_db, outcome: str):
+        subscription = _subscription()
+        first, acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "source-a",
+            "worker-one",
+            retry_generation=0,
+        )
+        assert acquired is True
+        db.update_unsubscribe_operation_outcome(
+            first["id"],
+            outcome,
+            claim_owner="worker-one",
+        )
+
+        conflict, stale_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "source-b",
+            "worker-two",
+            retry_generation=0,
+        )
+        assert stale_acquired is False
+        assert conflict["id"] == first["id"]
+
+        fresh, fresh_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "source-b",
+            "worker-two",
+            retry_generation=1,
+        )
+        assert fresh_acquired is True
+        assert fresh["id"] != first["id"]
+
+    def test_current_consent_can_resume_only_consent_blocked_source(self, state_db):
+        subscription = _subscription()
+        consent_wait, acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "consent-wait",
+            "worker-one",
+        )
+        assert acquired is True
+        db.update_unsubscribe_operation_outcome(
+            consent_wait["id"],
+            "needs_user",
+            claim_owner="worker-one",
+            error_code="unsubscribe_consent_required",
+        )
+
+        resumed, resumed_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "real-source",
+            "worker-two",
+            allow_consent_resume=True,
+        )
+
+        assert resumed_acquired is True
+        assert resumed["id"] != consent_wait["id"]
+
+    def test_block_claim_serializes_sources_but_allows_later_delivery(self, state_db):
+        subscription = _subscription()
+        first, acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "block-source-1",
+            "worker-one",
+            kind="block",
+        )
+        assert acquired is True
+
+        conflict, conflict_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "block-source-2",
+            "worker-two",
+            kind="block",
+        )
+        assert conflict_acquired is False
+        assert conflict["id"] == first["id"]
+
+        db.update_unsubscribe_operation_outcome(
+            first["id"],
+            "blocked",
+            claim_owner="worker-one",
+        )
+        later, later_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "block-source-2",
+            "worker-two",
+            kind="block",
+        )
+        assert later_acquired is True
+        assert later["id"] != first["id"]
+
+    def test_active_claims_fence_unsubscribe_and_block_paths(self, state_db):
+        subscription = _subscription()
+        unsubscribe, unsubscribe_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "unsubscribe-source",
+            "unsubscribe-worker",
+        )
+        assert unsubscribe_acquired is True
+
+        conflict, block_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "block-source",
+            "block-worker",
+            kind="block",
+        )
+        assert block_acquired is False
+        assert conflict["id"] == unsubscribe["id"]
+
+        db.update_unsubscribe_operation_outcome(
+            unsubscribe["id"],
+            "requested",
+            claim_owner="unsubscribe-worker",
+        )
+        block, block_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "block-source",
+            "block-worker",
+            kind="block",
+        )
+        assert block_acquired is True
+
+        reverse_conflict, unsubscribe_again = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "another-unsubscribe-source",
+            "another-unsubscribe-worker",
+        )
+        assert unsubscribe_again is False
+        assert reverse_conflict["id"] == block["id"]
+
+    def test_failed_block_operation_can_be_safely_reclaimed(self, state_db):
+        subscription = _subscription()
+        operation, acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "retryable-block-source",
+            "worker-one",
+            kind="block",
+        )
+        assert acquired is True
+        db.update_unsubscribe_operation_outcome(
+            operation["id"],
+            "failed",
+            claim_owner="worker-one",
+        )
+
+        reclaimed, reclaimed_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "retryable-block-source",
+            "worker-two",
+            kind="block",
+        )
+
+        assert reclaimed_acquired is True
+        assert reclaimed["id"] == operation["id"]
+        assert reclaimed["outcome"] is None
+        assert reclaimed["claim_owner"] == "worker-two"
+
+    def test_failed_block_cannot_reopen_beside_another_live_claim(self, state_db):
+        subscription = _subscription()
+        failed, acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "failed-block",
+            "worker-one",
+            kind="block",
+        )
+        assert acquired is True
+        db.update_unsubscribe_operation_outcome(
+            failed["id"],
+            "failed",
+            claim_owner="worker-one",
+        )
+        live, live_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "live-block",
+            "worker-two",
+            kind="block",
+        )
+        assert live_acquired is True
+
+        conflict, reopened = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "failed-block",
+            "worker-three",
+            kind="block",
+        )
+
+        assert reopened is False
+        assert conflict["id"] == live["id"]
+
+    def test_failed_block_does_not_reopen_while_expiring_another_claim(self, state_db):
+        subscription = _subscription()
+        failed, acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "failed-block",
+            "worker-one",
+            kind="block",
+        )
+        assert acquired is True
+        db.update_unsubscribe_operation_outcome(
+            failed["id"],
+            "failed",
+            claim_owner="worker-one",
+        )
+        old = datetime.now(UTC) - timedelta(hours=2)
+        stale, stale_acquired = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "stale-unsubscribe",
+            "stale-worker",
+            lease_seconds=1,
+            claimed_at=old,
+        )
+        assert stale_acquired is True
+
+        conflict, reopened = db.claim_unsubscribe_operation(
+            subscription["id"],
+            "failed-block",
+            "worker-two",
+            kind="block",
+            claimed_at=datetime.now(UTC),
+        )
+
+        assert reopened is False
+        assert conflict["id"] == stale["id"]
+        assert conflict["outcome"] == "needs_user"
+        assert conflict["claim_owner"] is None
+        assert db.get_unsubscribe_operation(failed["id"])["outcome"] == "failed"
 
     def test_expired_claim_becomes_manual_and_is_never_reclaimed(self, state_db):
         subscription = _subscription()
@@ -457,6 +826,7 @@ def test_v1_migration_backup_and_only_explicit_rules(tmp_path: Path):
 
     backups = list(tmp_path.glob("legacy.db.backup-v1-to-v2-*"))
     assert len(backups) == 1
+    assert backups[0].stat().st_mode & 0o777 == 0o600
     snapshot = sqlite3.connect(backups[0])
     try:
         assert snapshot.execute("PRAGMA user_version").fetchone()[0] == 1
@@ -469,7 +839,168 @@ def test_v1_migration_backup_and_only_explicit_rules(tmp_path: Path):
         snapshot.close()
 
 
-def test_legacy_override_wins_same_pattern_collision_and_keeps_other_rules(tmp_path: Path):
+def test_v2_retryability_repair_is_backed_up_and_partial_rows_are_terminal(
+    tmp_path: Path,
+):
+    db_path = tmp_path / "pre-release-v2.db"
+    with patch("nothx.db.get_db_path", return_value=db_path):
+        db.init_db()
+        subscription = _subscription()
+        message = _message(subscription["id"])
+        db.record_mailbox_action(
+            subscription["id"],
+            message["id"],
+            "move-to-junk-v1",
+            action="move_to_junk",
+            outcome="partial",
+            source_mailbox="INBOX",
+            target_mailbox="Junk",
+            retryable=True,
+        )
+        failed_message = _message(subscription["id"], uid=2)
+        db.record_mailbox_action(
+            subscription["id"],
+            failed_message["id"],
+            "move-to-junk-v1",
+            action="move_to_junk",
+            outcome="failed",
+            source_mailbox="INBOX",
+            target_mailbox="Junk",
+            retryable=True,
+        )
+        with db.get_db() as conn:
+            conn.execute("ALTER TABLE mailbox_actions DROP COLUMN retryable")
+            conn.execute("PRAGMA user_version = 2")
+
+        db.init_db()
+
+        repaired = db.list_mailbox_actions(subscription_id=subscription["id"])
+        assert {row["outcome"] for row in repaired} == {"partial", "failed"}
+        assert all(row["retryable"] == 0 for row in repaired)
+
+    backups = list(tmp_path.glob("pre-release-v2.db.backup-v2-to-v2-*"))
+    assert len(backups) == 1
+    assert backups[0].stat().st_mode & 0o777 == 0o600
+    snapshot = sqlite3.connect(backups[0])
+    try:
+        columns = {
+            row[1] for row in snapshot.execute("PRAGMA table_info(mailbox_actions)").fetchall()
+        }
+        assert "retryable" not in columns
+    finally:
+        snapshot.close()
+
+
+def test_v2_claim_column_repair_is_backed_up(tmp_path: Path):
+    db_path = tmp_path / "pre-claim-v2.db"
+    with patch("nothx.db.get_db_path", return_value=db_path):
+        db.init_db()
+        with db.get_db() as conn:
+            conn.execute("DROP INDEX idx_operations_claim")
+            conn.execute("ALTER TABLE unsubscribe_operations DROP COLUMN claim_owner")
+            conn.execute("ALTER TABLE unsubscribe_operations DROP COLUMN claimed_at")
+            conn.execute("ALTER TABLE unsubscribe_operations DROP COLUMN claim_expires_at")
+            conn.execute("PRAGMA user_version = 2")
+
+        db.init_db()
+
+        with db.get_db() as repaired:
+            columns = {
+                row["name"]
+                for row in repaired.execute("PRAGMA table_info(unsubscribe_operations)").fetchall()
+            }
+        assert {"claim_owner", "claimed_at", "claim_expires_at"} <= columns
+
+    backups = list(tmp_path.glob("pre-claim-v2.db.backup-v2-to-v2-*"))
+    assert len(backups) == 1
+    snapshot = sqlite3.connect(backups[0])
+    try:
+        columns = {
+            row[1]
+            for row in snapshot.execute("PRAGMA table_info(unsubscribe_operations)").fetchall()
+        }
+        assert "claim_owner" not in columns
+    finally:
+        snapshot.close()
+
+
+def test_migration_backup_failure_propagates_without_schema_changes(tmp_path: Path):
+    db_path = tmp_path / "legacy-failure.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE senders (
+            domain TEXT PRIMARY KEY,
+            user_override TEXT
+        );
+        INSERT INTO senders (domain, user_override) VALUES ('keep.example', 'keep');
+        PRAGMA user_version = 1;
+        """
+    )
+    before = conn.execute(
+        "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+    ).fetchall()
+    conn.commit()
+    conn.close()
+
+    class FailingBackupConnection(sqlite3.Connection):
+        def backup(self, target: sqlite3.Connection, **kwargs: object) -> None:
+            del target, kwargs
+            raise OSError("disk full")
+
+    failing_connection = sqlite3.connect(db_path, factory=FailingBackupConnection)
+    with (
+        patch("nothx.db.get_db_path", return_value=db_path),
+        patch("nothx.db.get_connection", return_value=failing_connection),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        db.init_db()
+
+    unchanged = sqlite3.connect(db_path)
+    try:
+        after = unchanged.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+        assert after == before
+        assert unchanged.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert (
+            unchanged.execute("SELECT 1 FROM sqlite_master WHERE name = 'subscriptions'").fetchone()
+            is None
+        )
+    finally:
+        unchanged.close()
+    assert not list(tmp_path.glob("legacy-failure.db.backup-v1-to-v2-*"))
+
+
+def test_schema_ddl_rolls_back_when_migration_fails(tmp_path: Path):
+    db_path = tmp_path / "atomic-migration.db"
+
+    def fail_after_ddl(conn: sqlite3.Connection, _version: int) -> None:
+        conn.execute("CREATE TABLE migration_probe (id INTEGER PRIMARY KEY)")
+        raise RuntimeError("migration failed")
+
+    with (
+        patch("nothx.db.get_db_path", return_value=db_path),
+        patch("nothx.db._migrate", side_effect=fail_after_ddl),
+        pytest.raises(RuntimeError, match="migration failed"),
+    ):
+        db.init_db()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        user_tables = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            """
+        ).fetchall()
+        assert user_tables == []
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_legacy_override_never_clobbers_existing_user_rule(tmp_path: Path):
     db_path = tmp_path / "collision.db"
     conn = sqlite3.connect(db_path)
     conn.executescript(
@@ -485,9 +1016,10 @@ def test_legacy_override_wins_same_pattern_collision_and_keeps_other_rules(tmp_p
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             pattern TEXT UNIQUE, action TEXT, created_at TEXT
         );
-        INSERT INTO senders (domain, user_override) VALUES ('same.example', 'block');
+        INSERT INTO senders (domain, user_override)
+            VALUES ('same.example', 'block'), ('new.example', 'block');
         INSERT INTO rules (pattern, action, created_at)
-            VALUES ('same.example', 'keep', 'old'), ('unrelated.example', 'keep', 'old');
+            VALUES ('Same.Example', 'keep', 'old'), ('unrelated.example', 'keep', 'old');
         PRAGMA user_version = 1;
         """
     )
@@ -497,8 +1029,13 @@ def test_legacy_override_wins_same_pattern_collision_and_keeps_other_rules(tmp_p
     with patch("nothx.db.get_db_path", return_value=db_path):
         db.init_db()
         rules = {row["pattern"]: row for row in db.get_rules()}
-        assert rules["same.example"]["action"] == "block"
-        assert rules["same.example"]["priority"] == 1000
-        assert rules["same.example"]["match_type"] == "exact"
-        assert rules["same.example"]["source"] == "legacy_override"
+        assert rules["Same.Example"]["action"] == "keep"
+        assert rules["Same.Example"]["priority"] == 100
+        assert rules["Same.Example"]["match_type"] == "pattern"
+        assert rules["Same.Example"]["source"] == "user"
+        assert "same.example" not in rules
         assert rules["unrelated.example"]["action"] == "keep"
+        assert rules["new.example"]["action"] == "block"
+        assert rules["new.example"]["priority"] == 1000
+        assert rules["new.example"]["match_type"] == "exact"
+        assert rules["new.example"]["source"] == "legacy_override"

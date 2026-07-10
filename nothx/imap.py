@@ -296,7 +296,7 @@ class IMAPConnection:
             raise RuntimeError("Not connected")
         try:
             return move_uid_to_junk(cast(Any, self.conn), locator, junk)
-        except (imaplib.IMAP4.error, OSError) as error:
+        except (imaplib.IMAP4.error, OSError, ValueError) as error:
             destination = junk.wire_name if isinstance(junk, MailboxInfo) else junk
             return MailboxActionResult(
                 MailboxActionOutcome.FAILED,

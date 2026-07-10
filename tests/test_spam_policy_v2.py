@@ -120,6 +120,22 @@ def test_transactional_bulk_headers_never_reach_batch_ai(policy_engine):
     policy_engine.ai.classify_batch.assert_not_called()
 
 
+def test_unauthenticated_transactional_sender_requires_review(policy_engine):
+    sender = SenderStats(
+        domain="paypal-lookalike.example",
+        total_emails=1,
+        sample_subjects=["Security alert: verify your login"],
+        sample_senders=["security@paypal-lookalike.example"],
+        authenticated_emails=0,
+    )
+
+    result = policy_engine.classify(sender)
+
+    assert result.email_type is EmailType.SECURITY
+    assert result.action is Action.REVIEW
+    assert result.source == "transactional_policy"
+
+
 def test_authenticated_cold_outreach_without_a_method_is_locally_blocked(policy_engine):
     header = _parsed_fixture("cold_outreach.eml")
     stats = _stats_for_emails(header.domain, [header])
@@ -282,6 +298,108 @@ def test_unrelated_personal_headers_never_reach_ai(policy_engine):
     policy_engine.ai.classify_batch.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Quick question about tomorrow",
+        "Following up on the design",
+        "Demo notes",
+        "Job offer details",
+        "Newsletter draft review",
+        "Garage sale planning",
+    ],
+)
+def test_subject_only_personal_headers_need_bulk_evidence_for_ai(policy_engine, subject):
+    sender = SenderStats(
+        domain="colleague.example",
+        total_emails=1,
+        seen_emails=1,
+        sample_subjects=[subject],
+        authenticated_emails=1,
+    )
+
+    assert policy_engine._is_ai_candidate(sender) is False
+
+    sender.bulk_precedence = True
+    assert policy_engine._is_ai_candidate(sender) is True
+
+
+def test_non_persistent_ai_candidate_makes_no_provider_call(policy_engine):
+    sender = SenderStats(
+        domain="updates.example",
+        total_emails=1,
+        seen_emails=1,
+        sample_subjects=["Weekly highlights"],
+        has_unsubscribe=True,
+        authenticated_emails=1,
+    )
+    policy_engine.config.ai.enabled = True
+    assert policy_engine.ai._provider_initialized is False
+
+    with patch("nothx.classifier.ai.get_provider") as provider_factory:
+        results = policy_engine.classify_batch([sender], persist=False)
+        direct_results = policy_engine.ai.classify_batch([sender], persist=False)
+
+    assert results[sender.classification_key].source in ("heuristics", "uncertain")
+    assert direct_results == {}
+    provider_factory.assert_not_called()
+    assert policy_engine.ai._provider_initialized is False
+
+
+def test_non_persistent_single_candidate_makes_no_provider_call(policy_engine):
+    sender = SenderStats(
+        domain="updates.example",
+        total_emails=1,
+        sample_subjects=["Weekly highlights"],
+        has_unsubscribe=True,
+        authenticated_emails=1,
+    )
+    policy_engine.config.ai.enabled = True
+    assert policy_engine.ai._provider_initialized is False
+
+    with patch("nothx.classifier.ai.get_provider") as provider_factory:
+        result = policy_engine.classify(sender, persist=False)
+        direct_result = policy_engine.ai.classify_single(sender, persist=False)
+
+    assert result.source in ("heuristics", "uncertain")
+    assert direct_result is None
+    provider_factory.assert_not_called()
+    assert policy_engine.ai._provider_initialized is False
+
+
+def test_authenticated_messages_outweigh_one_authentication_failure(policy_engine):
+    sender = SenderStats(
+        domain="mixed-auth.example",
+        total_emails=4,
+        seen_emails=2,
+        sample_subjects=["A normal update"],
+        authenticated_emails=3,
+        authentication_failed_emails=1,
+    )
+    policy_engine.ai.is_available = Mock(return_value=True)
+    policy_engine.ai.classify_single = Mock()
+
+    result = policy_engine.classify(sender)
+
+    assert result.action is Action.REVIEW
+    assert result.source == "auth_policy"
+    policy_engine.ai.classify_single.assert_not_called()
+
+
+def test_dominant_authentication_failures_still_block(policy_engine):
+    sender = SenderStats(
+        domain="spoofed.example",
+        total_emails=3,
+        authenticated_emails=1,
+        authentication_failed_emails=2,
+    )
+
+    result = policy_engine.classify(sender)
+
+    assert result.action is Action.BLOCK
+    assert result.source == "auth_policy"
+
+
 def test_ai_block_with_unknown_authentication_is_review_only(policy_engine):
     sender = SenderStats(
         domain="bulk.example",
@@ -304,6 +422,36 @@ def test_ai_block_with_unknown_authentication_is_review_only(policy_engine):
 
     assert result.action is Action.REVIEW
     assert result.source == "auth_policy"
+
+
+def test_ai_transactional_keep_with_unknown_authentication_is_review_only(policy_engine):
+    sender = SenderStats(
+        domain="bulk.example",
+        total_emails=10,
+        has_unsubscribe=True,
+        list_id="list.bulk.example",
+    )
+    ai_result = Classification(
+        email_type=EmailType.TRANSACTIONAL,
+        action=Action.KEEP,
+        confidence=0.99,
+        reasoning="wanted transaction",
+        source="ai",
+    )
+    policy_engine.ai.is_available = Mock(return_value=True)
+    policy_engine.ai.classify_single = Mock(return_value=ai_result)
+
+    single = policy_engine.classify(sender)
+
+    assert single.action is Action.REVIEW
+    assert single.source == "auth_policy"
+    assert single.recommended_action is Action.KEEP
+
+    policy_engine.ai.classify_batch = Mock(return_value={sender.classification_key: ai_result})
+    batch = policy_engine.classify_batch([sender])
+
+    assert batch[sender.classification_key].action is Action.REVIEW
+    assert batch[sender.classification_key].source == "auth_policy"
 
 
 def test_policy_transformation_preserves_original_ai_recommendation(policy_engine):

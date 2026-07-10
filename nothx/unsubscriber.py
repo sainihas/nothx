@@ -107,6 +107,53 @@ def _has_one_click(email_header: EmailHeader) -> bool:
     return post_value.strip().lower() == ONE_CLICK_POST_VALUE
 
 
+def contact_suppression_reason(email_header: EmailHeader) -> str | None:
+    """Return why contacting a message's sender-controlled target is unsafe.
+
+    This guard is shared by automatic, legacy-manual, and browser-opening
+    paths.  It intentionally considers only evidence that must suppress all
+    contact; current versioned consent is checked separately by callers so a
+    provider threat verdict can retain the stronger ``blocked`` outcome.
+    """
+    if email_header.server_junk or email_header.server_phishing:
+        return "Provider marked this mail as junk or phishing; use mailbox blocking"
+    if (
+        email_header.dkim_pass is False
+        or email_header.dmarc_pass is False
+        or email_header.strongly_failed_authentication
+    ):
+        return "Sender failed authentication (DKIM/DMARC); consider blocking instead"
+    return None
+
+
+def is_contact_permitted(email_header: EmailHeader, config: Config) -> bool:
+    """Return whether safety evidence and current consent allow sender contact."""
+    return config.permits_unsubscribe and contact_suppression_reason(email_header) is None
+
+
+def _contact_denied_result(email_header: EmailHeader, config: Config) -> UnsubResult | None:
+    """Build a no-contact grouped result when policy forbids execution."""
+    reason = contact_suppression_reason(email_header)
+    if reason is not None:
+        outcome = (
+            UnsubscribeOutcome.BLOCKED
+            if email_header.server_junk or email_header.server_phishing
+            else UnsubscribeOutcome.NEEDS_USER
+        )
+        return _grouped_result(
+            outcome,
+            reason,
+            needs_confirmation=outcome is UnsubscribeOutcome.NEEDS_USER,
+        )
+    if not config.permits_unsubscribe:
+        return _grouped_result(
+            UnsubscribeOutcome.NEEDS_USER,
+            "Current versioned unsubscribe-contact consent is required",
+            needs_confirmation=True,
+        )
+    return None
+
+
 def unsubscribe(
     email_header: EmailHeader, config: Config, account: AccountConfig | None = None
 ) -> UnsubResult:
@@ -131,18 +178,10 @@ def unsubscribe(
 
     domain = email_header.domain
 
-    # Auth gate: if the message explicitly FAILED DKIM or DMARC (per the
-    # user's own provider), don't fetch its URLs — the sender may be spoofed
-    # and the unsubscribe link may be hostile. Unknown auth (None) is allowed
-    # so custom-IMAP users aren't reduced to mailto-only.
-    if email_header.dkim_pass is False or email_header.dmarc_pass is False:
-        logger.warning("Sender %s failed authentication; skipping unsubscribe", domain)
-        result = UnsubResult(
-            success=False,
-            method=None,
-            error="Sender failed authentication (DKIM/DMARC); consider blocking instead",
-        )
-        return _finish(domain, [result], result)
+    denied = _contact_denied_result(email_header, config)
+    if denied is not None:
+        logger.warning("Contact policy suppressed unsubscribe for %s", domain)
+        return denied
     targets = email_header.list_unsubscribe_targets
     http_targets = [t for t in targets if t.lower().startswith(("https://", "http://"))]
     mailto_targets = [t for t in targets if t.lower().startswith("mailto:")]
@@ -210,11 +249,31 @@ def unsubscribe_subscription(
 
     # Threat verdicts always win, including for identities covered by a
     # protected-domain rule. Spam must not receive unsubscribe traffic.
-    if any(header.server_junk or header.server_phishing for header in ordered):
-        return _grouped_result(
-            UnsubscribeOutcome.BLOCKED,
-            "Provider marked this mail as junk or phishing; use mailbox blocking",
-        )
+    threat_denial = next(
+        (
+            denied
+            for header in ordered
+            if (denied := _contact_denied_result(header, config)) is not None
+            and denied.outcome is UnsubscribeOutcome.BLOCKED
+        ),
+        None,
+    )
+    if threat_denial is not None:
+        return threat_denial
+
+    # An explicit authentication failure also forbids every outbound method,
+    # even when the server advertised $canunsubscribe for the message.
+    auth_denial = next(
+        (
+            denied
+            for header in ordered
+            if contact_suppression_reason(header) is not None
+            and (denied := _contact_denied_result(header, config)) is not None
+        ),
+        None,
+    )
+    if auth_denial is not None:
+        return auth_denial
 
     protected = any(
         _header_matches_patterns(header, config.safety.never_unsub_domains) for header in ordered
@@ -229,10 +288,10 @@ def unsubscribe_subscription(
             needs_confirmation=True,
         )
 
-    if automatic and not config.permits_automatic_unsubscribe:
+    if not config.permits_unsubscribe:
         return _grouped_result(
             UnsubscribeOutcome.NEEDS_USER,
-            "Versioned automatic-unsubscribe consent is required",
+            "Current versioned unsubscribe-contact consent is required",
             needs_confirmation=True,
         )
 
@@ -361,6 +420,11 @@ def unsubscribe_subscription(
         )
         result.attempt_results = tuple(attempt_results)
         return result
+    if last is not None:
+        last.outcome = UnsubscribeOutcome.FAILED
+        last.attempts = attempts
+        last.attempt_results = tuple(attempt_results)
+        return last
     if footer_requires_user:
         result = _grouped_result(
             UnsubscribeOutcome.NEEDS_USER,
@@ -370,11 +434,6 @@ def unsubscribe_subscription(
         result.attempts = attempts
         result.attempt_results = tuple(attempt_results)
         return result
-    if last is not None:
-        last.outcome = UnsubscribeOutcome.FAILED
-        last.attempts = attempts
-        last.attempt_results = tuple(attempt_results)
-        return last
     return _grouped_result(
         UnsubscribeOutcome.FAILED,
         "No safe unsubscribe method is available",

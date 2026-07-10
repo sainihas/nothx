@@ -94,6 +94,22 @@ class TestAutomaticGates:
         assert result.outcome is UnsubscribeOutcome.NEEDS_USER
         assert calls == []
 
+    def test_explicit_manual_execution_still_requires_current_consent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(unsubscriber, "safe_fetch", lambda url, **kw: calls.append(url))
+
+        result = unsubscriber.unsubscribe_subscription(
+            [header(one_click=True, can_unsubscribe=True)],
+            Config(),
+            automatic=False,
+        )
+
+        assert result.outcome is UnsubscribeOutcome.NEEDS_USER
+        assert result.needs_confirmation
+        assert calls == []
+
     def test_unknown_future_consent_version_does_not_authorize(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -150,6 +166,19 @@ class TestAutomaticGates:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         item = header(one_click=True, authenticated=False)
+        calls: list[str] = []
+        monkeypatch.setattr(unsubscriber, "safe_fetch", lambda url, **kw: calls.append(url))
+
+        result = unsubscriber.unsubscribe_subscription([item], consented_config())
+
+        assert result.outcome is UnsubscribeOutcome.NEEDS_USER
+        assert calls == []
+
+    def test_explicit_auth_failure_overrides_server_one_click_signal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        item = header(one_click=True, can_unsubscribe=True)
+        item.dmarc_pass = False
         calls: list[str] = []
         monkeypatch.setattr(unsubscriber, "safe_fetch", lambda url, **kw: calls.append(url))
 
@@ -449,6 +478,26 @@ class TestPlanning:
 
         assert calls == [header_target]
         assert result.outcome is UnsubscribeOutcome.REQUESTED
+
+    def test_footer_manual_fallback_does_not_mask_network_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        item = header("https://mailer.example/header-token")
+        item.footer_requires_user = True
+        monkeypatch.setattr(
+            unsubscriber,
+            "_execute_get",
+            lambda url: UnsubResult(
+                False,
+                UnsubMethod.GET,
+                error="transient transport failure",
+            ),
+        )
+
+        result = unsubscriber.unsubscribe_subscription([item], consented_config())
+
+        assert result.outcome is UnsubscribeOutcome.FAILED
+        assert result.error == "transient transport failure"
 
     def test_accepted_fingerprint_is_skipped_for_fresh_alternate(
         self, monkeypatch: pytest.MonkeyPatch

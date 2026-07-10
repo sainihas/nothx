@@ -294,6 +294,7 @@ class TestMoveToJunk:
         assert result.destination_created is True
         assert result.source_marked_deleted is True
         assert result.source_removed is False
+        assert result.retryable is False
         assert all(command != "EXPUNGE" for command, _ in client.commands)
 
     def test_failed_move_does_not_risk_duplicate_copy(self) -> None:
@@ -301,6 +302,26 @@ class TestMoveToJunk:
         client.command_status["MOVE"] = "NO"
         result = move_uid_to_junk(client, locator(), junk())
         assert result.outcome is MailboxActionOutcome.FAILED
+        assert all(command != "COPY" for command, _ in client.commands)
+
+    def test_ambiguous_move_exception_is_non_retryable(self) -> None:
+        class ExplodingMove(FakeIMAP):
+            def uid(self, command: str, *args: Any) -> tuple[str, list[bytes]]:
+                if command.upper() == "MOVE":
+                    self.commands.append((command.upper(), args))
+                    raise OSError("connection lost")
+                return super().uid(command, *args)
+
+        client = ExplodingMove(
+            capabilities=(b"MOVE",),
+            permanent_flags=b"(\\Seen \\Deleted)",
+        )
+
+        result = move_uid_to_junk(client, locator(), junk())
+
+        assert result.outcome is MailboxActionOutcome.PARTIAL
+        assert result.method == "uid-move"
+        assert result.retryable is False
         assert all(command != "COPY" for command, _ in client.commands)
 
     def test_failed_copy_is_reported_without_delete_or_expunge(self) -> None:
@@ -319,6 +340,39 @@ class TestMoveToJunk:
         assert result.outcome is MailboxActionOutcome.PARTIAL
         assert result.source_marked_deleted is True
         assert result.source_removed is False
+        assert result.retryable is False
+
+    def test_failed_store_after_copy_is_non_retryable(self) -> None:
+        client = FakeIMAP()
+        client.command_status["STORE"] = "NO"
+
+        result = move_uid_to_junk(client, locator(), junk())
+
+        assert result.outcome is MailboxActionOutcome.PARTIAL
+        assert result.destination_created is True
+        assert result.source_marked_deleted is False
+        assert result.retryable is False
+
+    @pytest.mark.parametrize("failing_command", ["COPY", "STORE", "EXPUNGE"])
+    def test_ambiguous_copy_phase_exception_is_never_retried(self, failing_command: str) -> None:
+        class ExplodingIMAP(FakeIMAP):
+            def uid(self, command: str, *args: Any) -> tuple[str, list[bytes]]:
+                if command.upper() == failing_command:
+                    self.commands.append((command.upper(), args))
+                    raise OSError("connection lost")
+                return super().uid(command, *args)
+
+        client = ExplodingIMAP(
+            capabilities=(b"UIDPLUS",),
+            permanent_flags=b"(\\Seen \\Deleted)",
+        )
+
+        result = move_uid_to_junk(client, locator(), junk())
+
+        assert result.outcome is MailboxActionOutcome.PARTIAL
+        assert result.destination_created is True
+        assert result.retryable is False
+        assert sum(command == "COPY" for command, _args in client.commands) == 1
 
     def test_stale_locator_causes_no_store_copy_move_or_expunge(self) -> None:
         client = FakeIMAP(uidvalidity=b"999", capabilities=(b"MOVE UIDPLUS",))

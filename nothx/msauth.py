@@ -14,7 +14,6 @@ from __future__ import annotations
 import base64
 import fcntl
 import json
-import logging
 import os
 import stat
 import tempfile
@@ -36,8 +35,6 @@ from .errors import (
     OAuthReconsentRequired,
     OAuthTransientError,
 )
-
-logger = logging.getLogger("nothx.msauth")
 
 AUTHORITY = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
 DEVICE_CODE_URL = f"{AUTHORITY}/devicecode"
@@ -383,33 +380,58 @@ def _decode_cache(raw: object) -> dict[str, Any]:
 
     clean: dict[str, dict[str, Any]] = {}
     for email, token in accounts_obj.items():
-        if isinstance(email, str) and isinstance(token, dict):
-            clean[email.casefold()] = dict(token)
+        if not isinstance(email, str) or not email.strip() or not isinstance(token, dict):
+            raise ValueError("token cache contains an invalid account entry")
+        key = email.casefold()
+        if key in clean:
+            raise ValueError("token cache contains duplicate account identities")
+        clean[key] = dict(token)
     return {"version": CACHE_VERSION, "accounts": clean}
 
 
 def _read_cache_unlocked() -> dict[str, Any]:
     path = get_tokens_path()
-    if not path.exists():
-        return _empty_cache()
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    fd: int | None = None
     try:
         fd = os.open(path, flags)
+    except FileNotFoundError:
+        return _empty_cache()
+    except OSError as exc:
+        raise OAuthError(
+            code=ErrorCode.OAUTH_CACHE_ERROR,
+            message="The OAuth token cache exists but cannot be opened safely",
+            details={"error_type": type(exc).__name__},
+            cause=exc,
+        ) from exc
+
+    try:
         # Repair permissive modes left by older versions before reading a
         # bearer credential into this process.
         os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, encoding="utf-8") as cache_file:
+        cache_file = os.fdopen(fd, encoding="utf-8")
+        fd = None  # fdopen now owns and closes the descriptor.
+        with cache_file:
             raw = json.load(cache_file)
         return _decode_cache(raw)
     except (json.JSONDecodeError, OSError, ValueError) as exc:
-        logger.warning(
-            "Ignoring invalid OAuth token cache at %s (%s)",
-            path,
-            type(exc).__name__,
-        )
-        return _empty_cache()
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        # A present cache may hold refresh tokens for multiple accounts.  It
+        # must never be reinterpreted as an empty cache: doing so would let a
+        # later save silently replace it with just one account.  Fail closed
+        # and leave the original bytes untouched for explicit recovery.
+        raise OAuthError(
+            code=ErrorCode.OAUTH_CACHE_ERROR,
+            message="The OAuth token cache is invalid or unreadable; refusing to replace it",
+            details={"error_type": type(exc).__name__},
+            cause=exc,
+        ) from exc
 
 
 def _write_cache_unlocked(cache: Mapping[str, Any]) -> None:
@@ -420,11 +442,14 @@ def _write_cache_unlocked(cache: Mapping[str, Any]) -> None:
     except OSError:
         pass
 
-    fd, temporary_name = tempfile.mkstemp(prefix=".tokens-", dir=path.parent)
+    raw_fd, temporary_name = tempfile.mkstemp(prefix=".tokens-", dir=path.parent)
+    fd: int | None = raw_fd
     temporary_path = Path(temporary_name)
     try:
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, "w", encoding="utf-8") as cache_file:
+        os.fchmod(raw_fd, stat.S_IRUSR | stat.S_IWUSR)
+        cache_file = os.fdopen(raw_fd, "w", encoding="utf-8")
+        fd = None  # fdopen now owns and closes the descriptor.
+        with cache_file:
             json.dump(cache, cache_file, indent=2, sort_keys=True)
             cache_file.flush()
             os.fsync(cache_file.fileno())
@@ -439,10 +464,11 @@ def _write_cache_unlocked(cache: Mapping[str, Any]) -> None:
         except OSError:
             pass
     except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             temporary_path.unlink()
         except OSError:

@@ -664,8 +664,11 @@ def get_emails_for_domain(
             for header in conn.fetch_marketing_emails(days=config.scan_days):
                 if header.domain == domain:
                     # Track the account so mailto unsubscribes use the right
-                    # SMTP credentials.
+                    # SMTP credentials, and preserve the stable account key so
+                    # domain-level compatibility flows cannot create a second
+                    # identity for an already-authoritative subscription.
                     header.account_name = name
+                    header.account_key = account.email.casefold()
                     emails.append(header)
 
     return emails

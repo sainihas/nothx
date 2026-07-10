@@ -42,6 +42,7 @@ from .models import (
     RunStats,
     SenderStats,
     SenderStatus,
+    UnsubResult,
     UnsubscribeOutcome,
     UserAction,
 )
@@ -49,7 +50,12 @@ from .safefetch import redacted_url
 from .scanner import scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
 from .theme import console, print_animated_welcome
-from .unsubscriber import UnsafeUnsubscribeError, unsubscribe, unsubscribe_subscription
+from .unsubscriber import (
+    UnsafeUnsubscribeError,
+    contact_suppression_reason,
+    is_contact_permitted,
+    unsubscribe_subscription,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,46 +151,254 @@ def _styled_confirm(message: str, default: bool = True) -> bool:
     return result == "yes"
 
 
-def _attempt_unsubscribe_for_domain(config: Config, domain: str, sender: dict) -> None:
-    """Actually attempt to unsubscribe from a domain (used by manual flows).
+def _attempt_unsubscribe_for_domain(config: Config, domain: str, sender: dict) -> UnsubResult:
+    """Safely resolve one domain-only choice to a real account/list operation."""
+    from .scanner import _stats_for_emails, get_emails_for_domain
 
-    unsubscribe() sets the real sender status (UNSUBSCRIBED on success, FAILED
-    otherwise) and logs the attempt, so a failed unsubscribe is never
-    mislabeled as a success.
-    """
-    from .scanner import get_emails_for_domain
+    del sender  # Compatibility argument; real identity comes from rescanned messages.
 
-    console.print(f"{_L} [muted]Fetching a recent email from {domain}...[/muted]")
+    if not config.permits_unsubscribe:
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error="Current versioned unsubscribe-contact consent is required",
+            needs_confirmation=True,
+            outcome=UnsubscribeOutcome.NEEDS_USER,
+        )
+        console.print(f"{_L} [warning]{result.error}; no request was sent[/warning]")
+        return result
+
+    persisted = [
+        subscription
+        for subscription in db.list_subscriptions(limit=10_000)
+        if (subscription.get("sender_domain") or "").casefold() == domain.casefold()
+    ]
+    if any(
+        subscription.get("policy_action") == "block"
+        or subscription.get("last_outcome") == "blocked"
+        or _subscription_has_persisted_threat(subscription["id"])
+        for subscription in persisted
+    ):
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error=(
+                "A matching account/list identity is blocked or has persisted "
+                "Junk/phishing evidence"
+            ),
+            outcome=UnsubscribeOutcome.BLOCKED,
+        )
+        console.print(f"{_L} [warning]{result.error}; no request was sent[/warning]")
+        return result
+    if len(persisted) > 1:
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error=(
+                "This domain contains multiple account/list identities; use `nothx review` "
+                "to choose one without merging subscriptions"
+            ),
+            needs_confirmation=True,
+            outcome=UnsubscribeOutcome.NEEDS_USER,
+        )
+        console.print(f"{_L} [warning]{result.error}; no request was sent[/warning]")
+        return result
+
+    console.print(f"{_L} [muted]Fetching recent email for {domain}...[/muted]")
     try:
         emails = get_emails_for_domain(config, domain)
-    except (IMAPError, OSError) as e:
-        console.print(f"{_L} [error]Could not reach mailbox for {domain}: {e}[/error]")
+    except (IMAPError, OSError) as error:
+        console.print(f"{_L} [error]Could not reach mailbox for {domain}: {error}[/error]")
         db.update_sender_status(domain, SenderStatus.FAILED)
-        return
+        return UnsubResult(
+            success=False,
+            method=None,
+            error="Mailbox lookup failed",
+            outcome=UnsubscribeOutcome.FAILED,
+        )
 
-    email = next((e for e in emails if e.list_unsubscribe), None)
-    if email is None:
+    if not emails:
         console.print(
             f"{_L} [warning]No unsubscribe link found for {domain}; marked failed[/warning]"
         )
         db.update_sender_status(domain, SenderStatus.FAILED)
-        return
+        return UnsubResult(
+            success=False,
+            method=None,
+            error="No unsubscribe method available",
+            outcome=UnsubscribeOutcome.FAILED,
+        )
 
-    account = config.get_account(email.account_name)
-    try:
-        result = unsubscribe(email, config, account)
-    except UnsafeUnsubscribeError:
-        console.print(f"{_L} [warning]{domain} is a protected domain; not unsubscribing[/warning]")
-        return
+    # Test doubles and older adapters may omit the canonical account key while
+    # retaining the configured alias. Resolve that alias first; only fall back
+    # to the sole configured account when there is no alias at all.
+    for header in emails:
+        if not header.account_key and header.account_name:
+            if resolved_account := config.get_account(header.account_name):
+                header.account_key = resolved_account.email.casefold()
+    if len(config.accounts) == 1:
+        account_name, sole_account = next(iter(config.accounts.items()))
+        for header in emails:
+            header.account_name = header.account_name or account_name
+            header.account_key = header.account_key or sole_account.email.casefold()
+
+    grouped: dict[str, list[EmailHeader]] = {}
+    for header in emails:
+        grouped.setdefault(header.subscription_identity.key, []).append(header)
+
+    manual_classification = Classification(
+        email_type=EmailType.MARKETING,
+        action=Action.UNSUB,
+        confidence=1.0,
+        reasoning="Explicit domain-level unsubscribe choice",
+        source="user_rule",
+    )
+    if len(grouped) != 1:
+        for headers in grouped.values():
+            stats = _stats_for_emails(domain, headers)
+            identity = headers[0].subscription_identity
+            existing_group = db.get_subscription(
+                account=identity.account_key,
+                identity_kind=identity.kind,
+                identity_value=identity.value,
+            )
+            subscription, _messages = _persist_subscription_records(
+                stats,
+                headers,
+                manual_classification,
+            )
+            if existing_group is None:
+                db.set_subscription_policy(subscription["id"], "review")
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error=(
+                "The rescan found multiple account/list identities; use `nothx review` "
+                "to choose one without contacting every list at this domain"
+            ),
+            needs_confirmation=True,
+            outcome=UnsubscribeOutcome.NEEDS_USER,
+        )
+        console.print(f"{_L} [warning]{result.error}; no request was sent[/warning]")
+        return result
+
+    headers = next(iter(grouped.values()))
+    stats = _stats_for_emails(domain, headers)
+    identity = headers[0].subscription_identity
+    existing = db.get_subscription(
+        account=identity.account_key,
+        identity_kind=identity.kind,
+        identity_value=identity.value,
+    )
+    if existing is not None and (
+        existing.get("policy_action") == "block"
+        or existing.get("last_outcome") == "blocked"
+        or _subscription_has_persisted_threat(existing["id"])
+    ):
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error="This account/list identity is blocked or has persisted threat evidence",
+            outcome=UnsubscribeOutcome.BLOCKED,
+        )
+        console.print(f"{_L} [warning]{result.error}; no request was sent[/warning]")
+        return result
+
+    subscription, messages = _persist_subscription_records(
+        stats,
+        headers,
+        manual_classification,
+    )
+    execute, exclusions, retry_generation, escalate = _unsubscribe_operation_plan(subscription)
+    consent_resume = _is_unsubscribe_consent_resume(subscription, config)
+    if escalate:
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error="This subscription exhausted its safe retry and must be blocked",
+            outcome=UnsubscribeOutcome.BLOCKED,
+        )
+        db.set_subscription_policy(subscription["id"], "block")
+        console.print(f"{_L} [warning]{result.error}; no request was sent[/warning]")
+        return result
+    if not execute:
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error="A request is already accepted, in grace, or awaiting manual action",
+            needs_confirmation=True,
+            outcome=UnsubscribeOutcome.NEEDS_USER,
+        )
+        console.print(f"{_L} [warning]{result.error}; no duplicate request was sent[/warning]")
+        return result
+
+    claim_owner = uuid.uuid4().hex
+    operation, acquired = db.claim_unsubscribe_operation(
+        subscription["id"],
+        _operation_key("unsubscribe", stats, headers),
+        claim_owner,
+        allow_consent_resume=consent_resume,
+        trigger_message_ref_id=messages[0][1]["id"] if messages else None,
+        retry_generation=retry_generation,
+    )
+    if not acquired:
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error="Another process already claimed or completed this unsubscribe source",
+            needs_confirmation=True,
+            outcome=UnsubscribeOutcome.NEEDS_USER,
+        )
+        console.print(f"{_L} [warning]{result.error}; no duplicate request was sent[/warning]")
+        return result
+
+    denied_header = next(
+        (header for header in headers if not is_contact_permitted(header, config)),
+        None,
+    )
+    if denied_header is not None:
+        reason = contact_suppression_reason(denied_header) or "Contact is not permitted"
+        outcome = (
+            UnsubscribeOutcome.BLOCKED
+            if denied_header.server_junk or denied_header.server_phishing
+            else UnsubscribeOutcome.NEEDS_USER
+        )
+        result = UnsubResult(
+            success=False,
+            method=None,
+            error=reason,
+            needs_confirmation=outcome is UnsubscribeOutcome.NEEDS_USER,
+            outcome=outcome,
+        )
+    else:
+        account = _matching_account(config, headers)
+        result = unsubscribe_subscription(
+            headers,
+            config,
+            account,
+            automatic=False,
+            exclude_fingerprints=exclusions,
+        )
+    _record_unsubscribe_result(
+        stats,
+        headers,
+        manual_classification,
+        result,
+        retry_generation=retry_generation,
+        operation_id=operation["id"],
+        claim_owner=claim_owner,
+    )
+    if result.success:
+        db.set_subscription_policy(subscription["id"], "unsub")
 
     if result.success:
         console.print(f"{_L} [unsubscribe]→ Unsubscribed[/unsubscribe]")
     elif result.needs_confirmation:
-        console.print(
-            f"{_L} [warning]{domain} needs manual confirmation on their unsubscribe page[/warning]"
-        )
+        detail = result.error or "Manual action is required"
+        console.print(f"{_L} [warning]{detail}; no further request was sent[/warning]")
     else:
         console.print(f"{_L} [error]Unsubscribe failed: {result.error}[/error]")
+    return result
 
 
 def _redact_failure_detail(detail: str | None) -> str | None:
@@ -579,6 +793,17 @@ def _unsubscribe_operation_plan(
     return True, attempted_fingerprints, 1, False
 
 
+def _is_unsubscribe_consent_resume(subscription: dict[str, Any], config: Config) -> bool:
+    """Return whether current consent resolves the latest no-contact boundary."""
+    if not config.permits_unsubscribe or subscription.get("last_outcome") != "needs_user":
+        return False
+    operations = db.list_unsubscribe_operations(
+        subscription_id=subscription["id"],
+        limit=1,
+    )
+    return bool(operations and operations[0].get("error_code") == "unsubscribe_consent_required")
+
+
 def _reconcile_due_operations(
     config: Config,
     *,
@@ -630,15 +855,20 @@ def _reconcile_due_operations(
         subscription = db.get_subscription(operation["subscription_id"])
         if subscription is None:
             continue
-        block_operation = db.get_or_create_unsubscribe_operation(
+        claim_owner = uuid.uuid4().hex
+        block_operation, acquired = db.claim_unsubscribe_operation(
             subscription["id"],
             f"post-retry-block-v1-{operation['id']}",
             kind="block",
+            claim_owner=claim_owner,
         )
+        if not acquired:
+            continue
         moved, failed = _move_persisted_subscription_to_junk(
             config,
             subscription,
             block_operation["id"],
+            claim_owner=claim_owner,
         )
         sender_domain = subscription.get("sender_domain")
         if sender_domain and (moved or not failed):
@@ -658,16 +888,21 @@ def _block_subscription(
         classification,
         policy_action="block",
     )
-    operation = db.get_or_create_unsubscribe_operation(
+    claim_owner = uuid.uuid4().hex
+    operation, acquired = db.claim_unsubscribe_operation(
         subscription["id"],
         _operation_key("block", sender, headers),
+        claim_owner,
         kind="block",
+        trigger_message_ref_id=messages[0][1]["id"] if messages else None,
     )
-    del messages
+    if not acquired:
+        return 0, 0
     return _move_persisted_subscription_to_junk(
         config,
         subscription,
         operation["id"],
+        claim_owner=claim_owner,
     )
 
 
@@ -675,6 +910,8 @@ def _move_persisted_subscription_to_junk(
     config: Config,
     subscription: dict[str, Any],
     operation_id: int,
+    *,
+    claim_owner: str,
 ) -> tuple[int, int]:
     """Move every persisted Inbox locator for one account/list identity."""
     inbox_messages = db.list_message_refs(
@@ -683,7 +920,11 @@ def _move_persisted_subscription_to_junk(
         limit=100_000,
     )
     if not inbox_messages:
-        db.update_unsubscribe_operation_outcome(operation_id, "blocked")
+        db.update_unsubscribe_operation_outcome(
+            operation_id,
+            "blocked",
+            claim_owner=claim_owner,
+        )
         return 0, 0
 
     account = next(
@@ -700,6 +941,7 @@ def _move_persisted_subscription_to_junk(
             "failed",
             error_code="account_missing",
             detail_redacted="The matching mailbox account is unavailable",
+            claim_owner=claim_owner,
         )
         return 0, len(inbox_messages)
 
@@ -723,11 +965,12 @@ def _move_persisted_subscription_to_junk(
                     "failed",
                     error_code="junk_mailbox_unavailable",
                     detail_redacted=detail,
+                    claim_owner=claim_owner,
                 )
                 return 0, len(inbox_messages)
 
             existing = {
-                (row["message_ref_id"], row["action_key"]): row["outcome"]
+                (row["message_ref_id"], row["action_key"]): row
                 for row in db.list_mailbox_actions(
                     subscription_id=subscription["id"],
                     limit=100_000,
@@ -735,9 +978,19 @@ def _move_persisted_subscription_to_junk(
             }
             for message in inbox_messages:
                 action_key = "move-to-junk-v1"
-                previous_outcome = existing.get((message["id"], action_key))
-                if previous_outcome in {"moved", "already_junk", "not_found"}:
+                previous = existing.get((message["id"], action_key))
+                if previous and previous["outcome"] in {
+                    "moved",
+                    "already_junk",
+                    "not_found",
+                }:
                     moved += 1
+                    continue
+                if previous and not bool(previous.get("retryable", 1)):
+                    # COPY may already have placed this message in Junk. A
+                    # non-retryable partial is durably terminal so a later run
+                    # cannot create another destination copy.
+                    failed += 1
                     continue
                 locator = MessageRef(
                     message["account"],
@@ -745,6 +998,32 @@ def _move_persisted_subscription_to_junk(
                     int(message["uidvalidity"]),
                     int(message["uid"]),
                 )
+                action_claim = db.record_mailbox_action(
+                    subscription["id"],
+                    message["id"],
+                    action_key,
+                    action="move_to_junk",
+                    outcome="claimed",
+                    source_mailbox=locator.mailbox,
+                    target_mailbox=discovery.junk.name,
+                    operation_id=operation_id,
+                    claim_owner=claim_owner,
+                    retryable=False,
+                    error_code="mailbox_action_claimed",
+                    detail_redacted=(
+                        "Mailbox action reserved before external mutation; stale claims "
+                        "require manual review"
+                    ),
+                )
+                if not (
+                    action_claim["outcome"] == "claimed"
+                    and action_claim.get("operation_id") == operation_id
+                ):
+                    if action_claim["outcome"] in {"moved", "already_junk", "not_found"}:
+                        moved += 1
+                    else:
+                        failed += 1
+                    continue
                 action_result = connection.move_message_to_junk(locator, discovery.junk)
                 outcome = action_result.outcome.value
                 db.record_mailbox_action(
@@ -756,6 +1035,8 @@ def _move_persisted_subscription_to_junk(
                     source_mailbox=locator.mailbox,
                     target_mailbox=discovery.junk.name,
                     operation_id=operation_id,
+                    claim_owner=claim_owner,
+                    retryable=action_result.retryable,
                     error_code="mailbox_action_failed" if action_result.error else None,
                     detail_redacted=_redact_failure_detail(action_result.error),
                 )
@@ -770,6 +1051,7 @@ def _move_persisted_subscription_to_junk(
             "failed",
             error_code="mailbox_transport_failed",
             detail_redacted=_redact_failure_detail(str(error)),
+            claim_owner=claim_owner,
         )
         return moved, failed
 
@@ -778,6 +1060,7 @@ def _move_persisted_subscription_to_junk(
         "blocked" if failed == 0 else "failed",
         error_code="partial_mailbox_failure" if failed else None,
         detail_redacted=f"{failed} message action(s) failed" if failed else None,
+        claim_owner=claim_owner,
     )
     return moved, failed
 
@@ -821,15 +1104,27 @@ def _apply_manual_subscription_block(
     if not config.permits_mailbox_mutation:
         _record_persisted_block_needs_consent(subscription)
         return 0, 0
-    operation = db.get_or_create_unsubscribe_operation(
-        subscription["id"],
-        "manual-block-v1",
-        kind="block",
+    inbox_messages = db.list_message_refs(
+        subscription_id=subscription["id"],
+        mailbox_role="inbox",
+        limit=100_000,
     )
+    newest_message_id = max((int(row["id"]) for row in inbox_messages), default=0)
+    claim_owner = uuid.uuid4().hex
+    operation, acquired = db.claim_unsubscribe_operation(
+        subscription["id"],
+        f"manual-block-v2-{newest_message_id}",
+        claim_owner,
+        kind="block",
+        trigger_message_ref_id=newest_message_id or None,
+    )
+    if not acquired:
+        return 0, 0
     return _move_persisted_subscription_to_junk(
         config,
         subscription,
         operation["id"],
+        claim_owner=claim_owner,
     )
 
 
@@ -868,9 +1163,8 @@ def _change_sender_status(
         domain: The sender domain to change.
         new_status: One of "keep", "unsub", "block".
         sender: Optional pre-fetched sender dict. If None, fetches from DB.
-        config: When provided and new_status is "unsub", a real unsubscribe is
-            attempted (so the status reflects the actual outcome) instead of
-            optimistically marking the sender unsubscribed.
+        config: Configuration used for network/mailbox consent. If omitted,
+            the current configuration is loaded before any unsubscribe action.
 
     Returns:
         True if the status was changed, False if sender not found.
@@ -887,11 +1181,15 @@ def _change_sender_status(
     }
     sender_status, action_enum, style, label = status_map[new_status]
 
-    db.set_user_override(domain, new_status)
-    if new_status == "unsub" and config is not None:
-        # Perform a real unsubscribe; unsubscribe() sets the actual status.
-        _attempt_unsubscribe_for_domain(config, domain, sender)
+    status_changed = True
+    if new_status == "unsub":
+        result = _attempt_unsubscribe_for_domain(config or Config.load(), domain, sender)
+        if result.success:
+            db.update_sender_status(domain, sender_status)
+        else:
+            status_changed = False
     elif new_status == "block":
+        db.set_user_override(domain, new_status)
         block_config = config or Config.load()
         moved = 0
         failed = 0
@@ -907,6 +1205,7 @@ def _change_sender_status(
         db.update_sender_status(domain, sender_status)
         console.print(f"{_L} [block]→ Blocked[/block] ({moved} moved, {failed} partial/failed)")
     else:
+        db.set_user_override(domain, new_status)
         db.update_sender_status(domain, sender_status)
         console.print(f"{_L} [{style}]→ {label}[/{style}]")
 
@@ -941,7 +1240,7 @@ def _change_sender_status(
     learner = get_learner()
     learner.update_from_action(action_record)
 
-    return True
+    return status_changed
 
 
 # Simple email validation regex
@@ -1544,7 +1843,10 @@ def init(ctx):
     if _styled_confirm("Run first scan now?", default=True):
         _run_scan(config, verbose=True, dry_run=True)
 
-    console.print("\n[warning]Automation is disabled until you explicitly grant consent.[/warning]")
+    console.print(
+        "\n[warning]Unsubscribe and mailbox-write automation are disabled until you "
+        "explicitly grant consent.[/warning]"
+    )
     console.print(
         "Run [bold]nothx consent --all --yes[/bold] after reviewing the network and "
         "mailbox-write permissions."
@@ -1746,7 +2048,10 @@ def run(
     db.init_db()
 
     if dry_run:
-        console.print("[warning]DRY RUN - no changes will be made[/warning]\n")
+        console.print(
+            "[warning]DRY RUN - mailbox changes, unsubscribe requests, and cloud AI calls "
+            "are disabled[/warning]\n"
+        )
 
     _run_scan(
         config,
@@ -1914,6 +2219,17 @@ def _run_scan(
                 identity_kind=sender.identity_kind,
                 identity_value=sender.identity_value,
             )
+            if subscription is not None and _subscription_has_persisted_threat(subscription["id"]):
+                if not dry_run:
+                    db.set_subscription_policy(subscription["id"], "block")
+                classifications[sender.classification_key] = Classification(
+                    email_type=EmailType.COLD_OUTREACH,
+                    action=Action.BLOCK,
+                    confidence=1.0,
+                    reasoning=("Persisted Junk/phishing evidence requires local suppression"),
+                    source="provider_policy",
+                )
+                continue
             policy = subscription.get("policy_action") if subscription else None
             if policy in {"block", "keep", "unsub"}:
                 if policy == "keep" and (
@@ -1949,14 +2265,32 @@ def _run_scan(
                     reasoning="Provider junk/phishing evidence requires local suppression",
                     source="provider_policy",
                 )
-            elif sender.authentication_failed_emails:
+            elif sender.authentication_failed_emails > sender.authenticated_emails:
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.UNKNOWN,
                     action=Action.BLOCK,
                     confidence=1.0,
-                    reasoning="Trusted authentication failure requires local suppression",
+                    reasoning=("Trusted authentication failures dominate authenticated deliveries"),
                     source="auth_policy",
                 )
+            elif sender.authentication_failed_emails and sender.authenticated_emails:
+                current = classifications.get(sender.classification_key)
+                if (
+                    current is not None
+                    and current.action is Action.BLOCK
+                    and current.source != "user_rule"
+                ):
+                    classifications[sender.classification_key] = Classification(
+                        email_type=current.email_type,
+                        action=Action.REVIEW,
+                        confidence=current.confidence,
+                        reasoning=(
+                            f"{current.reasoning}; mixed authentication evidence requires review"
+                        ),
+                        source="auth_policy",
+                        recommended_action=current.recommended_action or current.action,
+                        original_source=current.original_source or current.source,
+                    )
 
     # Process results
     to_unsub = []
@@ -2159,7 +2493,7 @@ def _run_scan(
                         stats.failed += 1
                         progress.advance(task)
                         continue
-                    if authoritative and not config.permits_automatic_unsubscribe:
+                    if authoritative and not config.permits_unsubscribe:
                         _record_unsubscribe_needs_consent(
                             sender,
                             headers,
@@ -2167,7 +2501,7 @@ def _run_scan(
                         )
                         console.print(
                             f"[warning]Skipped unsubscribe for {_subscription_label(sender)}: "
-                            "network automation consent is missing. Run "
+                            "unsubscribe-contact consent is missing. Run "
                             "`nothx consent --unsubscribe --yes`.[/warning]"
                         )
                         stats.review_queued += 1
@@ -2182,6 +2516,10 @@ def _run_scan(
                             db.set_subscription_policy(subscription["id"], "unsub")
                             execute, exclusions, retry_generation, escalate = (
                                 _unsubscribe_operation_plan(subscription)
+                            )
+                            consent_resume = _is_unsubscribe_consent_resume(
+                                subscription,
+                                config,
                             )
                             if escalate:
                                 if config.permits_mailbox_mutation:
@@ -2212,6 +2550,7 @@ def _run_scan(
                                 subscription["id"],
                                 _operation_key("unsubscribe", sender, headers),
                                 claim_owner,
+                                allow_consent_resume=consent_resume,
                                 trigger_message_ref_id=(messages[0][1]["id"] if messages else None),
                                 retry_generation=retry_generation,
                             )
@@ -2281,8 +2620,16 @@ def _run_scan(
                                 continue
                         else:
                             # Legacy ScanResult compatibility for callers that
-                            # have not yet adopted subscription grouping.
-                            result = unsubscribe(headers[0], config, account_config)
+                            # have not yet adopted subscription grouping. Use
+                            # the same grouped policy gates rather than the
+                            # legacy executor, which permits
+                            # authentication-unknown traffic.
+                            result = unsubscribe_subscription(
+                                headers,
+                                config,
+                                account_config,
+                                automatic=True,
+                            )
                     except UnsafeUnsubscribeError:
                         logger.info("Protected subscription needs review: %s", sender.domain)
                         stats.review_queued += 1
@@ -2756,6 +3103,12 @@ def open_unsubscribe(subscription_id: int, yes: bool):
             "nothx will not contact its unsubscribe destination.[/warning]"
         )
         return
+    if not config.permits_unsubscribe:
+        console.print(
+            "[warning]Current versioned unsubscribe-contact consent is required; "
+            "no destination was scanned or opened.[/warning]"
+        )
+        return
 
     account_entry = next(
         (
@@ -2789,10 +3142,13 @@ def open_unsubscribe(subscription_id: int, yes: bool):
         ):
             continue
         matching_headers = scanned.get_emails_for_subscription(key)
-        if any(header.server_junk or header.server_phishing for header in matching_headers):
-            console.print(
-                "[warning]The rescan found Junk/phishing evidence; no destination was opened.[/warning]"
-            )
+        denied_header = next(
+            (header for header in matching_headers if not is_contact_permitted(header, config)),
+            None,
+        )
+        if denied_header is not None:
+            reason = contact_suppression_reason(denied_header) or "Contact is not permitted"
+            console.print(f"[warning]{reason}; no destination was opened.[/warning]")
             return
         for header in sorted(
             matching_headers,
@@ -2999,7 +3355,7 @@ def config_cmd(show: bool, ai: str | None, footer_scan: str | None, mode: str | 
         console.print(f"{_L} Scan days: {config.scan_days}")
         console.print(f"{_L} Scan Junk: {config.scan_junk}")
         console.print(f"{_L} Footer scan: {config.footer_scan_enabled}")
-        console.print(f"{_L} Automatic unsubscribe consent: {config.permits_automatic_unsubscribe}")
+        console.print(f"{_L} Unsubscribe contact consent: {config.permits_unsubscribe}")
         console.print(f"{_L} Mailbox mutation consent: {config.permits_mailbox_mutation}")
         console.print(f"{_L} Unsub confidence: {config.thresholds.unsub_confidence}")
         console.print(f"{_L} Keep confidence: {config.thresholds.keep_confidence}")
@@ -3009,7 +3365,7 @@ def config_cmd(show: bool, ai: str | None, footer_scan: str | None, mode: str | 
 @click.option(
     "--unsubscribe/--no-unsubscribe",
     default=None,
-    help="Grant/revoke automatic HTTPS or SMTP unsubscribe requests",
+    help="Grant/revoke outbound HTTPS, SMTP, or browser unsubscribe contact",
 )
 @click.option(
     "--mailbox-actions/--no-mailbox-actions",
@@ -3028,9 +3384,10 @@ def consent(
 ):
     """View or explicitly change versioned automation consent.
 
-    Unsubscribe consent permits outbound HTTPS/SMTP requests to authenticated
-    subscription endpoints. Mailbox-action consent permits IMAP flag changes
-    and moving exact UIDs to the server-advertised Junk mailbox.
+    Unsubscribe consent permits outbound HTTPS/SMTP requests and explicit
+    browser opening for authenticated subscription endpoints. Mailbox-action
+    consent permits IMAP flag changes and moving exact UIDs to the
+    server-advertised Junk mailbox.
     """
     config = Config.load()
     if grant_all and revoke_all:
@@ -3046,7 +3403,7 @@ def consent(
         console.print("\n[header]Automation Consent[/header]")
         console.print(
             f"{_L} Outbound unsubscribe requests: "
-            f"{'granted' if config.permits_automatic_unsubscribe else 'not granted'}"
+            f"{'granted' if config.permits_unsubscribe else 'not granted'}"
         )
         console.print(
             f"{_L} IMAP flag/Junk mailbox writes: "
@@ -3061,7 +3418,7 @@ def consent(
     changes: list[str] = []
     if unsubscribe is not None:
         changes.append(
-            "allow outbound HTTPS/SMTP unsubscribe requests"
+            "allow outbound HTTPS/SMTP/browser unsubscribe contact"
             if unsubscribe
             else "revoke outbound unsubscribe permission"
         )
@@ -3233,9 +3590,15 @@ def _senders_bulk_action(all_senders: list[dict], status_filter: str) -> None:
         console.print("[muted]Cancelled.[/muted]")
         return
 
+    config = Config.load()
     changed = 0
     for sender_item in all_senders:
-        if _change_sender_status(sender_item["domain"], bulk_action, sender=sender_item):
+        if _change_sender_status(
+            sender_item["domain"],
+            bulk_action,
+            sender=sender_item,
+            config=config,
+        ):
             changed += 1
 
     console.print(f"\n[success]\u2713 Changed {changed} senders[/success]")
@@ -3276,7 +3639,12 @@ def _senders_pick_individual(displayed_senders: list[dict]) -> None:
     new = _styled_select(status_choices)
 
     if new is not None:
-        _change_sender_status(selected_domain, new, sender=sender_data)
+        _change_sender_status(
+            selected_domain,
+            new,
+            sender=sender_data,
+            config=Config.load(),
+        )
     console.print()
 
 

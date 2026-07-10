@@ -149,9 +149,14 @@ class AIClassifier:
 
         Chunking keeps each response comfortably under the output token
         limit; a single oversized request would truncate mid-JSON and lose
-        every classification in it. When persist is False (dry-run),
-        classifications are not written to the database.
+        every classification in it. ``persist=False`` is the privacy boundary
+        used by dry-run and pre-consent scans: it disables both provider egress
+        and database writes.
         """
+        if not persist:
+            logger.info("AI egress disabled for non-persistent classification")
+            return {}
+
         if not self.is_available():
             logger.debug("AI classification unavailable, skipping batch")
             return {}
@@ -363,9 +368,9 @@ class AIClassifier:
         # Remove surrounding quotes from json.dumps output
         return json_escaped[1:-1]
 
-    def classify_single(self, sender: SenderStats) -> Classification | None:
-        """Classify a single sender."""
-        results = self.classify_batch([sender])
+    def classify_single(self, sender: SenderStats, persist: bool = True) -> Classification | None:
+        """Classify one sender, honoring the same no-egress boundary as batches."""
+        results = self.classify_batch([sender], persist=persist)
         return results.get(sender.classification_key)
 
     def _get_correction_context(self) -> str:

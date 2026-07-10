@@ -35,7 +35,7 @@ from nothx.cli import (
 from nothx.cli import (
     test_connection as connection_command,
 )
-from nothx.config import AccountConfig, Config
+from nothx.config import CURRENT_UNSUBSCRIBE_CONSENT_VERSION, AccountConfig, Config
 from nothx.models import (
     RunStats,
     SenderStatus,
@@ -246,6 +246,7 @@ class TestRunCommand:
 
         assert result.exit_code == 0
         assert "DRY RUN" in result.output
+        assert "cloud AI calls are disabled" in result.output
 
     @patch("nothx.cli.scan_inbox")
     @patch("nothx.cli.ClassificationEngine")
@@ -287,7 +288,7 @@ class TestRunCommand:
         mock_engine_class.return_value = mock_engine
         mock_engine.classify_batch.return_value = classifications
 
-    @patch("nothx.cli.unsubscribe")
+    @patch("nothx.cli.unsubscribe_subscription")
     @patch("nothx.cli.scan_inbox")
     @patch("nothx.cli.ClassificationEngine")
     def test_run_user_rule_not_deferred_by_min_emails(
@@ -316,7 +317,34 @@ class TestRunCommand:
         # Not deferred to review — the unsubscribe actually ran.
         assert mock_unsub.called
 
-    @patch("nothx.cli.unsubscribe")
+    @patch("nothx.cli.scan_inbox")
+    @patch("nothx.cli.ClassificationEngine")
+    def test_legacy_scan_result_never_contacts_authentication_unknown_target(
+        self, mock_engine_class, mock_scan, runner, configured_env, temp_config_dir
+    ):
+        from nothx.models import Action, Classification, EmailType, SenderStats
+
+        configured_env.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+        configured_env.save()
+        stats = {"shop.com": SenderStats(domain="shop.com", total_emails=3)}
+        classifications = {
+            "shop.com": Classification(
+                email_type=EmailType.MARKETING,
+                action=Action.UNSUB,
+                confidence=1.0,
+                reasoning="explicit rule",
+                source="user_rule",
+            )
+        }
+        self._mock_scan_and_engine(mock_scan, mock_engine_class, stats, classifications)
+
+        with patch("nothx.unsubscriber.safe_fetch") as fetch:
+            result = runner.invoke(run, ["--auto"])
+
+        assert result.exit_code == 0
+        fetch.assert_not_called()
+
+    @patch("nothx.cli.unsubscribe_subscription")
     @patch("nothx.cli.scan_inbox")
     @patch("nothx.cli.ClassificationEngine")
     def test_run_confirm_mode_auto_skips_without_prompt(

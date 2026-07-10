@@ -363,9 +363,14 @@ class Config:
         return None
 
     @property
-    def permits_automatic_unsubscribe(self) -> bool:
-        """Return whether current-version network automation was accepted."""
+    def permits_unsubscribe(self) -> bool:
+        """Return whether current-version outbound unsubscribe contact was accepted."""
         return self.unsubscribe_consent_version == CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+
+    @property
+    def permits_automatic_unsubscribe(self) -> bool:
+        """Compatibility alias for the versioned unsubscribe-contact consent."""
+        return self.permits_unsubscribe
 
     @property
     def permits_mailbox_mutation(self) -> bool:

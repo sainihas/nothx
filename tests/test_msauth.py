@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import stat
 import urllib.error
 from pathlib import Path
@@ -241,6 +242,29 @@ class TestTokenCache:
 
         assert path.stat().st_mode & 0o777 == 0o600
 
+    def test_replace_failure_does_not_close_a_reused_descriptor(self, token_dir: Path) -> None:
+        """fdopen owns the temp fd, even if its number is reused after close."""
+        victim = token_dir / "victim"
+        victim.write_text("still open")
+        victim_fds: list[int] = []
+
+        def fail_after_reuse(*_args: object) -> None:
+            victim_fds.append(os.open(victim, os.O_RDONLY))
+            raise OSError("replace failed")
+
+        with (
+            patch("nothx.msauth.os.replace", side_effect=fail_after_reuse),
+            pytest.raises(OSError, match="replace failed"),
+        ):
+            msauth.save_token("user@live.com", TOKEN_RESPONSE, "client")
+
+        assert victim_fds
+        victim_fd = victim_fds[0]
+        try:
+            assert os.fstat(victim_fd).st_size == len("still open")
+        finally:
+            os.close(victim_fd)
+
     def test_rotated_refresh_token_is_saved_and_missing_rotation_is_preserved(
         self, token_dir: Path
     ) -> None:
@@ -274,13 +298,70 @@ class TestTokenCache:
         assert cached["client_id"] == "new-client"
         assert cached["refresh_token"] is None
 
-    def test_corrupt_cache_is_ignored_and_can_be_replaced(self, token_dir: Path) -> None:
+    def test_corrupt_cache_fails_closed_and_is_never_replaced(self, token_dir: Path) -> None:
         path = token_dir / "tokens.json"
-        path.write_text("{not-json")
+        original = b'{"accounts":{"other@live.com":{"refresh_token":"keep-me"}}'
+        path.write_bytes(original)
 
-        assert msauth.load_token("user@live.com") is None
-        msauth.save_token("user@live.com", TOKEN_RESPONSE, "client")
-        assert msauth.load_token("user@live.com") is not None
+        with pytest.raises(OAuthError) as load_error:
+            msauth.load_token("user@live.com")
+        with pytest.raises(OAuthError) as save_error:
+            msauth.save_token("user@live.com", TOKEN_RESPONSE, "client")
+
+        assert load_error.value.code is ErrorCode.OAUTH_CACHE_ERROR
+        assert save_error.value.code is ErrorCode.OAUTH_CACHE_ERROR
+        assert path.read_bytes() == original
+
+    def test_unreadable_cache_cannot_discard_other_accounts(self, token_dir: Path) -> None:
+        msauth.save_token("one@live.com", TOKEN_RESPONSE, "client")
+        msauth.save_token(
+            "two@live.com",
+            dict(TOKEN_RESPONSE, access_token="access-2", refresh_token="refresh-2"),
+            "client",
+        )
+        path = token_dir / "tokens.json"
+        original = path.read_bytes()
+        real_open = msauth.os.open
+
+        def deny_token_cache(candidate, flags, mode=0o777, *, dir_fd=None):
+            if Path(candidate) == path:
+                raise PermissionError("token cache is unreadable")
+            if dir_fd is None:
+                return real_open(candidate, flags, mode)
+            return real_open(candidate, flags, mode, dir_fd=dir_fd)
+
+        with (
+            patch("nothx.msauth.os.open", side_effect=deny_token_cache),
+            pytest.raises(OAuthError) as exc_info,
+        ):
+            msauth.save_token("three@live.com", TOKEN_RESPONSE, "client")
+
+        assert exc_info.value.code is ErrorCode.OAUTH_CACHE_ERROR
+        assert path.read_bytes() == original
+        assert msauth.load_token("one@live.com") is not None
+        assert msauth.load_token("two@live.com") is not None
+        assert msauth.load_token("three@live.com") is None
+
+    def test_structurally_invalid_account_entry_prevents_partial_rewrite(
+        self, token_dir: Path
+    ) -> None:
+        path = token_dir / "tokens.json"
+        original = json.dumps(
+            {
+                "version": msauth.CACHE_VERSION,
+                "accounts": {
+                    "one@live.com": dict(TOKEN_RESPONSE),
+                    "two@live.com": "corrupt-account-record",
+                },
+            }
+        ).encode()
+        path.write_bytes(original)
+
+        with pytest.raises(OAuthError) as exc_info:
+            msauth.save_token("three@live.com", TOKEN_RESPONSE, "client")
+
+        assert exc_info.value.code is ErrorCode.OAUTH_CACHE_ERROR
+        assert path.read_bytes() == original
 
     def test_read_repairs_legacy_permissive_mode(self, token_dir: Path) -> None:
         path = token_dir / "tokens.json"

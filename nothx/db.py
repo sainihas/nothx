@@ -67,9 +67,23 @@ def init_db() -> None:
     try:
         old_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
         has_user_tables = _has_user_tables(conn)
-        if old_version < SCHEMA_VERSION and has_user_tables:
+        needs_current_schema_repair = (
+            old_version == SCHEMA_VERSION
+            and has_user_tables
+            and (
+                not _column_exists(conn, "mailbox_actions", "retryable")
+                or any(
+                    not _column_exists(conn, "unsubscribe_operations", column)
+                    for column in ("claim_owner", "claimed_at", "claim_expires_at")
+                )
+            )
+        )
+        if has_user_tables and (old_version < SCHEMA_VERSION or needs_current_schema_repair):
             _create_migration_backup(conn, db_path, old_version)
 
+        # Use explicit transaction control for schema changes. This keeps the
+        # migration atomic regardless of sqlite3's legacy transaction mode.
+        conn.isolation_level = None
         conn.execute("BEGIN IMMEDIATE")
         _create_legacy_tables(conn)
         _migrate(conn, old_version)
@@ -210,15 +224,31 @@ def _create_migration_backup(conn: sqlite3.Connection, db_path: Path, old_versio
     backup_path = db_path.with_name(
         f"{db_path.name}.backup-v{old_version}-to-v{SCHEMA_VERSION}-{stamp}"
     )
-    backup_conn = sqlite3.connect(backup_path)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        conn.backup(backup_conn)
-    finally:
-        backup_conn.close()
-    try:
-        os.chmod(backup_path, 0o600)
-    except OSError:
-        pass
+        fd = os.open(backup_path, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+
+        backup_conn = sqlite3.connect(backup_path)
+        try:
+            conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+        # Fail the migration if owner-only permissions cannot be guaranteed.
+        # The snapshot contains sender metadata and must not be left readable
+        # according to the process umask or inherited filesystem defaults.
+        backup_path.chmod(0o600)
+    except Exception:
+        try:
+            backup_path.unlink()
+        except OSError:
+            pass
+        raise
     return backup_path
 
 
@@ -253,6 +283,21 @@ def _migrate(conn: sqlite3.Connection, version: int | None = None) -> None:
     _add_column_if_missing(conn, "unsubscribe_operations", "claim_owner", "TEXT")
     _add_column_if_missing(conn, "unsubscribe_operations", "claimed_at", "TEXT")
     _add_column_if_missing(conn, "unsubscribe_operations", "claim_expires_at", "TEXT")
+    had_mailbox_retryability = _column_exists(conn, "mailbox_actions", "retryable")
+    _add_column_if_missing(
+        conn,
+        "mailbox_actions",
+        "retryable",
+        "INTEGER NOT NULL DEFAULT 1 CHECK (retryable IN (0, 1))",
+    )
+    if not had_mailbox_retryability:
+        # Every pre-fix PARTIAL result followed COPY, and a legacy FAILED row
+        # cannot distinguish a pre-COPY rejection from an ambiguous transport
+        # loss after COPY. Fail closed for both so upgrading cannot create a
+        # second destination copy.
+        conn.execute(
+            "UPDATE mailbox_actions SET retryable = 0 WHERE outcome IN ('partial', 'failed')"
+        )
     _create_authoritative_indexes(conn)
 
     if version < 2:
@@ -441,6 +486,7 @@ def _create_authoritative_tables(conn: sqlite3.Connection) -> None:
             source_mailbox TEXT NOT NULL CHECK (length(source_mailbox) > 0),
             target_mailbox TEXT,
             dry_run INTEGER NOT NULL DEFAULT 0 CHECK (dry_run IN (0, 1)),
+            retryable INTEGER NOT NULL DEFAULT 1 CHECK (retryable IN (0, 1)),
             error_code TEXT,
             detail_redacted TEXT,
             started_at TEXT NOT NULL,
@@ -488,14 +534,15 @@ def _migrate_explicit_legacy_overrides(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         INSERT INTO rules (pattern, action, created_at, priority, source, match_type)
-        SELECT lower(trim(domain)), user_override, ?, 1000, 'legacy_override', 'exact'
-        FROM senders
-        WHERE user_override IN ('keep', 'block') AND length(trim(domain)) > 0
-        ON CONFLICT(pattern) DO UPDATE SET
-            action = excluded.action,
-            priority = excluded.priority,
-            source = excluded.source,
-            match_type = excluded.match_type
+        SELECT lower(trim(s.domain)), s.user_override, ?, 1000, 'legacy_override', 'exact'
+        FROM senders AS s
+        WHERE s.user_override IN ('keep', 'block')
+          AND length(trim(s.domain)) > 0
+          AND NOT EXISTS (
+              SELECT 1 FROM rules AS r
+              WHERE lower(trim(r.pattern)) = lower(trim(s.domain))
+          )
+        ON CONFLICT(pattern) DO NOTHING
         """,
         (now,),
     )
@@ -1305,23 +1352,27 @@ def claim_unsubscribe_operation(
     operation_key: str,
     claim_owner: str,
     *,
+    kind: str = "unsubscribe",
+    allow_consent_resume: bool = False,
     trigger_message_ref_id: int | None = None,
     retry_generation: int = 0,
     lease_seconds: int = DEFAULT_OPERATION_LEASE_SECONDS,
     claimed_at: datetime | str | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    """Atomically reserve one source/generation before external side effects.
+    """Atomically reserve one unsubscribe or mailbox operation.
 
     A second process never owns an existing claim. If a different owner finds
     an expired claim, the operation becomes ``needs_user`` instead of being
-    replayed: the previous process may have contacted the endpoint before it
-    crashed. Returning ``acquired=False`` is therefore a hard no-network
-    decision for the caller.
+    replayed: the previous process may have contacted an endpoint or mutated a
+    mailbox before it crashed. Returning ``acquired=False`` is therefore a
+    hard no-side-effect decision for the caller.
     """
     operation_key = _validate_nonempty(operation_key, "operation key", 255)
     if "://" in operation_key or "?" in operation_key:
         raise ValueError("operation_key must not contain a raw URL")
     owner = _validate_nonempty(claim_owner, "claim owner", 255)
+    if kind not in {"unsubscribe", "block"}:
+        raise ValueError("Claim kind must be 'unsubscribe' or 'block'")
     if retry_generation < 0:
         raise ValueError("retry_generation cannot be negative")
     if not 1 <= lease_seconds <= 24 * 60 * 60:
@@ -1355,6 +1406,74 @@ def claim_unsubscribe_operation(
         if existing is not None:
             current = dict(existing)
             if current["outcome"] is not None:
+                if kind == "block" and current["outcome"] == "failed":
+                    live_conflict = conn.execute(
+                        """
+                        SELECT * FROM unsubscribe_operations
+                        WHERE subscription_id = ? AND id != ?
+                          AND outcome IS NULL AND claim_owner IS NOT NULL
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (subscription_id, current["id"]),
+                    ).fetchone()
+                    if live_conflict is not None:
+                        conflicting = dict(live_conflict)
+                        conflict_expiry = conflicting.get("claim_expires_at")
+                        conflict_expired = True
+                        if conflict_expiry:
+                            try:
+                                conflict_expired = (
+                                    datetime.fromisoformat(conflict_expiry) <= claimed_datetime
+                                )
+                            except ValueError:
+                                conflict_expired = True
+                        if conflict_expired:
+                            conn.execute(
+                                """
+                                UPDATE unsubscribe_operations
+                                SET outcome = 'needs_user', completed_at = ?,
+                                    error_code = 'execution_claim_expired',
+                                    detail_redacted = ?, claim_owner = NULL,
+                                    claimed_at = NULL, claim_expires_at = NULL,
+                                    updated_at = ?
+                                WHERE id = ? AND outcome IS NULL
+                                """,
+                                (
+                                    claimed,
+                                    (
+                                        "A prior execution may have contacted the endpoint; automatic replay is suppressed"
+                                        if conflicting["kind"] == "unsubscribe"
+                                        else "A prior execution may have mutated the mailbox; automatic replay is suppressed"
+                                    ),
+                                    claimed,
+                                    conflicting["id"],
+                                ),
+                            )
+                            row = conn.execute(
+                                "SELECT * FROM unsubscribe_operations WHERE id = ?",
+                                (conflicting["id"],),
+                            ).fetchone()
+                            assert row is not None
+                            conflicting = dict(row)
+                            _sync_subscription_outcome(conn, conflicting, claimed)
+                        return conflicting, False
+                    conn.execute(
+                        """
+                        UPDATE unsubscribe_operations
+                        SET outcome = NULL, completed_at = NULL,
+                            error_code = NULL, detail_redacted = NULL,
+                            claim_owner = ?, claimed_at = ?, claim_expires_at = ?,
+                            updated_at = ?
+                        WHERE id = ? AND outcome = 'failed'
+                        """,
+                        (owner, claimed, expires, claimed, current["id"]),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM unsubscribe_operations WHERE id = ?",
+                        (current["id"],),
+                    ).fetchone()
+                    assert row is not None
+                    return dict(row), True
                 return current, False
             if current.get("claim_owner") == owner:
                 return current, True
@@ -1372,12 +1491,18 @@ def claim_unsubscribe_operation(
                     UPDATE unsubscribe_operations
                     SET outcome = 'needs_user', completed_at = ?,
                         error_code = 'execution_claim_expired',
-                        detail_redacted = ?, updated_at = ?
+                        detail_redacted = ?, claim_owner = NULL,
+                        claimed_at = NULL, claim_expires_at = NULL,
+                        updated_at = ?
                     WHERE id = ? AND outcome IS NULL
                     """,
                     (
                         claimed,
-                        "A prior execution may have contacted the endpoint; automatic replay is suppressed",
+                        (
+                            "A prior execution may have contacted the endpoint; automatic replay is suppressed"
+                            if kind == "unsubscribe"
+                            else "A prior execution may have mutated the mailbox; automatic replay is suppressed"
+                        ),
                         claimed,
                         current["id"],
                     ),
@@ -1398,15 +1523,31 @@ def claim_unsubscribe_operation(
         conflict = conn.execute(
             """
             SELECT * FROM unsubscribe_operations
-            WHERE subscription_id = ? AND kind = 'unsubscribe'
+            WHERE subscription_id = ?
               AND (
-                  outcome = 'requested'
+                  (? = 'unsubscribe' AND kind = 'unsubscribe' AND (
+                      outcome = 'requested'
+                      OR (
+                          retry_generation = ?
+                          AND outcome IN ('needs_user', 'failed')
+                          AND NOT (
+                              ? = 1
+                              AND outcome = 'needs_user'
+                              AND error_code = 'unsubscribe_consent_required'
+                          )
+                      )
+                  ))
                   OR (outcome IS NULL AND claim_owner IS NOT NULL)
               )
-            ORDER BY CASE WHEN outcome = 'requested' THEN 0 ELSE 1 END, id DESC
+            ORDER BY CASE WHEN outcome IS NULL THEN 0 ELSE 1 END, id DESC
             LIMIT 1
             """,
-            (subscription_id,),
+            (
+                subscription_id,
+                kind,
+                retry_generation,
+                int(allow_consent_resume),
+            ),
         ).fetchone()
         if conflict is not None:
             current = dict(conflict)
@@ -1425,12 +1566,18 @@ def claim_unsubscribe_operation(
                         UPDATE unsubscribe_operations
                         SET outcome = 'needs_user', completed_at = ?,
                             error_code = 'execution_claim_expired',
-                            detail_redacted = ?, updated_at = ?
+                            detail_redacted = ?, claim_owner = NULL,
+                            claimed_at = NULL, claim_expires_at = NULL,
+                            updated_at = ?
                         WHERE id = ? AND outcome IS NULL
                         """,
                         (
                             claimed,
-                            "A prior execution may have contacted the endpoint; automatic replay is suppressed",
+                            (
+                                "A prior execution may have contacted the endpoint; automatic replay is suppressed"
+                                if current["kind"] == "unsubscribe"
+                                else "A prior execution may have mutated the mailbox; automatic replay is suppressed"
+                            ),
                             claimed,
                             current["id"],
                         ),
@@ -1450,11 +1597,12 @@ def claim_unsubscribe_operation(
                 trigger_message_ref_id, retry_generation, attempt_count,
                 started_at, claim_owner, claimed_at, claim_expires_at,
                 created_at, updated_at
-            ) VALUES (?, ?, 'unsubscribe', NULL, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?, ?)
             """,
             (
                 subscription_id,
                 operation_key,
+                kind,
                 trigger_message_ref_id,
                 retry_generation,
                 claimed,
@@ -1534,6 +1682,8 @@ def update_unsubscribe_operation_outcome(
         ).fetchone()
         if current is None:
             raise ValueError("Unknown operation_id")
+        if current["claim_owner"] is not None and current["claim_owner"] != claim_owner:
+            raise ValueError("Unsubscribe operation claim is not owned by this executor")
         if claim_owner is not None and current["claim_owner"] != claim_owner:
             raise ValueError("Unsubscribe operation claim is not owned by this executor")
         current_outcome = current["outcome"]
@@ -1805,7 +1955,9 @@ def record_mailbox_action(
     source_mailbox: str,
     target_mailbox: str | None = None,
     operation_id: int | None = None,
+    claim_owner: str | None = None,
     dry_run: bool = False,
+    retryable: bool = True,
     error_code: str | None = None,
     detail_redacted: str | None = None,
     started_at: datetime | str | None = None,
@@ -1832,55 +1984,117 @@ def record_mailbox_action(
             raise ValueError("Mailbox-action message does not belong to subscription")
         if message["mailbox"] != source_mailbox:
             raise ValueError("Source mailbox does not match the persisted message reference")
+        if outcome == "claimed" and (operation_id is None or claim_owner is None):
+            raise ValueError("A mailbox action claim requires an owned operation")
+        operation: sqlite3.Row | None = None
         if operation_id is not None:
             operation = conn.execute(
-                "SELECT subscription_id FROM unsubscribe_operations WHERE id = ?",
+                """
+                SELECT subscription_id, outcome, claim_owner
+                FROM unsubscribe_operations WHERE id = ?
+                """,
                 (operation_id,),
             ).fetchone()
             if operation is None or operation["subscription_id"] != subscription_id:
                 raise ValueError("Mailbox-action operation does not belong to subscription")
+            if operation["claim_owner"] is not None and (
+                claim_owner != operation["claim_owner"] or operation["outcome"] is not None
+            ):
+                raise ValueError("Mailbox-action operation claim is not owned by this executor")
+            if claim_owner is not None and operation["claim_owner"] != claim_owner:
+                raise ValueError("Mailbox-action operation claim is not owned by this executor")
+        prior_action = conn.execute(
+            """
+            SELECT outcome, operation_id FROM mailbox_actions
+            WHERE message_ref_id = ? AND action_key = ?
+            """,
+            (message_ref_id, action_key),
+        ).fetchone()
+        if prior_action is not None and prior_action["outcome"] == "claimed":
+            if (
+                operation_id != prior_action["operation_id"]
+                or claim_owner is None
+                or operation is None
+                or operation["outcome"] is not None
+                or operation["claim_owner"] != claim_owner
+            ):
+                raise ValueError("Mailbox-action claim completion is not owned by this executor")
         conn.execute(
             """
             INSERT INTO mailbox_actions (
                 subscription_id, message_ref_id, operation_id, action_key,
                 action, outcome, source_mailbox, target_mailbox, dry_run,
-                error_code, detail_redacted, started_at, completed_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                retryable, error_code, detail_redacted, started_at, completed_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_ref_id, action_key) DO UPDATE SET
                 operation_id = CASE
                     WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
                         THEN mailbox_actions.operation_id
                     ELSE excluded.operation_id END,
                 action = CASE
                     WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
                         THEN mailbox_actions.action
                     ELSE excluded.action END,
                 outcome = CASE
                     WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
                         THEN mailbox_actions.outcome
                     ELSE excluded.outcome END,
                 target_mailbox = CASE
                     WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
                         THEN mailbox_actions.target_mailbox
                     ELSE excluded.target_mailbox END,
                 dry_run = CASE
                     WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
                         THEN mailbox_actions.dry_run
                     ELSE excluded.dry_run END,
+                retryable = CASE
+                    WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
+                        THEN mailbox_actions.retryable
+                    ELSE excluded.retryable END,
                 error_code = CASE
                     WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
                         THEN mailbox_actions.error_code
                     ELSE excluded.error_code END,
                 detail_redacted = CASE
                     WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
                         THEN mailbox_actions.detail_redacted
                     ELSE excluded.detail_redacted END,
                 started_at = CASE
                     WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
                         THEN mailbox_actions.started_at
                     ELSE excluded.started_at END,
                 completed_at = CASE
                     WHEN mailbox_actions.outcome IN ('moved', 'already_junk', 'not_found')
+                         OR (mailbox_actions.retryable = 0 AND NOT (
+                             mailbox_actions.outcome = 'claimed'
+                             AND mailbox_actions.operation_id IS excluded.operation_id))
                         THEN mailbox_actions.completed_at
                     ELSE excluded.completed_at END
             """,
@@ -1894,6 +2108,7 @@ def record_mailbox_action(
                 source_mailbox,
                 target_mailbox,
                 int(dry_run),
+                int(retryable),
                 error_code,
                 detail_redacted,
                 started,

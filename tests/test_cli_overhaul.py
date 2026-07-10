@@ -13,6 +13,7 @@ from click.testing import CliRunner
 
 from nothx import db
 from nothx.cli import (
+    _attempt_unsubscribe_for_domain,
     _block_subscription,
     _operation_key,
     _persist_subscription_records,
@@ -267,6 +268,38 @@ def test_block_path_never_calls_unsubscribe(configured_cli):
     unsubscribe.assert_not_called()
 
 
+def test_mixed_authentication_cli_policy_does_not_poison_subscription(configured_cli):
+    runner, config = configured_cli
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _subscription_scan(Action.BLOCK)
+    key = next(iter(scan_result.subscription_stats))
+    sender = scan_result.subscription_stats[key]
+    sender.authenticated_emails = 3
+    sender.authentication_failed_emails = 1
+    classifications[key] = Classification(
+        email_type=EmailType.MARKETING,
+        action=Action.BLOCK,
+        confidence=0.99,
+        reasoning="AI treated fail-dominant aggregate booleans as spam",
+        source="ai",
+    )
+    engine = MagicMock()
+    engine.classify_batch.return_value = classifications
+
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine", return_value=engine),
+        patch("nothx.cli._block_subscription") as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe,
+    ):
+        result = runner.invoke(run, ["--auto"])
+
+    assert result.exit_code == 0
+    block.assert_not_called()
+    unsubscribe.assert_not_called()
+
+
 def test_preclaimed_operation_prevents_duplicate_network_execution(configured_cli):
     runner, config = configured_cli
     config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
@@ -299,7 +332,37 @@ def test_preclaimed_operation_prevents_duplicate_network_execution(configured_cl
     assert db.get_unsubscribe_operation(operation["id"])["outcome"] is None
 
 
-def test_partial_mailbox_action_is_retried_until_source_is_removed(configured_cli):
+def test_preclaimed_block_operation_prevents_duplicate_mailbox_execution(configured_cli):
+    _runner, config = configured_cli
+    scan_result, classifications = _subscription_scan(Action.BLOCK)
+    key = next(iter(scan_result.subscription_emails))
+    sender = scan_result.subscription_stats[key]
+    headers = scan_result.subscription_emails[key]
+    classification = classifications[key]
+    subscription, messages = _persist_subscription_records(
+        sender,
+        headers,
+        classification,
+        policy_action="block",
+    )
+    operation, acquired = db.claim_unsubscribe_operation(
+        subscription["id"],
+        _operation_key("block", sender, headers),
+        "other-live-process",
+        kind="block",
+        trigger_message_ref_id=messages[0][1]["id"],
+    )
+    assert acquired is True
+
+    with patch("nothx.cli.IMAPConnection") as connection:
+        result = _block_subscription(config, sender, headers, classification)
+
+    assert result == (0, 0)
+    connection.assert_not_called()
+    assert db.get_unsubscribe_operation(operation["id"])["outcome"] is None
+
+
+def test_nonretryable_partial_mailbox_action_is_not_copied_again(configured_cli):
     _runner, config = configured_cli
     scan_result, classifications = _subscription_scan(Action.BLOCK)
     key = next(iter(scan_result.subscription_emails))
@@ -320,29 +383,23 @@ def test_partial_mailbox_action_is_retried_until_source_is_removed(configured_cl
         junk=junk,
         junk_candidates=(junk,),
     )
-    connection.move_message_to_junk.side_effect = [
-        MailboxActionResult(
-            MailboxActionOutcome.PARTIAL,
-            locator,
-            junk.wire_name,
-            error="copied but source remains",
-        ),
-        MailboxActionResult(
-            MailboxActionOutcome.MOVED,
-            locator,
-            junk.wire_name,
-            source_removed=True,
-        ),
-    ]
+    connection.move_message_to_junk.return_value = MailboxActionResult(
+        MailboxActionOutcome.PARTIAL,
+        locator,
+        junk.wire_name,
+        retryable=False,
+        error="copied but source remains",
+    )
 
     with patch("nothx.cli.IMAPConnection", return_value=connection):
         assert _block_subscription(config, sender, headers, classification) == (0, 1)
-        assert _block_subscription(config, sender, headers, classification) == (1, 0)
+        assert _block_subscription(config, sender, headers, classification) == (0, 1)
 
-    assert connection.move_message_to_junk.call_count == 2
+    assert connection.move_message_to_junk.call_count == 1
     actions = db.list_mailbox_actions()
     assert len(actions) == 1
-    assert actions[0]["outcome"] == "moved"
+    assert actions[0]["outcome"] == "partial"
+    assert actions[0]["retryable"] == 0
 
 
 def test_block_moves_all_persisted_inbox_refs_not_only_current_scan(configured_cli):
@@ -579,6 +636,47 @@ def test_active_unsubscribe_policy_cannot_be_reclassified_to_keep(configured_cli
     assert result.exit_code == 0
     unsubscribe.assert_called_once()
     record.assert_called_once()
+
+
+def test_persisted_junk_evidence_overrides_active_unsubscribe_policy(configured_cli):
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _subscription_scan(Action.UNSUB)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    subscription = db.upsert_subscription(
+        sender.account_key,
+        sender.identity_kind,
+        sender.identity_value,
+        list_id=sender.identity_value,
+        sender_domain=sender.domain,
+        policy_action="unsub",
+    )
+    db.upsert_message_ref(
+        subscription["id"],
+        sender.account_key,
+        "[Gmail]/Spam",
+        "junk",
+        77,
+        88,
+        flags=["$Junk"],
+    )
+    engine = MagicMock()
+    engine.classify_batch.return_value = classifications
+
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine", return_value=engine),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe,
+    ):
+        result = runner.invoke(run, ["--auto"])
+
+    assert result.exit_code == 0
+    block.assert_called_once()
+    unsubscribe.assert_not_called()
+    assert db.get_subscription(subscription["id"])["policy_action"] == "block"
 
 
 def test_persistence_uses_promoted_scanner_identity(configured_cli):
@@ -876,7 +974,9 @@ def test_failure_detail_redaction_removes_query_and_mailto_tokens():
 
 
 def test_manual_page_open_rescans_and_never_prints_token(configured_cli):
-    runner, _config = configured_cli
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.save()
     scan_result, _classifications = _subscription_scan(Action.REVIEW)
     key = next(iter(scan_result.subscription_emails))
     header = scan_result.subscription_emails[key][0]
@@ -906,6 +1006,209 @@ def test_manual_page_open_rescans_and_never_prints_token(configured_cli):
     assert "sender.example" not in result.output
     scan.assert_called_once()
     browser.assert_called_once_with(header.list_unsubscribe_targets[0])
+
+
+def test_manual_domain_unsubscribe_without_consent_makes_no_contact(configured_cli):
+    _runner, config = configured_cli
+    sender = {"domain": "sender.example"}
+    with (
+        patch("nothx.scanner.get_emails_for_domain") as fetch_headers,
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe_call,
+    ):
+        result = _attempt_unsubscribe_for_domain(config, "sender.example", sender)
+
+    assert result.outcome is UnsubscribeOutcome.NEEDS_USER
+    assert result.needs_confirmation
+    fetch_headers.assert_not_called()
+    unsubscribe_call.assert_not_called()
+
+
+def test_manual_domain_unsubscribe_refuses_junk_before_executor(configured_cli):
+    _runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    scan_result, _classifications = _subscription_scan(Action.REVIEW)
+    item = next(iter(scan_result.subscription_emails.values()))[0]
+    item.keywords = ("$Junk",)
+    with (
+        patch("nothx.scanner.get_emails_for_domain", return_value=[item]),
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe_call,
+    ):
+        result = _attempt_unsubscribe_for_domain(
+            config,
+            "sender.example",
+            {"domain": "sender.example"},
+        )
+
+    assert result.outcome is UnsubscribeOutcome.BLOCKED
+    unsubscribe_call.assert_not_called()
+
+
+def test_manual_domain_unsubscribe_refuses_persisted_block_before_rescan(configured_cli):
+    _runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    subscription = db.upsert_subscription(
+        "user@example.com",
+        "list_id",
+        "blocked.sender.example",
+        sender_domain="sender.example",
+        policy_action="block",
+    )
+    db.upsert_message_ref(
+        subscription["id"],
+        "user@example.com",
+        "Junk",
+        "junk",
+        44,
+        92,
+        provider_verdict="phishing",
+    )
+
+    with (
+        patch("nothx.scanner.get_emails_for_domain") as fetch_headers,
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe_call,
+    ):
+        result = _attempt_unsubscribe_for_domain(
+            config,
+            "sender.example",
+            {"domain": "sender.example"},
+        )
+
+    assert result.outcome is UnsubscribeOutcome.BLOCKED
+    fetch_headers.assert_not_called()
+    unsubscribe_call.assert_not_called()
+
+
+def test_manual_domain_request_is_authoritative_and_not_replayed(configured_cli):
+    _runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    scan_result, _classifications = _subscription_scan(Action.REVIEW)
+    item = next(iter(scan_result.subscription_emails.values()))[0]
+    accepted = UnsubResult(
+        True,
+        UnsubMethod.GET,
+        outcome=UnsubscribeOutcome.REQUESTED,
+    )
+
+    with (
+        patch("nothx.scanner.get_emails_for_domain", return_value=[item]),
+        patch(
+            "nothx.cli.unsubscribe_subscription",
+            return_value=accepted,
+        ) as unsubscribe_call,
+    ):
+        first = _attempt_unsubscribe_for_domain(
+            config,
+            item.domain,
+            {"domain": item.domain},
+        )
+        second = _attempt_unsubscribe_for_domain(
+            config,
+            item.domain,
+            {"domain": item.domain},
+        )
+
+    assert first.outcome is UnsubscribeOutcome.REQUESTED
+    assert second.outcome is UnsubscribeOutcome.NEEDS_USER
+    unsubscribe_call.assert_called_once()
+    subscriptions = db.list_subscriptions(account="user@example.com")
+    assert len(subscriptions) == 1
+    assert subscriptions[0]["last_outcome"] == "requested"
+    assert subscriptions[0]["policy_action"] == "unsub"
+    operations = db.list_unsubscribe_operations(subscription_id=subscriptions[0]["id"])
+    assert len(operations) == 1
+    assert operations[0]["outcome"] == "requested"
+
+
+def test_manual_domain_rescan_resolves_account_alias_without_duplicate_identity(configured_cli):
+    _runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.accounts["work"] = AccountConfig(
+        provider="gmail",
+        email="work@example.com",
+        password="secret",
+    )
+    scan_result, _classifications = _subscription_scan(Action.REVIEW)
+    item = next(iter(scan_result.subscription_emails.values()))[0]
+    item.account_key = ""
+    item.account_name = "default"
+    subscription = db.upsert_subscription(
+        "user@example.com",
+        "list_id",
+        item.normalized_list_id,
+        list_id=item.normalized_list_id,
+        sender_domain=item.domain,
+        policy_action="unsub",
+    )
+    operation = db.get_or_create_unsubscribe_operation(
+        subscription["id"],
+        "accepted-before-compatibility-rescan",
+        kind="unsubscribe",
+    )
+    db.update_unsubscribe_operation_outcome(operation["id"], "requested")
+
+    with (
+        patch("nothx.scanner.get_emails_for_domain", return_value=[item]),
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe_call,
+    ):
+        result = _attempt_unsubscribe_for_domain(
+            config,
+            item.domain,
+            {"domain": item.domain},
+        )
+
+    assert result.outcome is UnsubscribeOutcome.NEEDS_USER
+    unsubscribe_call.assert_not_called()
+    subscriptions = db.list_subscriptions()
+    assert len(subscriptions) == 1
+    assert subscriptions[0]["account"] == "user@example.com"
+
+
+def test_open_unsubscribe_requires_current_contact_consent(configured_cli):
+    runner, _config = configured_cli
+    subscription = db.upsert_subscription(
+        "user@example.com",
+        "list_id",
+        "consent-open.sender.example",
+        policy_action="review",
+    )
+    with (
+        patch("nothx.cli.scan_inbox") as scan,
+        patch("nothx.cli.webbrowser.open") as browser,
+    ):
+        result = runner.invoke(open_unsubscribe, [str(subscription["id"]), "--yes"])
+
+    assert result.exit_code == 0
+    assert "consent is required" in " ".join(result.output.split())
+    scan.assert_not_called()
+    browser.assert_not_called()
+
+
+def test_open_unsubscribe_refuses_auth_failed_rescan(configured_cli):
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.save()
+    scan_result, _classifications = _subscription_scan(Action.REVIEW)
+    key = next(iter(scan_result.subscription_emails))
+    item = scan_result.subscription_emails[key][0]
+    item.dkim_pass = False
+    sender = scan_result.subscription_stats[key]
+    subscription = db.upsert_subscription(
+        sender.account_key,
+        sender.identity_kind,
+        sender.identity_value,
+        list_id=sender.identity_value,
+        last_delivery_at=item.date,
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result) as scan,
+        patch("nothx.cli.webbrowser.open") as browser,
+    ):
+        result = runner.invoke(open_unsubscribe, [str(subscription["id"]), "--yes"])
+
+    assert result.exit_code == 0
+    assert "failed authentication" in " ".join(result.output.split())
+    scan.assert_called_once()
+    browser.assert_not_called()
 
 
 def test_legacy_history_and_export_redact_old_raw_urls(configured_cli):

@@ -40,10 +40,13 @@ class ClassificationEngine:
             threshold_config=config.thresholds,
         )
 
-    def classify(self, sender: SenderStats) -> Classification:
+    def classify(self, sender: SenderStats, persist: bool = True) -> Classification:
         """
         Classify a single sender through all layers.
         Returns the first confident classification or sends to review.
+
+        ``persist=False`` disables cloud AI egress and uses local fallbacks,
+        matching :meth:`classify_batch`.
         """
         # Layer 1: User rules (highest priority)
         result = self.rules.match(sender)
@@ -91,9 +94,9 @@ class ClassificationEngine:
         # Layer 3: AI classification (if enabled and configured)
         ai_attempted = False
         ai_result = None
-        if self._is_ai_candidate(sender) and self.ai.is_available():
+        if persist and self._is_ai_candidate(sender) and self.ai.is_available():
             ai_attempted = True
-            ai_result = self.ai.classify_single(sender)
+            ai_result = self.ai.classify_single(sender, persist=persist)
             if ai_result and ai_result.confidence >= self.config.thresholds.unsub_confidence:
                 logger.debug(
                     "Classified %s via AI: %s (confidence: %.2f)",
@@ -185,12 +188,26 @@ class ClassificationEngine:
 
     def _authentication_precheck(self, sender: SenderStats) -> Classification | None:
         """Keep strong trusted authentication failures out of AI and link paths."""
-        if sender.authentication_failed_emails:
+        # A spoof or broken forward must not poison an otherwise authenticated
+        # From-grouped subscription. Treat strong failures as subscription-wide
+        # block evidence only when they outnumber authenticated deliveries.
+        if sender.authentication_failed_emails > sender.authenticated_emails:
             return Classification(
                 email_type=EmailType.UNKNOWN,
                 action=Action.BLOCK,
                 confidence=0.95,
-                reasoning="Trusted authentication reports SPF, DKIM, and DMARC failure",
+                reasoning="Trusted authentication failures dominate authenticated deliveries",
+                source="auth_policy",
+            )
+        if sender.authentication_failed_emails and sender.authenticated_emails:
+            return Classification(
+                email_type=EmailType.UNKNOWN,
+                action=Action.REVIEW,
+                confidence=0.5,
+                reasoning=(
+                    "Authentication evidence is mixed; a failed message cannot classify "
+                    "the account/list identity"
+                ),
                 source="auth_policy",
             )
         if sender.authenticated_emails <= 0 and (
@@ -254,7 +271,7 @@ class ClassificationEngine:
             for address in sender.sample_senders
             for pattern in SAFE_SENDER_PATTERNS
         )
-        if all(safe_subjects) and safe_sender:
+        if all(safe_subjects) and safe_sender and sender.authenticated_emails > 0:
             return Classification(
                 email_type=email_type,
                 action=Action.KEEP,
@@ -286,7 +303,7 @@ class ClassificationEngine:
 
     def _is_ai_candidate(self, sender: SenderStats) -> bool:
         """Keep unrelated personal headers out of cloud classification calls."""
-        if any(
+        return any(
             (
                 sender.has_unsubscribe,
                 bool(sender.list_id),
@@ -298,23 +315,6 @@ class ClassificationEngine:
                 sender.provider_threat,
                 bool(sender.junk_emails),
             )
-        ):
-            return True
-        candidate_words = (
-            "sale",
-            "deal",
-            "discount",
-            "offer",
-            "unsubscribe",
-            "newsletter",
-            "quick question",
-            "following up",
-            "demo",
-        )
-        return any(
-            word in subject.casefold()
-            for subject in sender.sample_subjects
-            for word in candidate_words
         )
 
     def _apply_action_policy(
@@ -329,6 +329,21 @@ class ClassificationEngine:
             and not sender.phishing_emails
             and not sender.junk_emails
             and not sender.junk_keyword_emails
+        ):
+            return Classification(
+                email_type=classification.email_type,
+                action=Action.REVIEW,
+                confidence=classification.confidence,
+                reasoning=f"{classification.reasoning}; authentication is unknown",
+                source="auth_policy",
+                recommended_action=classification.recommended_action or classification.action,
+                original_source=classification.original_source or classification.source,
+            )
+        if (
+            classification.action is Action.KEEP
+            and classification.source != "user_rule"
+            and classification.email_type in (EmailType.TRANSACTIONAL, EmailType.SECURITY)
+            and sender.authenticated_emails <= 0
         ):
             return Classification(
                 email_type=classification.email_type,
@@ -390,8 +405,9 @@ class ClassificationEngine:
         Classify a batch of senders efficiently.
         Uses AI batch classification for better efficiency.
 
-        When persist is False (dry-run), AI classifications are not written
-        to the database.
+        When persist is False (dry-run or a pre-consent scan), cloud AI calls
+        and classification writes are both disabled; candidates fall back to
+        local heuristics.
         """
         results: dict[str, Classification] = {}
 
@@ -469,7 +485,7 @@ class ClassificationEngine:
                 source_counts["uncertain"] += 1
 
         # Layer 3: AI batch classification
-        if needs_ai and self.ai.is_available():
+        if needs_ai and persist and self.ai.is_available():
             ai_results = self.ai.classify_batch(needs_ai, persist=persist)
 
             ai_success_count = 0
@@ -524,13 +540,20 @@ class ClassificationEngine:
                     },
                 )
         else:
-            # No AI available - use heuristics only
+            # No AI available or egress is disabled - use heuristics only.
             if needs_ai:
-                logger.info(
-                    "AI unavailable, using heuristics for %d senders",
-                    len(needs_ai),
-                    extra={"heuristic_only_count": len(needs_ai)},
-                )
+                if persist:
+                    logger.info(
+                        "AI unavailable, using heuristics for %d senders",
+                        len(needs_ai),
+                        extra={"heuristic_only_count": len(needs_ai)},
+                    )
+                else:
+                    logger.info(
+                        "AI egress disabled, using local heuristics for %d senders",
+                        len(needs_ai),
+                        extra={"heuristic_only_count": len(needs_ai)},
+                    )
             for sender in needs_ai:
                 result = self.heuristics.classify(sender)
                 if result:

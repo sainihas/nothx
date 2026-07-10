@@ -260,7 +260,7 @@ unsubscribe email.
 - Inbox and the unambiguously advertised IMAP `\Junk` mailbox are scanned. nothx does not guess localized Junk folder names; configure an override if your server advertises none or several.
 - Initial runs use the configured lookback. Later runs use `(account, mailbox, UIDVALIDITY, UID)` cursors. Full history is always explicit.
 - Body fetching is disabled by default. The optional footer scanner examines at most two inline text tails (64 KiB each, 128 KiB total) for authenticated list/bulk candidates. It skips attachments, nested messages, images, scripts, and forms.
-- One-click POST requires compliant headers plus `$canunsubscribe` or a correlated passing DKIM signature that covers both unsubscribe headers. Automatic network and mailbox actions require separate, versioned consent.
+- One-click POST requires compliant headers plus `$canunsubscribe` or a correlated passing DKIM signature that covers both unsubscribe headers. All outbound unsubscribe contact—including an explicitly opened browser page—and mailbox actions require separate, versioned consent.
 - HTTP requests are HTTPS-only, proxy/cookie/auth/referrer-free, redirect constrained, SSRF checked, and connected to an already validated public IP while preserving TLS hostname verification.
 - Stored targets are fingerprints and hashed destination labels. Complete hosts, paths, queries, mailto recipients/bodies, and HTTP response bodies are excluded from normal history and exports.
 

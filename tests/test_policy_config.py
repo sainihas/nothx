@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from nothx import db
-from nothx.config import AccountConfig, Config
+from nothx.config import CURRENT_UNSUBSCRIBE_CONSENT_VERSION, AccountConfig, Config
 from nothx.logging import _redact
 from nothx.models import EmailHeader, SenderStatus, UnsubMethod
 
@@ -101,7 +101,10 @@ class TestReviewRetry:
             "nothx.unsubscriber.safe_fetch",
             lambda url, **k: FetchResponse(status=200, body="welcome", final_url=url, redirects=0),
         )
-        config = Config(accounts={"main": AccountConfig("gmail", "me@x.com", "pw")})
+        config = Config(
+            accounts={"main": AccountConfig("gmail", "me@x.com", "pw")},
+            unsubscribe_consent_version=CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
+        )
 
         cli._change_sender_status("shop.com", "unsub", sender=sender, config=config)
 
@@ -132,18 +135,30 @@ class TestReviewRetry:
                 status=200, body="you have been unsubscribed", final_url=url, redirects=0
             ),
         )
-        config = Config(accounts={"main": AccountConfig("gmail", "me@x.com", "pw")})
+        config = Config(
+            accounts={"main": AccountConfig("gmail", "me@x.com", "pw")},
+            unsubscribe_consent_version=CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
+        )
 
         cli._change_sender_status("shop.com", "unsub", sender=sender, config=config)
-        assert db.get_sender("shop.com")["status"] == "unsubscribed"
+        updated = db.get_sender("shop.com")
+        assert updated["status"] == "unsubscribed"
+        assert updated["user_override"] is None
 
-    def test_no_config_keeps_optimistic_behavior(self, temp_db):
+    def test_no_config_loads_consent_and_never_records_optimistic_success(self, temp_db):
         from nothx import cli
 
         sender = self._sender_row()
-        cli._change_sender_status("shop.com", "unsub", sender=sender)  # no config
-        # Without config, no network attempt — legacy optimistic status set.
-        assert db.get_sender("shop.com")["status"] == "unsubscribed"
+        with (
+            patch("nothx.cli.Config.load", return_value=Config()),
+            patch("nothx.scanner.get_emails_for_domain") as fetch_headers,
+        ):
+            changed = cli._change_sender_status("shop.com", "unsub", sender=sender)
+
+        assert changed is False
+        assert db.get_sender("shop.com")["status"] == "failed"
+        assert db.get_sender("shop.com")["user_override"] is None
+        fetch_headers.assert_not_called()
 
 
 class TestPostUnsubOffenders:
@@ -202,7 +217,10 @@ class TestAuthGatedUnsubscribe:
             list_unsubscribe="<https://shop.com/u>",
             dkim_pass=False,  # explicit auth failure
         )
-        result = unsubscriber.unsubscribe(header, Config())
+        result = unsubscriber.unsubscribe(
+            header,
+            Config(unsubscribe_consent_version=CURRENT_UNSUBSCRIBE_CONSENT_VERSION),
+        )
         assert result.success is False
         assert "authentication" in (result.error or "").lower()
         assert called == []  # never fetched the URL
@@ -227,5 +245,8 @@ class TestAuthGatedUnsubscribe:
             list_unsubscribe="<https://shop.com/u>",
             dkim_pass=None,  # unknown -> allowed
         )
-        result = unsubscriber.unsubscribe(header, Config())
+        result = unsubscriber.unsubscribe(
+            header,
+            Config(unsubscribe_consent_version=CURRENT_UNSUBSCRIBE_CONSENT_VERSION),
+        )
         assert result.success is True

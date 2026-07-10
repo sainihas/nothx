@@ -1,6 +1,10 @@
 """Tests for Authentication-Results parsing (RFC 8601)."""
 
-from nothx.authres import parse_authentication_results
+from nothx.authres import (
+    dkim_covers_unsubscribe,
+    has_aligned_dkim_pass,
+    parse_authentication_results,
+)
 
 
 class TestGmail:
@@ -34,6 +38,71 @@ class TestGmail:
         header = "mx.google.com;\r\n  dkim=pass;\r\n  spf=pass"
         v = parse_authentication_results([header], "gmail")
         assert v.dkim is True and v.spf is True
+
+    def test_exact_domain_selector_correlates_aligned_covering_signature(self):
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.d=news.example header.s=bulk"],
+            "gmail",
+        )
+        signature = (
+            "v=1; d=news.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; b=x"
+        )
+        assert dkim_covers_unsubscribe([signature], verdicts, from_domain="news.example") is True
+        # Existing two-argument callers retain exact d=/s= coverage checking;
+        # automatic execution supplies From for the additional alignment gate.
+        assert dkim_covers_unsubscribe([signature], verdicts) is True
+
+    def test_header_identity_cannot_replace_missing_signing_domain(self):
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.i=@news.example header.s=bulk"],
+            "gmail",
+        )
+        signature = (
+            "v=1; d=news.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; b=x"
+        )
+        assert not dkim_covers_unsubscribe([signature], verdicts, from_domain="news.example")
+
+    def test_unaligned_covering_signature_is_rejected(self):
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.d=attacker.example header.s=bulk"],
+            "gmail",
+        )
+        signature = (
+            "v=1; d=attacker.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; b=x"
+        )
+        assert not dkim_covers_unsubscribe([signature], verdicts, from_domain="victim.example")
+
+    def test_aligned_signing_subdomain_is_allowed(self):
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.d=mail.news.example header.s=bulk"],
+            "gmail",
+        )
+        signature = (
+            "v=1; d=mail.news.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; b=x"
+        )
+        assert dkim_covers_unsubscribe([signature], verdicts, from_domain="news.example")
+
+    def test_duplicate_same_domain_selector_is_ambiguous(self):
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.d=news.example header.s=bulk"],
+            "gmail",
+        )
+        signatures = [
+            "v=1; d=news.example; s=bulk; h=from; b=passing",
+            (
+                "v=1; d=news.example; s=bulk; "
+                "h=from:list-unsubscribe:list-unsubscribe-post; b=forged"
+            ),
+        ]
+        assert not dkim_covers_unsubscribe(signatures, verdicts, from_domain="news.example")
+
+    def test_aligned_dkim_helper_rejects_unrelated_signer(self):
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.d=attacker.example header.s=bulk"],
+            "gmail",
+        )
+        assert not has_aligned_dkim_pass(verdicts.evidence, "victim.example")
+        assert has_aligned_dkim_pass(verdicts.evidence, "attacker.example")
 
 
 class TestUntrustedInstances:

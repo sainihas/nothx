@@ -65,6 +65,16 @@ SAFE_SENDER_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SAFE_SENDER_PATTE
 COLD_OUTREACH_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _COLD_OUTREACH_PATTERNS_RAW]
 
 
+def has_strong_cold_outreach_evidence(subject: str) -> bool:
+    """Require a sales opener or multiple independent outreach indicators.
+
+    A lone word such as "meeting" or "call" is common in wanted personal and
+    transactional mail and must never be enough to trigger blocking.
+    """
+    matched = [bool(pattern.search(subject)) for pattern in COLD_OUTREACH_PATTERNS]
+    return matched[0] or sum(matched) >= 2
+
+
 class HeuristicScorer:
     """Scores senders using rule-based heuristics with learned preferences."""
 
@@ -148,7 +158,7 @@ class HeuristicScorer:
                 score += cfg.subject_safe_pattern  # Negative value = decreases score
 
             # Cold outreach patterns
-            if any(p.search(subject) for p in COLD_OUTREACH_PATTERNS):
+            if has_strong_cold_outreach_evidence(subject):
                 score += cfg.subject_cold_outreach
 
         # Check sender address patterns. These are local-part anchored
@@ -161,9 +171,8 @@ class HeuristicScorer:
         if any(p.search(addr) for addr in addresses for p in SAFE_SENDER_PATTERNS):
             score += cfg.domain_safe_pattern  # Negative value = decreases score
 
-        # No unsubscribe link might mean it's important (or spam without proper headers)
-        if not sender.has_unsubscribe:
-            score += cfg.no_unsubscribe_link  # Negative value = slightly favor keeping
+        # Absence of an unsubscribe method is an action-availability fact, not
+        # evidence that the message is wanted. Malicious spam commonly omits it.
 
         # Bulk/marketing header signals (RFC 2919/3834/8601, ESP fingerprints).
         # Summed then capped so legitimate transactional-bulk (receipts, alerts)
@@ -284,9 +293,4 @@ class HeuristicScorer:
 
     def _is_cold_outreach(self, sender: SenderStats) -> bool:
         """Check if sender appears to be cold sales outreach."""
-        for subject in sender.sample_subjects:
-            subject_lower = subject.lower()
-            for pattern in COLD_OUTREACH_PATTERNS:
-                if pattern.search(subject_lower):
-                    return True
-        return False
+        return any(has_strong_cold_outreach_evidence(subject) for subject in sender.sample_subjects)

@@ -1,5 +1,6 @@
 """Tests for configuration management."""
 
+import json
 import stat
 import tempfile
 from pathlib import Path
@@ -8,6 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from nothx.config import (
+    CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
+    CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
     AccountConfig,
     AIConfig,
     Config,
@@ -40,6 +43,10 @@ class TestConfigBasics:
         assert config.ai.provider == "anthropic"
         assert config.operation_mode == "hands_off"
         assert config.scan_days == 30
+        assert config.scan_junk is True
+        assert config.footer_scan_enabled is False
+        assert config.permits_automatic_unsubscribe is False
+        assert config.permits_mailbox_mutation is False
 
     def test_ai_config_defaults(self):
         """Test AI configuration defaults."""
@@ -65,6 +72,40 @@ class TestConfigBasics:
         assert "*.gov" in safety.never_unsub_domains
         assert "*bank*" in safety.never_unsub_domains
         assert safety.dry_run is False
+
+    def test_account_auth_defaults_preserve_password_providers(self):
+        account = AccountConfig(provider="gmail", email="me@gmail.com", password="app-pass")
+
+        assert account.auth == "password"
+        assert account.uses_oauth is False
+        assert account.client_id is None
+        assert account.junk_mailbox is None
+        assert account.extra_scan_mailboxes == []
+
+    def test_oauth_account_can_omit_password(self):
+        account = AccountConfig(
+            provider="outlook",
+            email="me@outlook.com",
+            auth="OAUTH",
+            client_id="client-123",
+        )
+
+        assert account.password == ""
+        assert account.auth == "oauth"
+        assert account.uses_oauth is True
+
+    def test_invalid_account_auth_is_rejected(self):
+        with pytest.raises(ValueError, match="authentication method"):
+            AccountConfig(provider="outlook", email="me@outlook.com", auth="basic")
+
+    def test_current_consent_versions_enable_their_specific_side_effects(self):
+        config = Config(
+            unsubscribe_consent_version=CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
+            mailbox_mutation_consent_version=CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
+        )
+
+        assert config.permits_automatic_unsubscribe is True
+        assert config.permits_mailbox_mutation is True
 
 
 class TestConfigSaveLoad:
@@ -112,6 +153,58 @@ class TestConfigSaveLoad:
         # Should return default config
         assert config.accounts == {}
         assert config.default_account is None
+
+    def test_legacy_password_account_loads_without_auth_fields(self, temp_config_dir):
+        config_data = {
+            "accounts": {
+                "legacy": {
+                    "provider": "gmail",
+                    "email": "legacy@gmail.com",
+                    "password": "app-password",
+                }
+            },
+            "ai": {"provider": "none"},
+        }
+        (temp_config_dir / "config.json").write_text(json.dumps(config_data))
+
+        loaded = Config.load()
+
+        account = loaded.accounts["legacy"]
+        assert account.auth == "password"
+        assert account.password == "app-password"
+        assert account.client_id is None
+
+    def test_oauth_and_mailbox_fields_round_trip(self, temp_config_dir):
+        config = Config(
+            accounts={
+                "outlook": AccountConfig(
+                    provider="outlook",
+                    email="me@outlook.com",
+                    auth="oauth",
+                    client_id="client-123",
+                    junk_mailbox="Junk Email",
+                    extra_scan_mailboxes=["Newsletters"],
+                )
+            },
+            scan_junk=False,
+            footer_scan_enabled=True,
+            unsubscribe_consent_version=2,
+            mailbox_mutation_consent_version=3,
+        )
+
+        config.save()
+        loaded = Config.load()
+
+        account = loaded.accounts["outlook"]
+        assert account.password == ""
+        assert account.auth == "oauth"
+        assert account.client_id == "client-123"
+        assert account.junk_mailbox == "Junk Email"
+        assert account.extra_scan_mailboxes == ["Newsletters"]
+        assert loaded.scan_junk is False
+        assert loaded.footer_scan_enabled is True
+        assert loaded.unsubscribe_consent_version == 2
+        assert loaded.mailbox_mutation_consent_version == 3
 
 
 class TestConfigMethods:

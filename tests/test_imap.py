@@ -2,10 +2,11 @@
 
 import email
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from nothx.config import AccountConfig
 from nothx.imap import IMAPConnection, _imap_date
+from nothx.models import MailboxActionOutcome, MailboxInfo, MessageRef
 
 
 def make_connection() -> IMAPConnection:
@@ -17,6 +18,20 @@ def make_connection() -> IMAPConnection:
 
 def parse_message(raw: str):
     return email.message_from_string(raw)
+
+
+def test_non_ascii_junk_mailbox_encoding_failure_is_reported() -> None:
+    connection = make_connection()
+    locator = MessageRef("me@example.com", "INBOX", 44, 9)
+    junk = MailboxInfo("Courrier indésirable", "Courrier indésirable")
+    encoding_error = UnicodeEncodeError("ascii", "é", 0, 1, "ordinal not in range")
+
+    with patch("nothx.imap.move_uid_to_junk", side_effect=encoding_error):
+        result = connection.move_message_to_junk(locator, junk)
+
+    assert result.outcome is MailboxActionOutcome.FAILED
+    assert result.destination == "Courrier indésirable"
+    assert result.error == "IMAP mailbox action failed (UnicodeEncodeError)"
 
 
 class TestImapDate:

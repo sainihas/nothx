@@ -66,7 +66,7 @@ class TestClassificationEngine:
         """Test classification via preset patterns."""
         engine = ClassificationEngine(config_no_ai)
 
-        # Government domain should be kept
+        # A broad protected suffix is a review signal, not terminal KEEP.
         sender = SenderStats(
             domain="irs.gov",
             total_emails=5,
@@ -74,11 +74,11 @@ class TestClassificationEngine:
 
         result = engine.classify(sender)
 
-        assert result.action == Action.KEEP
-        assert result.source == "preset"
+        assert result.action == Action.REVIEW
+        assert result.source == "safety_policy"
 
-    def test_classify_marketing_pattern(self, temp_db, config_no_ai):
-        """Test marketing domains are classified for unsubscribe."""
+    def test_unknown_auth_marketing_pattern_requires_review(self, temp_db, config_no_ai):
+        """A marketing pattern cannot authorize an unknown-auth network request."""
         engine = ClassificationEngine(config_no_ai)
 
         sender = SenderStats(
@@ -90,8 +90,8 @@ class TestClassificationEngine:
 
         result = engine.classify(sender)
 
-        assert result.action == Action.UNSUB
-        assert result.source == "preset"
+        assert result.action == Action.REVIEW
+        assert result.source == "auth_policy"
 
     def test_classify_heuristics_fallback(self, temp_db, config_no_ai):
         """Test heuristics are used when no pattern matches."""
@@ -104,6 +104,7 @@ class TestClassificationEngine:
             seen_emails=0,
             sample_subjects=["FINAL SALE!", "Limited Time Only!!!", "Act Now!"],
             has_unsubscribe=True,
+            authenticated_emails=1,
         )
 
         result = engine.classify(sender)
@@ -147,8 +148,8 @@ class TestClassificationEngine:
         assert "marketing.spam.com" in results
         assert "unknown.io" in results
 
-        # Gov domain should be kept
-        assert results["irs.gov"].action == Action.KEEP
+        # Broad protected patterns never force KEEP.
+        assert results["irs.gov"].action == Action.REVIEW
 
     def test_classify_batch_empty(self, temp_db, config_no_ai):
         """Test batch classification with empty list."""

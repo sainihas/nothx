@@ -9,7 +9,12 @@ from unittest.mock import patch
 import pytest
 
 from nothx import db
-from nothx.config import CURRENT_UNSUBSCRIBE_CONSENT_VERSION, AccountConfig, Config
+from nothx.config import (
+    CONSENT_REVOKED,
+    CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
+    AccountConfig,
+    Config,
+)
 from nothx.logging import _redact
 from nothx.models import EmailHeader, SenderStatus, UnsubMethod
 
@@ -145,12 +150,15 @@ class TestReviewRetry:
         assert updated["status"] == "unsubscribed"
         assert updated["user_override"] is None
 
-    def test_no_config_loads_consent_and_never_records_optimistic_success(self, temp_db):
+    def test_revoked_consent_refuses_and_never_records_optimistic_success(self, temp_db):
         from nothx import cli
 
         sender = self._sender_row()
         with (
-            patch("nothx.cli.Config.load", return_value=Config()),
+            patch(
+                "nothx.cli.Config.load",
+                return_value=Config(unsubscribe_consent_version=CONSENT_REVOKED),
+            ),
             patch("nothx.scanner.get_emails_for_domain") as fetch_headers,
         ):
             changed = cli._change_sender_status("shop.com", "unsub", sender=sender)

@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from nothx.config import (
+    CONSENT_REVOKED,
     CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
     CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
     AccountConfig,
@@ -45,8 +46,9 @@ class TestConfigBasics:
         assert config.scan_days == 30
         assert config.scan_junk is True
         assert config.footer_scan_enabled is False
-        assert config.permits_automatic_unsubscribe is False
-        assert config.permits_mailbox_mutation is False
+        # Automation consent is granted by default; only an explicit revoke removes it.
+        assert config.permits_automatic_unsubscribe is True
+        assert config.permits_mailbox_mutation is True
 
     def test_ai_config_defaults(self):
         """Test AI configuration defaults."""
@@ -102,6 +104,26 @@ class TestConfigBasics:
         config = Config(
             unsubscribe_consent_version=CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
             mailbox_mutation_consent_version=CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
+        )
+
+        assert config.permits_automatic_unsubscribe is True
+        assert config.permits_mailbox_mutation is True
+
+    def test_revoked_sentinel_disables_each_side_effect(self):
+        config = Config(
+            unsubscribe_consent_version=CONSENT_REVOKED,
+            mailbox_mutation_consent_version=CONSENT_REVOKED,
+        )
+
+        assert config.permits_automatic_unsubscribe is False
+        assert config.permits_mailbox_mutation is False
+
+    def test_legacy_stored_zero_still_permits(self):
+        # Earlier builds persisted 0 to mean "not yet granted"; that value must
+        # not keep permanently blocking the operator who is already running nothx.
+        config = Config(
+            unsubscribe_consent_version=0,
+            mailbox_mutation_consent_version=0,
         )
 
         assert config.permits_automatic_unsubscribe is True

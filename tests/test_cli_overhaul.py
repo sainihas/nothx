@@ -33,6 +33,7 @@ from nothx.cli import (
     undo,
 )
 from nothx.config import (
+    CONSENT_REVOKED,
     CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
     CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
     AccountConfig,
@@ -449,7 +450,9 @@ def test_block_moves_all_persisted_inbox_refs_not_only_current_scan(configured_c
 
 
 def test_missing_unsubscribe_consent_makes_no_network_call(configured_cli):
-    runner, _config = configured_cli
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CONSENT_REVOKED
+    config.save()
     scan_result, classifications = _subscription_scan(Action.UNSUB)
     engine = MagicMock()
     engine.classify_batch.return_value = classifications
@@ -477,6 +480,8 @@ def test_missing_unsubscribe_consent_makes_no_network_call(configured_cli):
 
 def test_granting_consent_resumes_only_consent_blocked_unsubscribe(configured_cli):
     runner, config = configured_cli
+    config.unsubscribe_consent_version = CONSENT_REVOKED
+    config.save()
     scan_result, classifications = _subscription_scan(Action.UNSUB)
     engine = MagicMock()
     engine.classify_batch.return_value = classifications
@@ -535,7 +540,9 @@ def test_ordinary_review_is_persisted_by_account_and_list(configured_cli):
 
 
 def test_missing_mailbox_consent_still_persists_future_block_policy(configured_cli):
-    runner, _config = configured_cli
+    runner, config = configured_cli
+    config.mailbox_mutation_consent_version = CONSENT_REVOKED
+    config.save()
     scan_result, classifications = _subscription_scan(Action.BLOCK)
     engine = MagicMock()
     engine.classify_batch.return_value = classifications
@@ -1010,6 +1017,7 @@ def test_manual_page_open_rescans_and_never_prints_token(configured_cli):
 
 def test_manual_domain_unsubscribe_without_consent_makes_no_contact(configured_cli):
     _runner, config = configured_cli
+    config.unsubscribe_consent_version = CONSENT_REVOKED
     sender = {"domain": "sender.example"}
     with (
         patch("nothx.scanner.get_emails_for_domain") as fetch_headers,
@@ -1164,7 +1172,9 @@ def test_manual_domain_rescan_resolves_account_alias_without_duplicate_identity(
 
 
 def test_open_unsubscribe_requires_current_contact_consent(configured_cli):
-    runner, _config = configured_cli
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CONSENT_REVOKED
+    config.save()
     subscription = db.upsert_subscription(
         "user@example.com",
         "list_id",

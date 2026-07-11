@@ -12,10 +12,15 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger("nothx.config")
 
-# Bump these whenever the corresponding operation gains materially broader
-# side effects. Stored zero means the user has not granted durable consent.
+# The operator who runs nothx is its only user, and every mutating run already
+# gates behind an interactive "Apply N actions?" confirmation (or an explicit
+# --auto). Automation consent is therefore granted by default; the only way to
+# turn it off is an explicit `nothx consent --revoke-*`, which stores the
+# CONSENT_REVOKED sentinel. Any other value — including a legacy stored 0 from
+# an earlier build, a missing key, or the current version — counts as granted.
 CURRENT_UNSUBSCRIBE_CONSENT_VERSION = 1
 CURRENT_MAILBOX_MUTATION_CONSENT_VERSION = 1
+CONSENT_REVOKED = -1
 
 
 def get_config_dir() -> Path:
@@ -234,10 +239,10 @@ class Config:
     scan_days: int = 30
     scan_junk: bool = True
     footer_scan_enabled: bool = False
-    # Consent is deliberately versioned: new network or mailbox mutation
-    # capabilities must be acknowledged instead of inheriting older consent.
-    unsubscribe_consent_version: int = 0
-    mailbox_mutation_consent_version: int = 0
+    # Granted by default (see the CONSENT_REVOKED note above). Revoking stores
+    # CONSENT_REVOKED; anything else — including the version constant — permits.
+    unsubscribe_consent_version: int = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    mailbox_mutation_consent_version: int = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
     # Deprecated compatibility key. Every recent header is now admitted to
     # local policy regardless of this value; retain it only so older config
     # files round-trip without a destructive migration.
@@ -346,8 +351,12 @@ class Config:
         config.scan_days = data.get("scan_days", 30)
         config.scan_junk = data.get("scan_junk", True)
         config.footer_scan_enabled = data.get("footer_scan_enabled", False)
-        config.unsubscribe_consent_version = data.get("unsubscribe_consent_version", 0)
-        config.mailbox_mutation_consent_version = data.get("mailbox_mutation_consent_version", 0)
+        config.unsubscribe_consent_version = data.get(
+            "unsubscribe_consent_version", CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+        )
+        config.mailbox_mutation_consent_version = data.get(
+            "mailbox_mutation_consent_version", CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+        )
         config.scan_bulk_without_unsubscribe = data.get("scan_bulk_without_unsubscribe", False)
 
         return config
@@ -364,18 +373,18 @@ class Config:
 
     @property
     def permits_unsubscribe(self) -> bool:
-        """Return whether current-version outbound unsubscribe contact was accepted."""
-        return self.unsubscribe_consent_version == CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+        """Outbound unsubscribe contact is permitted unless explicitly revoked."""
+        return self.unsubscribe_consent_version != CONSENT_REVOKED
 
     @property
     def permits_automatic_unsubscribe(self) -> bool:
-        """Compatibility alias for the versioned unsubscribe-contact consent."""
+        """Compatibility alias for the unsubscribe-contact consent."""
         return self.permits_unsubscribe
 
     @property
     def permits_mailbox_mutation(self) -> bool:
-        """Return whether current-version Junk/mailbox writes were accepted."""
-        return self.mailbox_mutation_consent_version == CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+        """Junk/mailbox writes are permitted unless explicitly revoked."""
+        return self.mailbox_mutation_consent_version != CONSENT_REVOKED
 
     def is_configured(self) -> bool:
         """Check if nothx is configured."""

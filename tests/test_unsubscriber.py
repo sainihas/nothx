@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from nothx import db, unsubscriber
-from nothx.config import AccountConfig, Config
+from nothx.config import CONSENT_REVOKED, AccountConfig, Config
 from nothx.models import EmailHeader, UnsubMethod, UnsubscribeOutcome
 from nothx.safefetch import FetchResponse, SSRFBlockedError
 from nothx.unsubscriber import (
@@ -185,7 +185,7 @@ class TestGetExecution:
 
 
 class TestContactPolicy:
-    def test_manual_unsubscribe_requires_current_consent_without_contact(
+    def test_manual_unsubscribe_refused_when_consent_revoked_without_contact(
         self, temp_db, monkeypatch
     ):
         calls: list[str] = []
@@ -202,7 +202,7 @@ class TestContactPolicy:
         header = make_header(list_unsubscribe="<https://shop.com/unsub>, <mailto:unsub@shop.com>")
         account = AccountConfig(provider="gmail", email="me@example.net", password="pw")
 
-        result = unsubscribe(header, Config(), account)
+        result = unsubscribe(header, Config(unsubscribe_consent_version=CONSENT_REVOKED), account)
 
         assert result.outcome is UnsubscribeOutcome.NEEDS_USER
         assert result.needs_confirmation

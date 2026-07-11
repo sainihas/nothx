@@ -25,6 +25,7 @@ from . import __version__, db, msauth
 from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
 from .config import (
+    CONSENT_REVOKED,
     CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
     CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
     AccountConfig,
@@ -3434,11 +3435,11 @@ def consent(
 
     if unsubscribe is not None:
         config.unsubscribe_consent_version = (
-            CURRENT_UNSUBSCRIBE_CONSENT_VERSION if unsubscribe else 0
+            CURRENT_UNSUBSCRIBE_CONSENT_VERSION if unsubscribe else CONSENT_REVOKED
         )
     if mailbox_actions is not None:
         config.mailbox_mutation_consent_version = (
-            CURRENT_MAILBOX_MUTATION_CONSENT_VERSION if mailbox_actions else 0
+            CURRENT_MAILBOX_MUTATION_CONSENT_VERSION if mailbox_actions else CONSENT_REVOKED
         )
     config.save()
     console.print("[success]✓ Automation consent updated[/success]")

@@ -11,7 +11,7 @@ from email.mime.text import MIMEText
 import pytest
 
 from nothx import unsubscriber
-from nothx.config import AccountConfig, Config
+from nothx.config import CONSENT_REVOKED, AccountConfig, Config
 from nothx.models import (
     AuthenticationEvidence,
     AuthResult,
@@ -81,20 +81,19 @@ def failure(method: UnsubMethod) -> UnsubResult:
 
 
 class TestAutomaticGates:
-    def test_missing_durable_consent_makes_no_request(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_revoked_consent_makes_no_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[str] = []
         monkeypatch.setattr(unsubscriber, "safe_fetch", lambda url, **kw: calls.append(url))
 
         result = unsubscriber.unsubscribe_subscription(
-            [header(one_click=True, can_unsubscribe=True)], Config()
+            [header(one_click=True, can_unsubscribe=True)],
+            Config(unsubscribe_consent_version=CONSENT_REVOKED),
         )
 
         assert result.outcome is UnsubscribeOutcome.NEEDS_USER
         assert calls == []
 
-    def test_explicit_manual_execution_still_requires_current_consent(
+    def test_explicit_manual_execution_still_refused_when_consent_revoked(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[str] = []
@@ -102,7 +101,7 @@ class TestAutomaticGates:
 
         result = unsubscriber.unsubscribe_subscription(
             [header(one_click=True, can_unsubscribe=True)],
-            Config(),
+            Config(unsubscribe_consent_version=CONSENT_REVOKED),
             automatic=False,
         )
 
@@ -110,19 +109,24 @@ class TestAutomaticGates:
         assert result.needs_confirmation
         assert calls == []
 
-    def test_unknown_future_consent_version_does_not_authorize(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_revoked_consent_version_authorizes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Consent is granted unless explicitly revoked, so any non-revoked
+        # version — including a legacy or future value — authorizes contact.
         calls: list[str] = []
-        monkeypatch.setattr(unsubscriber, "safe_fetch", lambda url, **kw: calls.append(url))
+
+        def fake_fetch(url: str, **kwargs):
+            calls.append(kwargs["method"])
+            return FetchResponse(200, "", url, 0)
+
+        monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch)
         config = Config(unsubscribe_consent_version=unsubscriber.AUTOMATION_CONSENT_VERSION + 1)
 
         result = unsubscriber.unsubscribe_subscription(
             [header(one_click=True, can_unsubscribe=True)], config
         )
 
-        assert result.outcome is UnsubscribeOutcome.NEEDS_USER
-        assert calls == []
+        assert result.outcome is not UnsubscribeOutcome.NEEDS_USER
+        assert calls
 
     @pytest.mark.parametrize(
         ("changes", "expected_method"),

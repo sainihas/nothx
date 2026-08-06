@@ -4112,19 +4112,51 @@ complete --no-files --command {prog_name} --arguments "(_nothx_completion)";
     click.echo(script.strip())
 
 
+def _detect_install_method() -> str:
+    """Identify how nothx was installed, so updates use the matching upgrader.
+
+    Returns ``"pipx"`` or ``"pip"``. pipx owns both the virtualenv and the
+    launcher symlinks in its bin directory, and records what it installed in
+    ``pipx_metadata.json``. Running pip inside that venv swaps the package out
+    from under pipx and leaves the metadata pinned to the old version, so
+    ``pipx list`` misreports and ``pipx upgrade-all`` skips the package.
+    """
+    import sys
+    from pathlib import Path
+
+    venv_root = Path(sys.prefix)
+    if (venv_root / "pipx_metadata.json").is_file():
+        return "pipx"
+    # Older pipx versions predate the metadata file; fall back to the layout
+    # pipx has always used: <pipx home>/venvs/<package>.
+    if venv_root.parent.name == "venvs" and "pipx" in venv_root.parts:
+        return "pipx"
+    return "pip"
+
+
 @main.command()
 @click.option("--check", is_flag=True, help="Only check for updates, don't install")
 def update(check: bool):
     """Check for and install updates.
 
-    Updates nothx to the latest version using pip.
+    Updates nothx to the latest version using pipx or pip, whichever
+    installed it.
     """
+    import shutil
     import subprocess
     import sys
     import urllib.error
     import urllib.request
 
     console.print(f"\n[header]Current version:[/header] {__version__}")
+
+    installer = _detect_install_method()
+    if installer == "pipx":
+        upgrade_hint = "pipx upgrade nothx"
+        git_hint = "pipx install --force git+https://github.com/sainihas/nothx.git"
+    else:
+        upgrade_hint = "pip install --upgrade nothx"
+        git_hint = "pip install --upgrade git+https://github.com/sainihas/nothx.git"
 
     # Check for latest version on PyPI using the JSON API
     with console.status("Checking for updates...", spinner_style="#ffaf00"):
@@ -4152,10 +4184,23 @@ def update(check: bool):
             console.print("Cancelled.")
             return
 
+        if installer == "pipx":
+            pipx_path = shutil.which("pipx")
+            if pipx_path is None:
+                console.print(
+                    "\n[warning]nothx was installed with pipx, but pipx is not on PATH.[/warning]"
+                )
+                console.print("[muted]Upgrading with pip would desync pipx. Run instead:[/muted]")
+                console.print(f"{_L} [info]{upgrade_hint}[/info]")
+                return
+            command = [pipx_path, "upgrade", "nothx"]
+        else:
+            command = [sys.executable, "-m", "pip", "install", "--upgrade", "nothx"]
+
         console.print("\n[header]Updating...[/header]")
         try:
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--upgrade", "nothx"],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -4164,20 +4209,19 @@ def update(check: bool):
                 console.print(f"[success]✓ Updated to {latest}[/success]")
                 console.print("\n[muted]Restart nothx to use the new version.[/muted]")
             else:
-                console.print(f"[error]Update failed: {result.stderr}[/error]")
+                console.print(f"[error]Update failed: {result.stderr.strip()}[/error]")
+                console.print(f"\n[muted]Try running manually:[/muted] {upgrade_hint}")
         except subprocess.TimeoutExpired:
             console.print("[error]Update timed out. Try running manually:[/error]")
-            console.print(f"{_L} pip install --upgrade nothx")
+            console.print(f"{_L} {upgrade_hint}")
             return
     else:
         console.print("\n[warning]Could not check PyPI for updates.[/warning]")
         console.print("[muted]nothx may not be published yet, or you're offline.[/muted]")
         console.print("\nTo update manually:")
-        console.print(f"{_L} [info]pip install --upgrade nothx[/info]")
+        console.print(f"{_L} [info]{upgrade_hint}[/info]")
         console.print(f"{_L} [muted]or from git:[/muted]")
-        console.print(
-            f"{_L} [info]pip install --upgrade git+https://github.com/nothx/nothx.git[/info]"
-        )
+        console.print(f"{_L} [info]{git_hint}[/info]")
 
 
 # Command aliases for power users

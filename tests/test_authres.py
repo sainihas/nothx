@@ -52,9 +52,53 @@ class TestGmail:
         # automatic execution supplies From for the additional alignment gate.
         assert dkim_covers_unsubscribe([signature], verdicts) is True
 
-    def test_header_identity_cannot_replace_missing_signing_domain(self):
+    def test_header_identity_correlates_when_signing_domain_is_omitted(self):
+        """Gmail's A-R exposes header.i/header.s but never header.d."""
         verdicts = parse_authentication_results(
             ["mx.google.com; dkim=pass header.i=@news.example header.s=bulk"],
+            "gmail",
+        )
+        signature = (
+            "v=1; d=news.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; b=x"
+        )
+        assert dkim_covers_unsubscribe([signature], verdicts, from_domain="news.example") is True
+
+    def test_header_identity_outside_signing_domain_is_rejected(self):
+        """An AUID that is not within the raw signature's d= cannot correlate."""
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.i=@other.example header.s=bulk"],
+            "gmail",
+        )
+        signature = (
+            "v=1; d=news.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; b=x"
+        )
+        assert not dkim_covers_unsubscribe([signature], verdicts, from_domain="news.example")
+
+    def test_header_identity_alignment_checks_signature_domain(self):
+        """The alignment gate uses the matched signature's own d= tag."""
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.i=@mail.esp.example header.s=bulk"],
+            "gmail",
+        )
+        signature = "v=1; d=esp.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; b=x"
+        assert not dkim_covers_unsubscribe([signature], verdicts, from_domain="brand.example")
+
+    def test_header_identity_duplicate_signatures_stay_ambiguous(self):
+        """Fail-closed: two raw signatures matching one identity never correlate."""
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.i=@news.example header.s=bulk"],
+            "gmail",
+        )
+        signature = (
+            "v=1; d=news.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; b=x"
+        )
+        assert not dkim_covers_unsubscribe(
+            [signature, signature], verdicts, from_domain="news.example"
+        )
+
+    def test_header_identity_selector_mismatch_is_rejected(self):
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.i=@news.example header.s=other"],
             "gmail",
         )
         signature = (
@@ -103,6 +147,16 @@ class TestGmail:
         )
         assert not has_aligned_dkim_pass(verdicts.evidence, "victim.example")
         assert has_aligned_dkim_pass(verdicts.evidence, "attacker.example")
+
+    def test_aligned_dkim_helper_accepts_gmail_auid_identity(self):
+        """Gmail emits header.i (AUID) without header.d; the AUID domain is
+        within the signing domain per RFC 6376, so it may satisfy alignment."""
+        verdicts = parse_authentication_results(
+            ["mx.google.com; dkim=pass header.i=@news.example header.s=bulk"],
+            "gmail",
+        )
+        assert has_aligned_dkim_pass(verdicts.evidence, "news.example")
+        assert not has_aligned_dkim_pass(verdicts.evidence, "victim.example")
 
 
 class TestUntrustedInstances:

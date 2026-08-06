@@ -51,6 +51,9 @@ USER_AGENT = (
 
 # Timeout for HTTP requests
 REQUEST_TIMEOUT = 30
+# Success/interaction phrases sit deep in real pages; the safefetch default of
+# 4 KiB rarely reaches past <head>, which made GET verification always fail.
+GET_RESPONSE_MAX_BODY = 128 * 1024
 MAX_UNSUB_URI = 4096
 MAX_MAILTO_SUBJECT = 998
 MAX_MAILTO_BODY = 16_384
@@ -83,7 +86,6 @@ def _redact_target(target: str) -> str:
 
 # RFC 8058: the List-Unsubscribe-Post header value must be exactly this pair.
 ONE_CLICK_POST_VALUE = "list-unsubscribe=one-click"
-_STRICT_ONE_CLICK_RE = re.compile(r"^\s*<(https://[^<>\s]+)>\s*$", re.IGNORECASE)
 _BAD_PERCENT_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _LOCAL_ATOM_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$")
 _DOMAIN_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -309,9 +311,18 @@ def unsubscribe_subscription(
         if target is None:
             continue
         declared_one_click.add(_endpoint_fingerprint(target))
-        evidence_ok = header.server_can_unsubscribe or (
-            header.dkim_covers_unsubscribe
-            and has_aligned_dkim_pass(header.authentication, header.domain)
+        # Preferred evidence is a server verdict or an aligned DKIM pass whose
+        # signature covers both List-Unsubscribe fields (RFC 8058 §4). Trusted
+        # DMARC-pass evidence is also sufficient: tier 2 already permits a GET
+        # against sender links at that bar, and a POST to the declared
+        # one-click endpoint discloses nothing more while actually working.
+        evidence_ok = (
+            header.server_can_unsubscribe
+            or (
+                header.dkim_covers_unsubscribe
+                and has_aligned_dkim_pass(header.authentication, header.domain)
+            )
+            or _trusted_unsubscribe_auth(header)
         )
         if evidence_ok or not automatic:
             one_click.append((UnsubMethod.ONE_CLICK, target, header.message_ref))
@@ -479,19 +490,27 @@ def _header_matches_patterns(header: EmailHeader, patterns: list[str]) -> bool:
 
 
 def _strict_one_click_target(header: EmailHeader) -> str | None:
-    """Return the sole RFC 8058 target only when field syntax is compliant."""
+    """Return the RFC 8058 POST target when the field syntax is compliant.
+
+    RFC 8058 §3.1 requires exactly one HTTPS URI in List-Unsubscribe and
+    explicitly permits additional mailto URIs beside it — the combined
+    ``<mailto:…>, <https://…>`` form is what Gmail's bulk-sender rules made
+    the industry default, so it must be accepted. Only genuinely ambiguous
+    or non-compliant forms are rejected: repeated header instances, more
+    than one web URI, or a plaintext http target.
+    """
     if header.list_unsubscribe_count != 1 or header.list_unsubscribe_post_count != 1:
         return None
     if (header.list_unsubscribe_post or "").strip().casefold() != ONE_CLICK_POST_VALUE:
         return None
-    match = _STRICT_ONE_CLICK_RE.fullmatch(header.list_unsubscribe or "")
-    if match is None:
+    web_targets = [
+        target
+        for target in header.list_unsubscribe_targets
+        if target.casefold().startswith(("https://", "http://"))
+    ]
+    if len(web_targets) != 1 or not web_targets[0].casefold().startswith("https://"):
         return None
-    target = match.group(1)
-    targets = header.list_unsubscribe_targets
-    if len(targets) != 1 or targets[0] != target:
-        return None
-    return target
+    return web_targets[0]
 
 
 def _trusted_unsubscribe_auth(header: EmailHeader) -> bool:
@@ -712,7 +731,10 @@ def _execute_one_click(url: str) -> UnsubResult:
 
     try:
         # RFC 8058: POST the literal pair, form-encoded, no cookies/auth.
-        # HTTPS only; a redirect on a one-click endpoint is a failure.
+        # HTTPS only. Senders MUST NOT redirect the POST, but several large
+        # ESPs 302 to a confirmation page anyway; safe_fetch follows those
+        # hops with full re-validation, downgrading to GET on 301/302/303 so
+        # the unsubscribe POST is never blindly replayed at a new location.
         response = _fetch_with_retry(
             url,
             method="POST",
@@ -723,7 +745,7 @@ def _execute_one_click(url: str) -> UnsubResult:
             },
             timeout=REQUEST_TIMEOUT,
             allow_http=False,
-            follow_redirects=False,
+            follow_redirects=True,
         )
         result = UnsubResult(
             success=200 <= response.status < 300,
@@ -789,17 +811,20 @@ def _execute_get(url: str) -> UnsubResult:
             timeout=REQUEST_TIMEOUT,
             allow_http=False,
             follow_redirects=True,
+            max_body=GET_RESPONSE_MAX_BODY,
         )
         # A 200 alone proves nothing: many unsubscribe pages require another
-        # click. Success needs a positive phrase and no confirmation prompt.
-        # A 204 No Content is unconditional success by definition (there is no
-        # body to require a phrase from).
-        needs_confirmation = _check_needs_user_indicators(response.body)
-        success = response.status == 204 or (
-            200 <= response.status < 300
-            and _check_success_indicators(response.body)
-            and not needs_confirmation
+        # click. Success needs a positive phrase and no interaction gate.
+        # Structural markers like <script> or a footer <form> are normal on a
+        # page that already confirmed the unsubscribe, so they only demand
+        # user action when no success phrase is present. A 204 No Content is
+        # unconditional success by definition (there is no body to check).
+        gated = _check_interaction_gate_indicators(response.body)
+        confirmed = _check_success_indicators(response.body) and not gated
+        needs_confirmation = not confirmed and (
+            gated or _check_structural_interaction_markers(response.body)
         )
+        success = response.status == 204 or (200 <= response.status < 300 and confirmed)
         result = UnsubResult(
             success=success,
             method=UnsubMethod.GET,
@@ -1128,13 +1153,32 @@ def _check_success_indicators(body: str) -> bool:
     body_lower = body.lower()
     success_phrases = [
         "successfully unsubscribed",
+        "unsubscribed successfully",
         "you have been unsubscribed",
+        "you've been unsubscribed",
+        "you are unsubscribed",
+        "you are now unsubscribed",
+        "you have now been unsubscribed",
         "unsubscribe successful",
+        "unsubscription successful",
+        "unsubscribe complete",
+        "unsubscribe confirmed",
+        "unsubscribe request has been",
         "has been removed from",
+        "have been removed from",
+        "has been unsubscribed",
         "no longer receive",
+        "will no longer be sent",
         "subscription cancelled",
         "subscription canceled",
         "thank you for unsubscribing",
+        "sorry to see you go",
+        "opt-out successful",
+        "opted out successfully",
+        "opt-out request has been",
+        "removed from our mailing list",
+        "removed from this mailing list",
+        "removed from the mailing list",
     ]
     return any(phrase in body_lower for phrase in success_phrases)
 
@@ -1148,32 +1192,58 @@ def _check_confirmation_indicators(body: str) -> bool:
         "click to unsubscribe",
         "click the button",
         "click here to unsubscribe",
+        "click below to unsubscribe",
         "are you sure",
         "please confirm",
+        "do you want to unsubscribe",
+        "would you like to unsubscribe",
     ]
     return any(phrase in body_lower for phrase in confirmation_phrases)
 
 
-def _check_needs_user_indicators(body: str) -> bool:
-    """Identify responses that safe, stateless GET cannot complete."""
+def _check_interaction_gate_indicators(body: str) -> bool:
+    """Detect a page that explicitly demands human interaction to proceed.
+
+    These phrases override any success phrase on the same page: a captcha or
+    login wall means the unsubscribe cannot have completed via stateless GET.
+    """
     body_lower = body.casefold()
-    interactive_markers = (
-        "<form",
-        "<script",
-        "javascript:",
+    gate_markers = (
         "captcha",
         "recaptcha",
         "sign in",
         "log in",
         "login required",
-        "manage preferences",
-        "update preferences",
-        "preference center",
         "javascript required",
         "enable javascript",
         "cookies required",
         "enable cookies",
     )
     return _check_confirmation_indicators(body) or any(
-        marker in body_lower for marker in interactive_markers
+        marker in body_lower for marker in gate_markers
     )
+
+
+def _check_structural_interaction_markers(body: str) -> bool:
+    """Markers that suggest interactivity only when no success phrase exists.
+
+    Nearly every modern page carries <script> tags and footers routinely
+    contain search or signup <form>s, so these must never veto an explicit
+    success message — but on a page with no such message they are the best
+    available signal that a stateless GET could not finish the job.
+    """
+    body_lower = body.casefold()
+    structural_markers = (
+        "<form",
+        "<script",
+        "javascript:",
+        "manage preferences",
+        "update preferences",
+        "preference center",
+    )
+    return any(marker in body_lower for marker in structural_markers)
+
+
+def _check_needs_user_indicators(body: str) -> bool:
+    """Identify responses that safe, stateless GET cannot complete."""
+    return _check_interaction_gate_indicators(body) or _check_structural_interaction_markers(body)

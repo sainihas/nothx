@@ -99,7 +99,9 @@ class TestOneClickExecution:
         # Exact RFC 8058 semantics
         assert captured["method"] == "POST"
         assert captured["data"] == b"List-Unsubscribe=One-Click"
-        assert captured["follow_redirects"] is False
+        # Redirected POSTs are followed with full SSRF re-validation because
+        # several large ESPs 302 to a confirmation page despite RFC 8058.
+        assert captured["follow_redirects"] is True
         assert captured["allow_http"] is False
 
     def test_post_ignores_success_phrases_in_body(self, temp_db, monkeypatch):

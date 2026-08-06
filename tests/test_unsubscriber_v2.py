@@ -134,7 +134,6 @@ class TestAutomaticGates:
             ({"list_unsubscribe_count": 2}, "GET"),
             ({"list_unsubscribe_post_count": 2}, "GET"),
             ({"list_unsubscribe_post": "List-Unsubscribe=No"}, "GET"),
-            ({"list_unsubscribe": "https://mailer.example/unsubscribe/token"}, "GET"),
             ({"list_unsubscribe": "<http://mailer.example/unsubscribe/token>"}, None),
             (
                 {"list_unsubscribe": ("<https://mailer.example/a>, <https://mailer.example/b>")},
@@ -165,6 +164,70 @@ class TestAutomaticGates:
             assert calls and set(calls) == {expected_method}
         else:
             assert calls == []
+
+    def test_combined_mailto_and_https_header_is_one_click_posted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RFC 8058 permits mailto URIs beside the single HTTPS URI.
+
+        This combined form is the industry default (Gmail requires senders to
+        provide both), so it must resolve to a one-click POST — not degrade
+        to mailto or GET.
+        """
+        item = header(one_click=True, can_unsubscribe=True)
+        item.list_unsubscribe = (
+            "<mailto:unsub@mailer.example>, <https://mailer.example/unsubscribe/token>"
+        )
+        captured: dict[str, object] = {}
+
+        def fake_fetch(url: str, **kwargs):
+            captured.update(kwargs, url=url)
+            return FetchResponse(204, "", url, 0)
+
+        monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch)
+        result = unsubscriber.unsubscribe_subscription([item], consented_config())
+
+        assert result.outcome is UnsubscribeOutcome.REQUESTED
+        assert result.method is UnsubMethod.ONE_CLICK
+        assert captured["method"] == "POST"
+        assert captured["url"] == "https://mailer.example/unsubscribe/token"
+
+    def test_bracketless_https_header_is_one_click_posted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sloppy bracketless header still declares one unambiguous target."""
+        item = header(one_click=True, can_unsubscribe=True)
+        item.list_unsubscribe = "https://mailer.example/unsubscribe/token"
+        calls: list[str] = []
+
+        def fake_fetch(url: str, **kwargs):
+            calls.append(kwargs["method"])
+            return FetchResponse(204, "", url, 0)
+
+        monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch)
+        result = unsubscriber.unsubscribe_subscription([item], consented_config())
+
+        assert result.outcome is UnsubscribeOutcome.REQUESTED
+        assert calls == ["POST"]
+
+    def test_dmarc_pass_evidence_permits_one_click(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Trusted DMARC-pass evidence authorizes the POST, matching tier 2."""
+        item = header(one_click=True)
+        item.authentication = AuthenticationEvidence(
+            dmarc=AuthResult.PASS,
+            trusted=True,
+        )
+        calls: list[str] = []
+
+        def fake_fetch(url: str, **kwargs):
+            calls.append(kwargs["method"])
+            return FetchResponse(204, "", url, 0)
+
+        monkeypatch.setattr(unsubscriber, "safe_fetch", fake_fetch)
+        result = unsubscriber.unsubscribe_subscription([item], consented_config())
+
+        assert result.outcome is UnsubscribeOutcome.REQUESTED
+        assert calls == ["POST"]
 
     def test_one_click_requires_server_or_covering_dkim_evidence(
         self, monkeypatch: pytest.MonkeyPatch
@@ -237,7 +300,7 @@ class TestAutomaticGates:
         assert captured["method"] == "POST"
         assert captured["data"] == b"List-Unsubscribe=One-Click"
         assert captured["allow_http"] is False
-        assert captured["follow_redirects"] is False
+        assert captured["follow_redirects"] is True
         assert result.response_snippet is None
         assert result.attempt_results[0].message_ref == item.message_ref
 

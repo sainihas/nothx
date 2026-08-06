@@ -51,7 +51,7 @@ nothx/
 
 ```python
 @main.command()
-@click.option('--flag', help='Description')
+@click.option("--flag", help="Description")
 def new_command(flag: bool):
     """Command description."""
     # Implementation

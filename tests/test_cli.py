@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from nothx import db
 from nothx.cli import (
+    _detect_install_method,
     account_add,
     account_list,
     account_remove,
@@ -917,6 +918,111 @@ class TestUpdateCommand:
 
         assert result.exit_code == 0
         assert "Could not check" in result.output
+
+
+class TestDetectInstallMethod:
+    """Tests for install-method detection used to pick the right upgrader."""
+
+    def test_detects_pipx_via_metadata_file(self, tmp_path):
+        """pipx writes pipx_metadata.json into the venv root."""
+        (tmp_path / "pipx_metadata.json").write_text("{}")
+
+        with patch("sys.prefix", str(tmp_path)):
+            assert _detect_install_method() == "pipx"
+
+    def test_detects_pipx_via_layout_without_metadata(self, tmp_path):
+        """Older pipx versions predate the metadata file; layout still identifies them."""
+        venv = tmp_path / "pipx" / "venvs" / "nothx"
+        venv.mkdir(parents=True)
+
+        with patch("sys.prefix", str(venv)):
+            assert _detect_install_method() == "pipx"
+
+    def test_plain_venv_is_pip(self, tmp_path):
+        """A regular virtualenv has neither marker."""
+        with patch("sys.prefix", str(tmp_path)):
+            assert _detect_install_method() == "pip"
+
+    def test_venvs_dir_without_pipx_is_pip(self, tmp_path):
+        """A 'venvs' parent alone is not enough to claim a pipx install."""
+        venv = tmp_path / "venvs" / "nothx"
+        venv.mkdir(parents=True)
+
+        with patch("sys.prefix", str(venv)):
+            assert _detect_install_method() == "pip"
+
+
+class TestUpdateUsesMatchingInstaller:
+    """The update command must not upgrade a pipx install with pip."""
+
+    @staticmethod
+    def _pypi_response(version="99.99.99"):
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"info": {"version": version}}).encode()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        return mock_response
+
+    @patch("subprocess.run")
+    @patch("shutil.which", return_value="/opt/bin/pipx")
+    @patch("nothx.cli._detect_install_method", return_value="pipx")
+    @patch("nothx.cli._styled_confirm", return_value=True)
+    @patch("urllib.request.urlopen")
+    def test_pipx_install_upgrades_with_pipx(
+        self, mock_urlopen, _confirm, _detect, _which, mock_run, runner
+    ):
+        mock_urlopen.return_value = self._pypi_response()
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+        result = runner.invoke(update, [])
+
+        assert result.exit_code == 0
+        assert mock_run.call_args[0][0] == ["/opt/bin/pipx", "upgrade", "nothx"]
+
+    @patch("subprocess.run")
+    @patch("nothx.cli._detect_install_method", return_value="pip")
+    @patch("nothx.cli._styled_confirm", return_value=True)
+    @patch("urllib.request.urlopen")
+    def test_pip_install_upgrades_with_pip(self, mock_urlopen, _confirm, _detect, mock_run, runner):
+        mock_urlopen.return_value = self._pypi_response()
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+        result = runner.invoke(update, [])
+
+        assert result.exit_code == 0
+        command = mock_run.call_args[0][0]
+        assert command[1:] == ["-m", "pip", "install", "--upgrade", "nothx"]
+
+    @patch("subprocess.run")
+    @patch("shutil.which", return_value=None)
+    @patch("nothx.cli._detect_install_method", return_value="pipx")
+    @patch("nothx.cli._styled_confirm", return_value=True)
+    @patch("urllib.request.urlopen")
+    def test_pipx_missing_from_path_refuses_rather_than_falling_back_to_pip(
+        self, mock_urlopen, _confirm, _detect, _which, mock_run, runner
+    ):
+        """Falling back to pip here would silently desync pipx — bail with a hint instead."""
+        mock_urlopen.return_value = self._pypi_response()
+
+        result = runner.invoke(update, [])
+
+        assert result.exit_code == 0
+        mock_run.assert_not_called()
+        assert "pipx upgrade nothx" in result.output
+
+    @patch("nothx.cli._detect_install_method", return_value="pipx")
+    @patch("urllib.request.urlopen")
+    def test_offline_hint_matches_installer(self, mock_urlopen, _detect, runner):
+        """The manual fallback instructions must name pipx, not pip."""
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.URLError("Network error")
+
+        result = runner.invoke(update, [])
+
+        assert result.exit_code == 0
+        assert "pipx upgrade nothx" in result.output
+        assert "pip install --upgrade nothx" not in result.output
 
 
 class TestCommandAliases:

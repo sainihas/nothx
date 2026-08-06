@@ -71,14 +71,30 @@ def _dkim_domain_aligned(signing_domain: str | None, from_domain: str | None) ->
     return bool(signing and sender and (signing == sender or signing.endswith(f".{sender}")))
 
 
+def _identifier_domain(identifier: str | None) -> str | None:
+    """Extract the domain of a DKIM AUID (header.i), e.g. "@example.com".
+
+    Gmail's Authentication-Results expose header.i and header.s but omit
+    header.d entirely, so the AUID domain is the only signing-domain evidence
+    available there. RFC 6376 requires the AUID domain to equal the signing
+    domain or a subdomain of it, so an AUID domain that aligns with From
+    implies a signing domain within the same organizational tree.
+    """
+    if not identifier or "@" not in identifier:
+        return None
+    return identifier.rsplit("@", 1)[-1] or None
+
+
 def has_aligned_dkim_pass(evidence: AuthenticationEvidence, from_domain: str | None) -> bool:
     """Return whether trusted results contain a From-aligned DKIM pass."""
     if not evidence.trusted or evidence.dkim is not AuthResult.PASS:
         return False
     passing_domains = {
-        result.domain
+        domain
         for result in evidence.results
-        if result.method == "dkim" and result.result is AuthResult.PASS and result.domain
+        if result.method == "dkim"
+        and result.result is AuthResult.PASS
+        and (domain := result.domain or _identifier_domain(result.identifier))
     }
     # ``dkim_domains`` contains only explicit header.d values from passing
     # results and keeps compatibility with callers constructing evidence
@@ -279,9 +295,12 @@ def dkim_covers_unsubscribe(
     is skipped for API compatibility; automatic callers must always supply it.
 
     Correlation is deliberately fail-closed: Authentication-Results must expose
-    both header.d and header.s, and exactly one raw signature may match that
-    pair. This prevents a passing signature from being confused with a second,
-    attacker-added signature using the same partial identity.
+    header.s plus a signing-domain identity (header.d, or the header.i AUID
+    domain when the provider — notably Gmail — omits header.d), and exactly one
+    raw signature may match that identity. This prevents a passing signature
+    from being confused with a second, attacker-added signature using the same
+    partial identity. Alignment is checked against the matched signature's own
+    d= tag, which is exact even when the identity came from header.i.
     """
     evidence = verdicts.evidence
     if not evidence.trusted or evidence.dkim is not AuthResult.PASS:
@@ -298,21 +317,34 @@ def dkim_covers_unsubscribe(
         {key.casefold(): value.strip() for key, value in _DKIM_TAG_RE.findall(raw or "")}
         for raw in signatures
     ]
-    passing_pairs = {
-        (domain, selector)
-        for result in passing_dkim
-        if (domain := _normalize_domain(result.domain))
-        and (selector := (result.selector or "").strip().casefold())
-        and (from_domain is None or _dkim_domain_aligned(domain, from_domain))
-    }
-    for domain, selector in passing_pairs:
-        matches = [
-            tags
-            for tags in parsed_signatures
-            if _normalize_domain(tags.get("d")) == domain
-            and tags.get("s", "").strip().casefold() == selector
-        ]
+    passing_identities: set[tuple[str | None, str | None, str]] = set()
+    for result in passing_dkim:
+        selector = (result.selector or "").strip().casefold()
+        domain = _normalize_domain(result.domain)
+        auid_domain = _normalize_domain(_identifier_domain(result.identifier))
+        if selector and (domain is not None or auid_domain is not None):
+            passing_identities.add((domain, auid_domain, selector))
+    for domain, auid_domain, selector in passing_identities:
+        matches = []
+        for tags in parsed_signatures:
+            signature_domain = _normalize_domain(tags.get("d"))
+            if signature_domain is None:
+                continue
+            if tags.get("s", "").strip().casefold() != selector:
+                continue
+            if domain is not None:
+                if signature_domain == domain:
+                    matches.append(tags)
+            elif auid_domain is not None and (
+                auid_domain == signature_domain or auid_domain.endswith(f".{signature_domain}")
+            ):
+                # RFC 6376: the AUID domain must be the signing domain or a
+                # subdomain of it, so this is the only admissible relation.
+                matches.append(tags)
         if len(matches) != 1:
+            continue
+        signature_domain = _normalize_domain(matches[0].get("d"))
+        if from_domain is not None and not _dkim_domain_aligned(signature_domain, from_domain):
             continue
         covered = {name.strip().casefold() for name in matches[0].get("h", "").split(":")}
         if {"list-unsubscribe", "list-unsubscribe-post"}.issubset(covered):

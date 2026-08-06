@@ -383,15 +383,23 @@ class EmailHeader:
 
     @property
     def has_compliant_one_click(self) -> bool:
-        """Whether header syntax and server/DKIM evidence permit RFC 8058 POST."""
+        """Whether header syntax and server/DKIM evidence permit RFC 8058 POST.
+
+        RFC 8058 requires exactly one HTTPS URI in List-Unsubscribe; mailto
+        URIs beside it are explicitly permitted (and standard practice).
+        """
         exact_post = (self.list_unsubscribe_post or "").strip().casefold()
-        unsubscribe_url = self.list_unsubscribe_url
+        web_targets = [
+            uri
+            for uri in self.list_unsubscribe_targets
+            if uri.lower().startswith(("https://", "http://"))
+        ]
         return (
             self.list_unsubscribe_count == 1
             and self.list_unsubscribe_post_count == 1
             and exact_post == "list-unsubscribe=one-click"
-            and unsubscribe_url is not None
-            and unsubscribe_url.lower().startswith("https://")
+            and len(web_targets) == 1
+            and web_targets[0].lower().startswith("https://")
             and (self.server_can_unsubscribe or self.dkim_covers_unsubscribe)
         )
 

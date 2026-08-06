@@ -1025,6 +1025,36 @@ class TestUpdateUsesMatchingInstaller:
         assert "pip install --upgrade nothx" not in result.output
 
 
+class TestPackageVersion:
+    """__version__ must track packaging metadata rather than a hand-maintained copy.
+
+    0.1.10 shipped with pyproject.toml at 0.1.10 and __version__ still at 0.1.9,
+    which made `nothx --version` lie and left `nothx update` permanently offering
+    an upgrade the user had already installed.
+    """
+
+    def test_version_matches_distribution_metadata(self):
+        from importlib.metadata import version as dist_version
+
+        from nothx import __version__
+
+        assert __version__ == dist_version("nothx")
+
+    def test_version_resolved_not_fallback(self):
+        """The source-tree fallback reaching a user would break update checks."""
+        from nothx import __version__
+
+        assert __version__ != "0.0.0+unknown"
+
+    def test_cli_version_flag_reports_package_version(self, runner):
+        from nothx import __version__
+
+        result = runner.invoke(main, ["--version"])
+
+        assert result.exit_code == 0
+        assert __version__ in result.output
+
+
 class TestCommandAliases:
     """Tests for command aliases."""
 

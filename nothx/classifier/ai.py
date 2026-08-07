@@ -2,7 +2,6 @@
 
 import json
 import logging
-from datetime import datetime
 
 from .. import db
 from ..config import Config
@@ -12,6 +11,7 @@ from ..errors import (
     validate_confidence,
 )
 from ..models import Action, Classification, EmailType, SenderStats, UserPreference
+from ..timeutil import utcnow
 from .providers import get_provider
 from .providers.base import BaseAIProvider, ProviderError
 
@@ -757,7 +757,7 @@ class AIPatternAnalyzer:
             return 0
 
         updated = 0
-        now = datetime.now()
+        now = utcnow()
 
         for insight in analysis.get("insights", []):
             insight_type = insight.get("type")

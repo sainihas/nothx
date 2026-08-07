@@ -7,6 +7,7 @@ from datetime import datetime
 
 from .. import db
 from ..models import Action, SenderStats, UserAction, UserPreference
+from ..timeutil import ensure_utc, utcnow
 
 
 class PreferenceLearner:
@@ -103,7 +104,7 @@ class PreferenceLearner:
                     value=updated_value,
                     confidence=self._calculate_confidence(existing.sample_count + 1),
                     sample_count=existing.sample_count + 1,
-                    last_updated=datetime.now(),
+                    last_updated=utcnow(),
                     source="learned",
                 )
                 db.set_user_preference(updated_pref)
@@ -115,7 +116,7 @@ class PreferenceLearner:
                     value=value,
                     confidence=self._calculate_confidence(1),
                     sample_count=1,
-                    last_updated=datetime.now(),
+                    last_updated=utcnow(),
                     source="learned",
                 )
                 db.set_user_preference(new_pref)
@@ -149,7 +150,7 @@ class PreferenceLearner:
                 value=new_value,
                 confidence=self._calculate_confidence(existing.sample_count + 1),
                 sample_count=existing.sample_count + 1,
-                last_updated=datetime.now(),
+                last_updated=utcnow(),
                 source="learned",
             )
             db.set_user_preference(updated_pref)
@@ -164,7 +165,7 @@ class PreferenceLearner:
                 value=value,
                 confidence=self._calculate_confidence(1),
                 sample_count=1,
-                last_updated=datetime.now(),
+                last_updated=utcnow(),
                 source="learned",
             )
             db.set_user_preference(new_pref)
@@ -198,7 +199,7 @@ class PreferenceLearner:
                 value=new_value,
                 confidence=self._calculate_confidence(existing.sample_count + 1),
                 sample_count=existing.sample_count + 1,
-                last_updated=datetime.now(),
+                last_updated=utcnow(),
                 source="learned",
             )
             db.set_user_preference(updated_pref)
@@ -212,7 +213,7 @@ class PreferenceLearner:
                 value=value,
                 confidence=self._calculate_confidence(1),
                 sample_count=1,
-                last_updated=datetime.now(),
+                last_updated=utcnow(),
                 source="learned",
             )
             db.set_user_preference(new_pref)
@@ -289,8 +290,12 @@ class PreferenceLearner:
         return keywords
 
     def _recency_weight(self, timestamp: datetime) -> float:
-        """Calculate recency weight using exponential decay."""
-        days_ago = (datetime.now() - timestamp).days
+        """Calculate recency weight using exponential decay.
+
+        Accepts naive or aware timestamps; callers span older rows written
+        without a timezone and newer ones written in UTC.
+        """
+        days_ago = max(0, (utcnow() - ensure_utc(timestamp)).days)
         return math.exp(-days_ago / self.RECENCY_HALF_LIFE_DAYS)
 
     def _calculate_confidence(self, sample_count: int) -> float:

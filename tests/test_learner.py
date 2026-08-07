@@ -1,7 +1,7 @@
 """Tests for the preference learning system."""
 
 import tempfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -511,6 +511,77 @@ class TestRecencyWeight:
         """Test that same-day actions have weight near 1.0."""
         weight = learner._recency_weight(datetime.now())
         assert 0.9 < weight <= 1.0
+
+    def test_aware_timestamp_does_not_raise(self, learner):
+        """Timezone-aware timestamps must not clash with the naive ones."""
+        weight = learner._recency_weight(datetime.now(UTC))
+        assert 0.9 < weight <= 1.0
+
+    def test_mixed_awareness_weights_agree(self, learner):
+        """A naive and an aware stamp for the same instant weigh the same."""
+        aware = datetime.now(UTC) - timedelta(days=45)
+        naive = aware.replace(tzinfo=None)
+
+        assert learner._recency_weight(naive) == learner._recency_weight(aware)
+
+    def test_weight_never_exceeds_one(self, learner):
+        """A clock-skewed future timestamp must not out-weigh the present."""
+        assert learner._recency_weight(datetime.now(UTC) + timedelta(days=5)) == 1.0
+
+
+class TestMixedTimezoneActions:
+    """Regression tests for `nothx review` crashing on aware timestamps."""
+
+    def test_update_from_aware_action(self, learner, temp_db):
+        """Learning from a UTC-stamped action must not raise."""
+        learner.update_from_action(
+            UserAction(
+                domain="marketing.example.com",
+                action=Action.UNSUB,
+                timestamp=datetime.now(UTC),
+                open_rate=10.0,
+                email_count=40,
+            )
+        )
+        # Second action exercises the update-existing branch that does the
+        # arithmetic on the stored timestamp.
+        learner.update_from_action(
+            UserAction(
+                domain="marketing.example.com",
+                action=Action.UNSUB,
+                timestamp=datetime.now(UTC),
+                open_rate=10.0,
+                email_count=40,
+            )
+        )
+
+        assert db.get_user_preference("keyword:marketing") is not None
+
+    def test_naive_and_aware_actions_interleave(self, learner, temp_db):
+        """Old naive rows and new aware rows must coexist."""
+        for timestamp in (datetime.now(), datetime.now(UTC), datetime.now()):
+            learner.update_from_action(
+                UserAction(
+                    domain="promo.example.com",
+                    action=Action.UNSUB,
+                    timestamp=timestamp,
+                    open_rate=5.0,
+                    email_count=50,
+                )
+            )
+
+        pref = db.get_user_preference("keyword:promo")
+        assert pref is not None
+        assert pref.sample_count == 3
+
+    def test_stored_timestamps_round_trip_aware(self, temp_db):
+        """Timestamps written naive must read back as aware UTC."""
+        db.log_user_action(UserAction("legacy.com", Action.KEEP, datetime.now()))
+
+        actions = db.get_user_actions()
+
+        assert actions
+        assert all(action.timestamp.tzinfo is not None for action in actions)
 
 
 class TestConfidenceCalculation:

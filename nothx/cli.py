@@ -91,6 +91,10 @@ Q_INPUT_STYLE = QStyle(
 # Vertical line prefix for indented content under section headers
 _L = "[muted]│[/muted]"
 
+# Upper bound on one manual-review page. High enough that a real queue fits in
+# one pass; a queue that hits it is reported as truncated rather than as a total.
+_MANUAL_QUEUE_LIMIT = 10_000
+
 
 def _key(k: str) -> str:
     """Render a single keycap with rounded pill shape using half-block edges."""
@@ -1096,6 +1100,60 @@ def _record_persisted_block_needs_consent(subscription: dict[str, Any]) -> None:
     )
 
 
+def _drain_consent_parked_blocks(config: Config) -> tuple[int, int, int]:
+    """Apply BLOCK decisions that were queued while mailbox consent was missing.
+
+    These rows carry a decision the user already made, so they are work to
+    finish rather than questions to ask. Most no longer have Inbox locators at
+    all -- the mail moved or aged out -- and settle without any IMAP traffic.
+
+    Returns (subscriptions drained, messages moved, message actions failed).
+    """
+    if not config.permits_mailbox_mutation:
+        return 0, 0, 0
+    parked = db.list_consent_parked_blocks()
+    if not parked:
+        return 0, 0, 0
+
+    drained = 0
+    moved_total = 0
+    failed_total = 0
+    with Progress(
+        SpinnerColumn(style="#ffaf00"),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(complete_style="orange1", finished_style="orange1", pulse_style="orange1"),
+        TaskProgressColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Applying queued blocks...", total=len(parked))
+        for subscription in parked:
+            moved, failed = _apply_manual_subscription_block(config, subscription)
+            moved_total += moved
+            failed_total += failed
+            if not failed:
+                drained += 1
+            progress.advance(task)
+    return drained, moved_total, failed_total
+
+
+def _report_consent_parked_blocks(config: Config) -> None:
+    """Tell the user about queued BLOCK work without prompting for it."""
+    parked = db.count_consent_parked_blocks()
+    if not parked:
+        return
+    console.print(
+        f"\n[warning]{parked} block decision(s) are queued from a run that predates "
+        "your mailbox-action consent.[/warning]"
+    )
+    if config.permits_mailbox_mutation:
+        console.print("[muted]Apply them with `nothx review --apply-pending`.[/muted]")
+    else:
+        console.print(
+            "[muted]Grant consent with `nothx consent --mailbox-actions --yes` to apply them.[/muted]"
+        )
+
+
 def _apply_manual_subscription_block(
     config: Config,
     subscription: dict[str, Any],
@@ -1230,7 +1288,7 @@ def _change_sender_status(
     action_record = UserAction(
         domain=domain,
         action=action_enum,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(UTC),
         ai_recommendation=ai_rec,
         heuristic_score=None,
         open_rate=open_rate,
@@ -2076,7 +2134,7 @@ def _run_scan(
 ):
     """Run the main scan and classification process."""
     stats = RunStats(
-        ran_at=datetime.now(),
+        ran_at=datetime.now(UTC),
         mode="auto" if auto else "interactive",
     )
 
@@ -2398,11 +2456,23 @@ def _run_scan(
             # Review items marked to keep (only if not cancelled)
             if not review_cancelled:
                 for key, sender, classification in to_keep[:]:  # Slice to allow modification
+                    # Offering "unsubscribe" for a sender with no discovered
+                    # endpoint guarantees a failure the user cannot act on;
+                    # blocking is the only thing that actually stops the mail.
+                    can_unsubscribe = sender.has_unsubscribe or sender.can_unsubscribe_emails > 0
+                    alternative = (
+                        questionary.Choice("Unsubscribe instead", value="unsub")
+                        if can_unsubscribe
+                        else questionary.Choice(
+                            "Block instead (no unsubscribe link in these emails)",
+                            value="block",
+                        )
+                    )
                     action = questionary.select(
                         f"[{sender.total_emails} emails] {sender.domain}",
                         choices=[
                             questionary.Choice("Keep (AI recommendation)", value="keep"),
-                            questionary.Choice("Unsubscribe instead", value="unsub"),
+                            alternative,
                             questionary.Choice("Skip for now", value="skip"),
                         ],
                         default="keep",
@@ -2417,6 +2487,10 @@ def _run_scan(
                         to_keep.remove((key, sender, classification))
                         to_unsub.append((key, sender, classification))
                         console.print(f"{_L} [unsubscribe]→ Changed to unsubscribe[/unsubscribe]")
+                    elif action == "block":
+                        to_keep.remove((key, sender, classification))
+                        to_block.append((key, sender, classification))
+                        console.print(f"{_L} [block]→ Changed to block[/block]")
                     elif action == "skip":
                         to_keep.remove((key, sender, classification))
                         to_review.append((key, sender, classification))
@@ -2426,6 +2500,7 @@ def _run_scan(
             # Updated summary as tree
             updated_tree = Tree("[header]Updated decisions[/header]")
             updated_tree.add(f"[unsubscribe]{len(to_unsub)} to unsubscribe[/unsubscribe]")
+            updated_tree.add(f"[block]{len(to_block)} to block[/block]")
             updated_tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
             updated_tree.add(f"[review]{len(to_review)} need review[/review]")
             console.print()
@@ -2839,7 +2914,15 @@ def status(learning: bool):
             f"Needs user: [count]{outcomes['needs_user']}[/count] · "
             f"Failed: [count]{outcomes['failed']}[/count]"
         )
-        console.print(f"{_L} Manual-action queue: [count]{len(active_manual)}[/count]")
+        parked_blocks = db.count_consent_parked_blocks()
+        console.print(
+            f"{_L} Manual-action queue: [count]{len(active_manual) - parked_blocks}[/count]"
+            + (
+                f" · queued blocks awaiting apply: [count]{parked_blocks}[/count]"
+                if parked_blocks
+                else ""
+            )
+        )
         console.print(
             f"{_L} [muted]Requested means the endpoint accepted delivery; it does not "
             "guarantee mail has stopped. verified_quiet requires a complete post-grace "
@@ -2915,7 +2998,12 @@ def status(learning: bool):
 @click.option("--all", "show_all", is_flag=True, help="Show all pending senders")
 @click.option("--keep", "show_keep", is_flag=True, help="Review senders marked to keep")
 @click.option("--unsub", "show_unsub", is_flag=True, help="Review senders marked to unsubscribe")
-def review(show_all: bool, show_keep: bool, show_unsub: bool):
+@click.option(
+    "--apply-pending",
+    is_flag=True,
+    help="Apply block decisions queued while mailbox consent was missing, then exit",
+)
+def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: bool):
     """Review senders that need manual decision.
 
     By default, shows only senders that need review (uncertain classification).
@@ -2929,22 +3017,54 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
 
     db.init_db()
 
+    if apply_pending:
+        parked = db.count_consent_parked_blocks()
+        if not parked:
+            console.print("[success]✓ No queued block decisions to apply[/success]")
+            return
+        if not config.permits_mailbox_mutation:
+            console.print(
+                f"[warning]{parked} block decision(s) are queued but mailbox-action "
+                "consent is missing. Run `nothx consent --mailbox-actions --yes`.[/warning]"
+            )
+            return
+        drained, moved, failed = _drain_consent_parked_blocks(config)
+        console.print(
+            f"[success]✓ Applied {drained} queued block(s)[/success]: "
+            f"{moved} message(s) moved to Junk"
+            + (f", {failed} message action(s) failed" if failed else "")
+        )
+        return
+
     manual_subscriptions: list[dict[str, Any]] = []
     handled_manual_domains: set[str] = set()
+    truncated = False
     if not show_keep and not show_unsub:
+        # Blocks parked behind a missing consent are finished decisions waiting
+        # on work, not open questions -- prompting for them again buries the
+        # rows that genuinely need a human.
+        parked_ids = {row["id"] for row in db.list_consent_parked_blocks()}
+        pages = [
+            db.list_subscriptions(outcome="needs_user", limit=_MANUAL_QUEUE_LIMIT),
+            db.list_subscriptions(policy_action="review", limit=_MANUAL_QUEUE_LIMIT),
+        ]
+        truncated = any(len(page) == _MANUAL_QUEUE_LIMIT for page in pages)
         by_id: dict[int, dict[str, Any]] = {}
-        for subscription in (
-            *db.list_subscriptions(outcome="needs_user", limit=500),
-            *db.list_subscriptions(policy_action="review", limit=500),
-        ):
-            if subscription.get("policy_action") != "keep":
-                by_id[subscription["id"]] = subscription
+        for subscription in (*pages[0], *pages[1]):
+            if subscription.get("policy_action") == "keep" or subscription["id"] in parked_ids:
+                continue
+            by_id[subscription["id"]] = subscription
         manual_subscriptions = list(by_id.values())
 
     if manual_subscriptions:
         console.print(
             f"\n[header]{len(manual_subscriptions)} subscription(s) need manual action[/header]"
         )
+        if truncated:
+            console.print(
+                f"[muted]Showing the newest {_MANUAL_QUEUE_LIMIT} of each queue; "
+                "run this again to reach the rest.[/muted]"
+            )
         table = Table(show_header=True)
         table.add_column("ID")
         table.add_column("Account")
@@ -3030,8 +3150,10 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool):
 
     if not senders and not manual_subscriptions:
         console.print(f"[success]No senders {filter_label}![/success]")
+        _report_consent_parked_blocks(config)
         return
     if not senders:
+        _report_consent_parked_blocks(config)
         return
 
     _select_header(f"{len(senders)} senders {filter_label}")
@@ -3231,7 +3353,7 @@ def undo(domain: str | None):
             action_record = UserAction(
                 domain=domain,
                 action=Action.KEEP,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 ai_recommendation=Action.UNSUB,  # Undo means AI/system said unsub
                 heuristic_score=None,
                 open_rate=open_rate,
@@ -3443,6 +3565,25 @@ def consent(
         )
     config.save()
     console.print("[success]✓ Automation consent updated[/success]")
+
+    # Granting mailbox consent unblocks every BLOCK that a prior run had to
+    # park. Without this sweep those rows sit in the review queue forever,
+    # because nothing else ever revisits them.
+    if mailbox_actions:
+        db.init_db()
+        parked = db.count_consent_parked_blocks()
+        if parked and (
+            yes
+            or click.confirm(
+                f"Apply {parked} block decision(s) queued while consent was missing?",
+                default=True,
+            )
+        ):
+            drained, moved, failed = _drain_consent_parked_blocks(config)
+            console.print(
+                f"{_L} Applied {drained} queued block(s): {moved} message(s) moved to Junk"
+                + (f", {failed} message action(s) failed" if failed else "")
+            )
 
 
 @main.command()

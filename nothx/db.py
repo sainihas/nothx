@@ -19,6 +19,7 @@ from typing import Any
 
 from .config import get_db_path
 from .models import Action, RunStats, SenderStatus, UnsubMethod, UserAction, UserPreference
+from .timeutil import ensure_utc, utcnow
 
 BUSY_TIMEOUT_MS = 5_000
 DEFAULT_OPERATION_LEASE_SECONDS = 30 * 60
@@ -553,20 +554,26 @@ def _migrate_explicit_legacy_overrides(conn: sqlite3.Connection) -> None:
 # ============================================================================
 
 
+def _parse_timestamp(value: datetime | str | None = None) -> datetime:
+    """Return a timezone-aware UTC datetime from a datetime, ISO string, or now.
+
+    Rows written before timestamps were normalized are naive; ``ensure_utc``
+    adopts them so callers never mix naive and aware datetimes.
+    """
+    if value is None:
+        return utcnow()
+    if isinstance(value, datetime):
+        return ensure_utc(value)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Invalid ISO-8601 timestamp: {value!r}") from exc
+    return ensure_utc(parsed)
+
+
 def _iso_timestamp(value: datetime | str | None = None) -> str:
     """Return a normalized UTC ISO-8601 timestamp."""
-    if value is None:
-        parsed = datetime.now(UTC)
-    elif isinstance(value, datetime):
-        parsed = value
-    else:
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError(f"Invalid ISO-8601 timestamp: {value!r}") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC).isoformat()
+    return _parse_timestamp(value).isoformat()
 
 
 def _normalize_identity(identity_kind: str, identity_value: str) -> str:
@@ -836,6 +843,82 @@ def list_subscriptions(
             params,
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def count_subscriptions(
+    *,
+    account: str | None = None,
+    policy_action: str | None = None,
+    outcome: str | None = None,
+) -> int:
+    """Count subscriptions matching the same filters as ``list_subscriptions``.
+
+    Callers that page through results need the true size of the set so a page
+    limit is never reported to the user as a total.
+    """
+    if policy_action not in (None, "keep", "unsub", "block", "review"):
+        raise ValueError("Invalid subscription policy action")
+    if outcome is not None and outcome not in _OPERATION_OUTCOMES:
+        raise ValueError("Invalid grouped outcome")
+    clauses: list[str] = []
+    params: list[Any] = []
+    if account is not None:
+        clauses.append("account = ?")
+        params.append(account.strip())
+    if policy_action is not None:
+        clauses.append("policy_action = ?")
+        params.append(policy_action)
+    if outcome is not None:
+        clauses.append("last_outcome = ?")
+        params.append(outcome)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    with get_db() as conn:
+        return int(
+            conn.execute(f"SELECT COUNT(*) AS count FROM subscriptions{where}", params).fetchone()[
+                "count"
+            ]
+        )
+
+
+# A BLOCK parked for missing consent took no external action, so re-driving it
+# is safe. Every other unapplied outcome (a claim that expired mid-execution,
+# a partial mailbox failure) may already have mutated the mailbox and must stay
+# out of any automatic sweep.
+_CONSENT_PARKED_BLOCK_PREDICATE = """
+    FROM subscriptions s
+    WHERE s.policy_action = 'block'
+      AND s.last_outcome = 'needs_user'
+      AND EXISTS (
+          SELECT 1 FROM unsubscribe_operations o
+          WHERE o.subscription_id = s.id
+            AND o.kind = 'block'
+            AND o.outcome = 'needs_user'
+            AND o.error_code = 'mailbox_consent_required'
+      )
+"""
+
+
+def list_consent_parked_blocks(limit: int = 10_000) -> list[dict[str, Any]]:
+    """List BLOCK decisions that were queued only because consent was missing."""
+    if limit < 1:
+        return []
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT s.* {_CONSENT_PARKED_BLOCK_PREDICATE} "
+            "ORDER BY s.last_seen DESC, s.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def count_consent_parked_blocks() -> int:
+    """Count BLOCK decisions still queued behind a missing mailbox consent."""
+    with get_db() as conn:
+        return int(
+            conn.execute(f"SELECT COUNT(*) AS count {_CONSENT_PARKED_BLOCK_PREDICATE}").fetchone()[
+                "count"
+            ]
+        )
 
 
 def promote_subscription_identity(
@@ -2405,7 +2488,7 @@ def log_run(stats: RunStats) -> int | None:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
-                stats.ran_at.isoformat(),
+                _iso_timestamp(stats.ran_at),
                 stats.mode,
                 stats.emails_scanned,
                 stats.unique_senders,
@@ -2709,7 +2792,7 @@ def log_user_action(action: UserAction) -> None:
                 action.heuristic_score,
                 action.open_rate,
                 action.email_count,
-                action.timestamp.isoformat(),
+                _iso_timestamp(action.timestamp),
             ),
         )
 
@@ -2747,7 +2830,7 @@ def get_user_actions(
             UserAction(
                 domain=row["domain"],
                 action=Action(row["action"]),
-                timestamp=datetime.fromisoformat(row["timestamp"]),
+                timestamp=_parse_timestamp(row["timestamp"]),
                 ai_recommendation=Action(row["ai_recommendation"])
                 if row["ai_recommendation"]
                 else None,
@@ -2775,7 +2858,7 @@ def get_user_actions_by_domain_pattern(pattern: str) -> list[UserAction]:
             UserAction(
                 domain=row["domain"],
                 action=Action(row["action"]),
-                timestamp=datetime.fromisoformat(row["timestamp"]),
+                timestamp=_parse_timestamp(row["timestamp"]),
                 ai_recommendation=Action(row["ai_recommendation"])
                 if row["ai_recommendation"]
                 else None,
@@ -2810,7 +2893,7 @@ def get_user_preference(feature: str) -> UserPreference | None:
             confidence=row["confidence"],
             sample_count=row["sample_count"],
             source=row["source"] or "learned",
-            last_updated=datetime.fromisoformat(row["last_updated"]),
+            last_updated=_parse_timestamp(row["last_updated"]),
         )
 
 
@@ -2834,7 +2917,7 @@ def set_user_preference(pref: UserPreference) -> None:
                 pref.confidence,
                 pref.sample_count,
                 pref.source,
-                pref.last_updated.isoformat(),
+                _iso_timestamp(pref.last_updated),
             ),
         )
 
@@ -2851,7 +2934,7 @@ def get_all_preferences() -> list[UserPreference]:
                 confidence=row["confidence"],
                 sample_count=row["sample_count"],
                 source=row["source"] or "learned",
-                last_updated=datetime.fromisoformat(row["last_updated"]),
+                last_updated=_parse_timestamp(row["last_updated"]),
             )
             for row in rows
         ]
@@ -2872,7 +2955,7 @@ def get_preferences_by_prefix(prefix: str) -> list[UserPreference]:
                 confidence=row["confidence"],
                 sample_count=row["sample_count"],
                 source=row["source"] or "learned",
-                last_updated=datetime.fromisoformat(row["last_updated"]),
+                last_updated=_parse_timestamp(row["last_updated"]),
             )
             for row in rows
         ]

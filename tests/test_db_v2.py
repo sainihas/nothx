@@ -1039,3 +1039,74 @@ def test_legacy_override_never_clobbers_existing_user_rule(tmp_path: Path):
         assert rules["new.example"]["priority"] == 1000
         assert rules["new.example"]["match_type"] == "exact"
         assert rules["new.example"]["source"] == "legacy_override"
+
+
+class TestConsentParkedBlocks:
+    """A BLOCK parked for missing consent is queued work, not an open question."""
+
+    def _parked(self, identity: str = "spam.example.com") -> dict:
+        subscription = _subscription(identity=identity)
+        db.set_subscription_policy(subscription["id"], "block")
+        operation = db.get_or_create_unsubscribe_operation(
+            subscription["id"], f"block-consent-v1-{identity}", kind="block"
+        )
+        db.update_unsubscribe_operation_outcome(
+            operation["id"],
+            "needs_user",
+            error_code="mailbox_consent_required",
+        )
+        return subscription
+
+    def test_parked_block_is_listed_and_counted(self, state_db):
+        subscription = self._parked()
+
+        parked = db.list_consent_parked_blocks()
+
+        assert [row["id"] for row in parked] == [subscription["id"]]
+        assert db.count_consent_parked_blocks() == 1
+
+    def test_applied_block_is_not_parked(self, state_db):
+        subscription = self._parked()
+        operation = db.get_or_create_unsubscribe_operation(
+            subscription["id"], "manual-block-v2-0", kind="block"
+        )
+        db.update_unsubscribe_operation_outcome(operation["id"], "blocked")
+
+        assert db.count_consent_parked_blocks() == 0
+
+    def test_other_needs_user_reasons_are_not_swept(self, state_db):
+        """Only a consent block is safe to re-drive; a partial move is not."""
+        subscription = _subscription(identity="partial.example.com")
+        db.set_subscription_policy(subscription["id"], "block")
+        operation = db.get_or_create_unsubscribe_operation(
+            subscription["id"], "expired-v1", kind="block"
+        )
+        db.update_unsubscribe_operation_outcome(
+            operation["id"],
+            "needs_user",
+            error_code="execution_claim_expired",
+        )
+
+        assert db.count_consent_parked_blocks() == 0
+
+    def test_unsubscribe_consent_is_not_a_parked_block(self, state_db):
+        subscription = _subscription(identity="news2.example.com")
+        db.set_subscription_policy(subscription["id"], "review")
+        operation = db.get_or_create_unsubscribe_operation(
+            subscription["id"], "unsub-consent-v1", kind="unsubscribe"
+        )
+        db.update_unsubscribe_operation_outcome(
+            operation["id"],
+            "needs_user",
+            error_code="unsubscribe_consent_required",
+        )
+
+        assert db.count_consent_parked_blocks() == 0
+
+    def test_count_subscriptions_matches_list(self, state_db):
+        for index in range(3):
+            self._parked(identity=f"bulk{index}.example.com")
+
+        assert db.count_subscriptions(outcome="needs_user") == 3
+        assert db.count_subscriptions(policy_action="block") == 3
+        assert len(db.list_subscriptions(outcome="needs_user", limit=2)) == 2

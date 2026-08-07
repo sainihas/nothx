@@ -1344,3 +1344,85 @@ def test_undo_updates_authoritative_future_policy(configured_cli):
     result = runner.invoke(undo, ["sender.example"])
     assert result.exit_code == 0
     assert db.get_subscription(subscription["id"])["policy_action"] == "keep"
+
+
+class TestConsentParkedBlockDrain:
+    """Blocks parked behind a missing consent must be drainable, not re-asked."""
+
+    def _park_block(self, identity: str = "spam.example.com") -> dict:
+        subscription = db.upsert_subscription(
+            "user@example.com",
+            "list_id",
+            identity,
+            from_address=f"noreply@{identity}",
+            sender_domain=identity,
+        )
+        db.set_subscription_policy(subscription["id"], "block")
+        operation = db.get_or_create_unsubscribe_operation(
+            subscription["id"], f"block-consent-v1-{identity}", kind="block"
+        )
+        db.update_unsubscribe_operation_outcome(
+            operation["id"],
+            "needs_user",
+            error_code="mailbox_consent_required",
+        )
+        return subscription
+
+    def test_apply_pending_drains_rows_with_no_messages(self, configured_cli):
+        """The common case: mail is long gone, so no IMAP traffic is needed."""
+        runner, config = configured_cli
+        for index in range(3):
+            self._park_block(f"spam{index}.example.com")
+        config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+        config.save()
+
+        result = runner.invoke(review, ["--apply-pending"])
+
+        assert result.exit_code == 0, result.output
+        assert "Applied 3 queued block(s)" in result.output
+        assert db.count_consent_parked_blocks() == 0
+
+    def test_apply_pending_refuses_without_consent(self, configured_cli):
+        runner, config = configured_cli
+        self._park_block()
+        config.mailbox_mutation_consent_version = CONSENT_REVOKED
+        config.save()
+
+        result = runner.invoke(review, ["--apply-pending"])
+
+        assert result.exit_code == 0, result.output
+        assert "mailbox-action consent is missing" in result.output
+        assert db.count_consent_parked_blocks() == 1
+
+    def test_apply_pending_with_empty_queue(self, configured_cli):
+        runner, _config = configured_cli
+
+        result = runner.invoke(review, ["--apply-pending"])
+
+        assert result.exit_code == 0, result.output
+        assert "No queued block decisions" in result.output
+
+    def test_granting_consent_drains_the_queue(self, configured_cli):
+        runner, config = configured_cli
+        self._park_block()
+        config.mailbox_mutation_consent_version = CONSENT_REVOKED
+        config.save()
+
+        result = runner.invoke(consent, ["--mailbox-actions", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "Applied 1 queued block(s)" in result.output
+        assert db.count_consent_parked_blocks() == 0
+
+    def test_review_does_not_prompt_for_parked_blocks(self, configured_cli):
+        """Parked rows are reported as queued work, never as a question."""
+        runner, config = configured_cli
+        self._park_block()
+        config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+        config.save()
+
+        result = runner.invoke(review, [])
+
+        assert result.exit_code == 0, result.output
+        assert "need manual action" not in result.output
+        assert "nothx review --apply-pending" in result.output

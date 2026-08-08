@@ -1,8 +1,16 @@
 name: CI
 
+# Draft PRs run nothing. Every PR in this repo opens as a draft and only leaves
+# draft when it is about to be merged (see "Pull requests" in AGENTS.md), so
+# `ready_for_review` is in the types list — it is the event that gives a PR its
+# first real run. The guard is a per-job `if:` rather than a workflow-level
+# condition so that `test`/`lint`/`typecheck` still report a conclusion
+# ("skipped") on drafts, which is what keeps required status checks satisfiable.
+
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -15,6 +23,7 @@ jobs:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -49,6 +58,7 @@ jobs:
     name: Lint & Format
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
 
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +85,7 @@ jobs:
     name: Type Check
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
 
     steps:
       - uses: actions/checkout@v4

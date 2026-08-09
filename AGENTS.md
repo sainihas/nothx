@@ -30,8 +30,8 @@ CI not running on drafts is deliberate. `ci.yml` lists `ready_for_review` in its
 and guards every job on `github.event.pull_request.draft == false`, so a draft PR spends
 no Actions minutes. Don't route around that — no marking a PR ready early to see whether
 CI is happy, no `workflow_dispatch`, no pushing the branch elsewhere to provoke a run.
-Run `pytest`, `ruff check .`, and `ruff format --check .` locally instead; that is the
-same ground CI covers.
+Run `pytest --cov=nothx --cov-fail-under=55`, `ruff check .`, `ruff format --check .`,
+and `mypy nothx` locally instead; that is the same ground CI covers.
 
 ## Commit attribution
 

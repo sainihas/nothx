@@ -68,7 +68,7 @@ class AnthropicProvider(BaseAIProvider):
     def get_model_options(self) -> list[str]:
         return [
             "claude-haiku-4-5-20251001",
-            "claude-sonnet-5",
+            "claude-sonnet-5-5",
             "claude-sonnet-4-6",
             "claude-opus-4-8",
         ]
@@ -128,6 +128,11 @@ class AnthropicProvider(BaseAIProvider):
             response = client.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
+                **(
+                    {"thinking": {"type": "between_tools"}}
+                    if self.model == "claude-sonnet-5-5"
+                    else {}
+                ),
                 messages=[{"role": "user", "content": prompt}],
             )
 

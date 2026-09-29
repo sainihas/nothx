@@ -3,12 +3,37 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  # Manual escape hatch: re-publish an already-tagged version without cutting a
+  # new release. Needed when the release-triggered run never reaches a runner
+  # (e.g. an Actions outage) and the tag is left published but unshipped.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to build and publish (e.g. v0.1.10)"
+        required: true
+        type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # On release, github.ref is already the tag. On manual dispatch we run
+          # from the default branch, so check out the requested tag instead.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Verify version matches tag
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          expected="${tag#v}"
+          actual="$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::Tag $tag implies version $expected, but pyproject.toml declares $actual"
+            exit 1
+          fi
+          echo "Version $actual matches tag $tag"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,6 +55,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: pypi
     permissions:
       id-token: write  # Required for trusted publishing
@@ -43,3 +69,7 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Makes re-runs idempotent: a retry after a partial upload will not
+          # hard-fail on files PyPI already has.
+          skip-existing: true

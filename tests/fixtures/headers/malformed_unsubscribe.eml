@@ -1,0 +1,11 @@
+From: Broken Sender <mail@broken.example>
+Subject: Broken list headers
+Date: Thu, 09 Jul 2026 03:00:00 -0400
+Message-ID: <broken-1@broken.example>
+List-Id: Broken <not a valid id>
+List-Unsubscribe: <http://broken.example/remove?one=1>
+List-Unsubscribe: <https://broken.example/remove?two=2>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+Authentication-Results: mx.google.com; dkim=pass header.d=broken.example header.s=bulk; spf=pass; dmarc=pass
+DKIM-Signature: v=1; d=broken.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; bh=x; b=x

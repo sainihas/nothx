@@ -1,0 +1,7 @@
+From: Account Security <security@bank.example>
+Subject: Urgent: verify your password now
+Date: Thu, 09 Jul 2026 06:00:00 -0400
+Message-ID: <phish-1@attacker.example>
+List-Unsubscribe: <https://attacker.example/remove?credential=secret>
+Authentication-Results: spf=fail smtp.mailfrom=attacker.example; dkim=fail header.d=bank.example header.s=fake; dmarc=fail header.from=bank.example
+X-Forefront-Antispam-Report: CIP:203.0.113.8;CAT:PHSH;SCL:9;SFV:SPM;

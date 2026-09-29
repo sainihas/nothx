@@ -1,0 +1,33 @@
+{
+  "unsub_patterns": [
+    "marketing.*",
+    "promo.*",
+    "promotions.*",
+    "newsletter.*",
+    "deals.*",
+    "offers.*",
+    "sales.*"
+  ],
+  "keep_patterns": [
+    "*.gov",
+    "*.gov.uk",
+    "*.gov.au",
+    "security.*",
+    "alert.*",
+    "alerts.*",
+    "verify.*",
+    "verification.*",
+    "confirm.*",
+    "confirmation.*",
+    "receipt.*",
+    "receipts.*",
+    "order.*",
+    "orders.*",
+    "shipping.*",
+    "delivery.*"
+  ],
+  "block_patterns": [
+    "*.spam.com",
+    "*.junk.com"
+  ]
+}

@@ -1,0 +1,5 @@
+From: Pat Sales <pat@agency.example>
+Subject: Quick question about your company
+Date: Thu, 09 Jul 2026 07:00:00 -0400
+Message-ID: <cold-1@agency.example>
+Authentication-Results: mx.google.com; dkim=pass header.d=agency.example header.s=mail; spf=pass smtp.mailfrom=pat@agency.example; dmarc=pass header.from=agency.example

@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from nothx import db
 from nothx.cli import (
+    _detect_install_method,
     account_add,
     account_list,
     account_remove,
@@ -29,11 +30,13 @@ from nothx.cli import (
     search,
     senders,
     status,
-    test_connection,
     undo,
     update,
 )
-from nothx.config import AccountConfig, Config
+from nothx.cli import (
+    test_connection as connection_command,
+)
+from nothx.config import CURRENT_UNSUBSCRIBE_CONSENT_VERSION, AccountConfig, Config
 from nothx.models import (
     RunStats,
     SenderStatus,
@@ -244,6 +247,7 @@ class TestRunCommand:
 
         assert result.exit_code == 0
         assert "DRY RUN" in result.output
+        assert "cloud AI calls are disabled" in result.output
 
     @patch("nothx.cli.scan_inbox")
     @patch("nothx.cli.ClassificationEngine")
@@ -264,6 +268,113 @@ class TestRunCommand:
 
         assert result.exit_code == 0
         assert "not found" in result.output
+
+    @staticmethod
+    def _mock_scan_and_engine(mock_scan, mock_engine_class, sender_stats, classifications):
+        from nothx.models import EmailHeader
+
+        email = EmailHeader(
+            sender="deals@shop.com",
+            subject="Sale",
+            date=datetime(2026, 1, 1),
+            message_id="<x>",
+            list_unsubscribe="<https://shop.com/u>",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+            account_name="default",
+        )
+        mock_scan.return_value = MagicMock(
+            sender_stats=sender_stats, get_email_for_domain=lambda d: email
+        )
+        mock_engine = MagicMock()
+        mock_engine_class.return_value = mock_engine
+        mock_engine.classify_batch.return_value = classifications
+
+    @patch("nothx.cli.unsubscribe_subscription")
+    @patch("nothx.cli.scan_inbox")
+    @patch("nothx.cli.ClassificationEngine")
+    def test_run_user_rule_not_deferred_by_min_emails(
+        self, mock_engine_class, mock_scan, mock_unsub, runner, configured_env, temp_config_dir
+    ):
+        """An explicit user rule must be executed even below min_emails_before_action."""
+        from nothx.models import Action, Classification, EmailType, SenderStats, UnsubResult
+
+        # 1 email, below the default min_emails_before_action of 3
+        stats = {"shop.com": SenderStats(domain="shop.com", total_emails=1)}
+        cls = {
+            "shop.com": Classification(
+                email_type=EmailType.MARKETING,
+                action=Action.UNSUB,
+                confidence=1.0,
+                reasoning="Matched user rule",
+                source="user_rule",
+            )
+        }
+        self._mock_scan_and_engine(mock_scan, mock_engine_class, stats, cls)
+        mock_unsub.return_value = UnsubResult(success=True, method=UnsubMethod.ONE_CLICK)
+
+        result = runner.invoke(run, ["--auto"])
+
+        assert result.exit_code == 0
+        # Not deferred to review — the unsubscribe actually ran.
+        assert mock_unsub.called
+
+    @patch("nothx.cli.scan_inbox")
+    @patch("nothx.cli.ClassificationEngine")
+    def test_legacy_scan_result_never_contacts_authentication_unknown_target(
+        self, mock_engine_class, mock_scan, runner, configured_env, temp_config_dir
+    ):
+        from nothx.models import Action, Classification, EmailType, SenderStats
+
+        configured_env.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+        configured_env.save()
+        stats = {"shop.com": SenderStats(domain="shop.com", total_emails=3)}
+        classifications = {
+            "shop.com": Classification(
+                email_type=EmailType.MARKETING,
+                action=Action.UNSUB,
+                confidence=1.0,
+                reasoning="explicit rule",
+                source="user_rule",
+            )
+        }
+        self._mock_scan_and_engine(mock_scan, mock_engine_class, stats, classifications)
+
+        with patch("nothx.unsubscriber.safe_fetch") as fetch:
+            result = runner.invoke(run, ["--auto"])
+
+        assert result.exit_code == 0
+        fetch.assert_not_called()
+
+    @patch("nothx.cli.unsubscribe_subscription")
+    @patch("nothx.cli.scan_inbox")
+    @patch("nothx.cli.ClassificationEngine")
+    def test_run_confirm_mode_auto_skips_without_prompt(
+        self, mock_engine_class, mock_scan, mock_unsub, runner, configured_env, temp_config_dir
+    ):
+        """confirm mode + --auto must skip auto-unsubscribe, not open a prompt."""
+        from nothx.models import Action, Classification, EmailType, SenderStats
+
+        configured_env.operation_mode = "confirm"
+        configured_env.save()
+
+        stats = {"shop.com": SenderStats(domain="shop.com", total_emails=50)}
+        cls = {
+            "shop.com": Classification(
+                email_type=EmailType.MARKETING,
+                action=Action.UNSUB,
+                confidence=0.9,
+                reasoning="Heuristic score",
+                source="heuristics",
+            )
+        }
+        self._mock_scan_and_engine(mock_scan, mock_engine_class, stats, cls)
+
+        result = runner.invoke(run, ["--auto"])
+
+        assert result.exit_code == 0
+        assert "Confirm mode is on" in result.output
+        # No prompt, and nothing was executed.
+        assert not mock_unsub.called
 
 
 class TestStatusCommand:
@@ -669,7 +780,7 @@ class TestTestConnectionCommand:
 
     def test_test_no_accounts(self, runner, temp_config_dir):
         """Test when no accounts configured."""
-        result = runner.invoke(test_connection, [])
+        result = runner.invoke(connection_command, [])
 
         assert result.exit_code == 0
         assert "No accounts configured" in result.output
@@ -679,7 +790,7 @@ class TestTestConnectionCommand:
         """Test successful connection test."""
         mock_test.return_value = (True, "Connected successfully")
 
-        result = runner.invoke(test_connection, [])
+        result = runner.invoke(connection_command, [])
 
         assert result.exit_code == 0
         assert "successful" in result.output
@@ -689,7 +800,7 @@ class TestTestConnectionCommand:
         """Test failed connection test."""
         mock_test.return_value = (False, "Authentication failed")
 
-        result = runner.invoke(test_connection, [])
+        result = runner.invoke(connection_command, [])
 
         assert result.exit_code == 0
         assert "failed" in result.output
@@ -807,6 +918,141 @@ class TestUpdateCommand:
 
         assert result.exit_code == 0
         assert "Could not check" in result.output
+
+
+class TestDetectInstallMethod:
+    """Tests for install-method detection used to pick the right upgrader."""
+
+    def test_detects_pipx_via_metadata_file(self, tmp_path):
+        """pipx writes pipx_metadata.json into the venv root."""
+        (tmp_path / "pipx_metadata.json").write_text("{}")
+
+        with patch("sys.prefix", str(tmp_path)):
+            assert _detect_install_method() == "pipx"
+
+    def test_detects_pipx_via_layout_without_metadata(self, tmp_path):
+        """Older pipx versions predate the metadata file; layout still identifies them."""
+        venv = tmp_path / "pipx" / "venvs" / "nothx"
+        venv.mkdir(parents=True)
+
+        with patch("sys.prefix", str(venv)):
+            assert _detect_install_method() == "pipx"
+
+    def test_plain_venv_is_pip(self, tmp_path):
+        """A regular virtualenv has neither marker."""
+        with patch("sys.prefix", str(tmp_path)):
+            assert _detect_install_method() == "pip"
+
+    def test_venvs_dir_without_pipx_is_pip(self, tmp_path):
+        """A 'venvs' parent alone is not enough to claim a pipx install."""
+        venv = tmp_path / "venvs" / "nothx"
+        venv.mkdir(parents=True)
+
+        with patch("sys.prefix", str(venv)):
+            assert _detect_install_method() == "pip"
+
+
+class TestUpdateUsesMatchingInstaller:
+    """The update command must not upgrade a pipx install with pip."""
+
+    @staticmethod
+    def _pypi_response(version="99.99.99"):
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"info": {"version": version}}).encode()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        return mock_response
+
+    @patch("subprocess.run")
+    @patch("shutil.which", return_value="/opt/bin/pipx")
+    @patch("nothx.cli._detect_install_method", return_value="pipx")
+    @patch("nothx.cli._styled_confirm", return_value=True)
+    @patch("urllib.request.urlopen")
+    def test_pipx_install_upgrades_with_pipx(
+        self, mock_urlopen, _confirm, _detect, _which, mock_run, runner
+    ):
+        mock_urlopen.return_value = self._pypi_response()
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+        result = runner.invoke(update, [])
+
+        assert result.exit_code == 0
+        assert mock_run.call_args[0][0] == ["/opt/bin/pipx", "upgrade", "nothx"]
+
+    @patch("subprocess.run")
+    @patch("nothx.cli._detect_install_method", return_value="pip")
+    @patch("nothx.cli._styled_confirm", return_value=True)
+    @patch("urllib.request.urlopen")
+    def test_pip_install_upgrades_with_pip(self, mock_urlopen, _confirm, _detect, mock_run, runner):
+        mock_urlopen.return_value = self._pypi_response()
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+        result = runner.invoke(update, [])
+
+        assert result.exit_code == 0
+        command = mock_run.call_args[0][0]
+        assert command[1:] == ["-m", "pip", "install", "--upgrade", "nothx"]
+
+    @patch("subprocess.run")
+    @patch("shutil.which", return_value=None)
+    @patch("nothx.cli._detect_install_method", return_value="pipx")
+    @patch("nothx.cli._styled_confirm", return_value=True)
+    @patch("urllib.request.urlopen")
+    def test_pipx_missing_from_path_refuses_rather_than_falling_back_to_pip(
+        self, mock_urlopen, _confirm, _detect, _which, mock_run, runner
+    ):
+        """Falling back to pip here would silently desync pipx — bail with a hint instead."""
+        mock_urlopen.return_value = self._pypi_response()
+
+        result = runner.invoke(update, [])
+
+        assert result.exit_code == 0
+        mock_run.assert_not_called()
+        assert "pipx upgrade nothx" in result.output
+
+    @patch("nothx.cli._detect_install_method", return_value="pipx")
+    @patch("urllib.request.urlopen")
+    def test_offline_hint_matches_installer(self, mock_urlopen, _detect, runner):
+        """The manual fallback instructions must name pipx, not pip."""
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.URLError("Network error")
+
+        result = runner.invoke(update, [])
+
+        assert result.exit_code == 0
+        assert "pipx upgrade nothx" in result.output
+        assert "pip install --upgrade nothx" not in result.output
+
+
+class TestPackageVersion:
+    """__version__ must track packaging metadata rather than a hand-maintained copy.
+
+    0.1.10 shipped with pyproject.toml at 0.1.10 and __version__ still at 0.1.9,
+    which made `nothx --version` lie and left `nothx update` permanently offering
+    an upgrade the user had already installed.
+    """
+
+    def test_version_matches_distribution_metadata(self):
+        from importlib.metadata import version as dist_version
+
+        from nothx import __version__
+
+        assert __version__ == dist_version("nothx")
+
+    def test_version_resolved_not_fallback(self):
+        """The source-tree fallback reaching a user would break update checks."""
+        from nothx import __version__
+
+        assert __version__ != "0.0.0+unknown"
+
+    def test_cli_version_flag_reports_package_version(self, runner):
+        from nothx import __version__
+
+        result = runner.invoke(main, ["--version"])
+
+        assert result.exit_code == 0
+        assert __version__ in result.output
 
 
 class TestCommandAliases:

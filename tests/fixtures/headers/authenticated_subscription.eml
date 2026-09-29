@@ -1,0 +1,10 @@
+From: Daily News <newsletter@news.example>
+Subject: Your daily briefing
+Date: Thu, 09 Jul 2026 09:00:00 -0400
+Message-ID: <auth-list-1@news.example>
+List-Id: Daily News <daily.news.example>
+List-Unsubscribe: <https://news.example/unsubscribe?token=super-secret>, <mailto:leave@news.example?subject=unsubscribe>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+Precedence: list
+Authentication-Results: mx.google.com; dkim=pass header.d=news.example header.s=bulk header.i=@news.example; spf=pass smtp.mailfrom=bounce@news.example; dmarc=pass header.from=news.example
+DKIM-Signature: v=1; d=news.example; s=bulk; h=from:subject:list-id:list-unsubscribe:list-unsubscribe-post; bh=x; b=x

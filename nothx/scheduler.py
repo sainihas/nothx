@@ -33,7 +33,7 @@ def get_systemd_timer_path() -> Path:
     return Path.home() / ".config" / "systemd" / "user" / "nothx.timer"
 
 
-def install_schedule(frequency: str = "monthly") -> tuple[bool, str]:
+def install_schedule(frequency: str = "daily") -> tuple[bool, str]:
     """
     Install automatic scheduling.
 

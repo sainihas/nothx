@@ -42,25 +42,31 @@ class TestPatternMatcher:
         assert result is not None
         assert result.action == Action.UNSUB
 
-    def test_gov_domain_kept(self):
-        """Test that .gov domains are kept."""
+    def test_gov_domain_requires_review(self):
+        """A broad protected suffix is not a terminal KEEP decision."""
         sender = SenderStats(
             domain="irs.gov",
             total_emails=5,
         )
         result = self.matcher.match(sender)
         assert result is not None
-        assert result.action == Action.KEEP
+        assert result.action == Action.REVIEW
 
-    def test_bank_domain_kept(self):
-        """Test that bank-related domains are kept."""
+    def test_bank_keyword_is_not_terminal_keep(self):
+        """A broad bank keyword is only an unsubscribe safety signal."""
         sender = SenderStats(
             domain="notifications.bankofamerica.com",
             total_emails=10,
         )
         result = self.matcher.match(sender)
+        assert result is None
+
+    def test_security_subdomain_is_only_a_review_signal(self):
+        sender = SenderStats(domain="security.attacker.example", total_emails=3)
+        result = self.matcher.match(sender)
         assert result is not None
-        assert result.action == Action.KEEP
+        assert result.action is Action.REVIEW
+        assert result.source == "safety_policy"
 
     def test_unknown_domain_no_match(self):
         """Test that unknown domains don't match patterns."""

@@ -1,85 +1,48 @@
 """Layer 2: Preset pattern matching for classification."""
 
 import json
+import logging
+from importlib import resources
 from pathlib import Path
 
 from ..models import Action, Classification, EmailType, SenderStats
 from .utils import matches_pattern
 
-# Default patterns shipped with nothx
-DEFAULT_PATTERNS = {
+logger = logging.getLogger("nothx.classifier.patterns")
+
+# Minimal in-code fallback used only if the packaged patterns.json can't be
+# loaded (e.g. a broken wheel). The packaged JSON at data/patterns.json is the
+# authoritative list; intentionally avoid terminal rules for whole ESP/vendor
+# domains because those hosts serve many unrelated subscriptions.
+FALLBACK_PATTERNS = {
     "unsub_patterns": [
-        # Common marketing prefixes
         "marketing.*",
         "promo.*",
-        "promotions.*",
         "newsletter.*",
-        "news.*",
-        "deals.*",
-        "offers.*",
-        "sales.*",
-        "noreply.*",
-        "no-reply.*",
-        "donotreply.*",
-        "updates.*",
-        "info.*",
-        "hello.*",
-        "team.*",
-        # Marketing domains
-        "*.mailchimp.com",
-        "*.sendgrid.net",
-        "*.klaviyo.com",
-        "*.sailthru.com",
-        "*.exacttarget.com",
-        "*.constantcontact.com",
-        "*.campaign-archive.com",
     ],
     "keep_patterns": [
-        # Government
         "*.gov",
-        "*.gov.uk",
-        "*.gov.au",
-        # Banking and finance
-        "*bank*",
-        "*credit*",
-        "*finance*",
-        "*.visa.com",
-        "*.mastercard.com",
-        "*.paypal.com",
-        "*.stripe.com",
-        # Health
-        "*health*",
-        "*medical*",
-        "*hospital*",
-        "*clinic*",
-        "*pharmacy*",
-        # Important services
-        "*.amazon.com",  # Transactional emails
-        "*.apple.com",
-        "*.google.com",
-        "*.microsoft.com",
-        "*.github.com",
-        # Security
         "security.*",
-        "alert.*",
-        "alerts.*",
-        "verify.*",
-        "verification.*",
-        "confirm.*",
-        "confirmation.*",
-        "receipt.*",
-        "receipts.*",
-        "order.*",
-        "orders.*",
-        "shipping.*",
-        "delivery.*",
     ],
     "block_patterns": [
-        # Known spam domains (examples)
         "*.spam.com",
         "*.junk.com",
     ],
 }
+
+
+def _load_packaged_patterns() -> dict:
+    """Load the patterns JSON shipped inside the package."""
+    try:
+        with resources.files("nothx.classifier.data").joinpath("patterns.json").open() as f:
+            return json.load(f)
+    except (OSError, ValueError, ModuleNotFoundError) as e:
+        logger.warning("Failed to load packaged patterns, using fallback: %s", e)
+        return FALLBACK_PATTERNS
+
+
+# Loaded once at import time; the packaged JSON is the single source of truth.
+DEFAULT_PATTERNS = _load_packaged_patterns()
 
 
 class PatternMatcher:
@@ -89,7 +52,7 @@ class PatternMatcher:
         self.patterns = self._load_patterns(patterns_file)
 
     def _load_patterns(self, patterns_file: Path | None) -> dict:
-        """Load patterns from file or use defaults."""
+        """Load patterns from a user-provided file, or the packaged defaults."""
         if patterns_file and patterns_file.exists():
             with open(patterns_file) as f:
                 return json.load(f)
@@ -113,15 +76,18 @@ class PatternMatcher:
                     source="preset",
                 )
 
-        # Check keep patterns
+        # Broad built-in safety patterns are deliberately non-terminal.  A
+        # domain shape such as ``security.*`` or ``*.gov`` is not proof that a
+        # particular delivery is wanted, and must never override phishing or
+        # authentication evidence.  It only keeps automation behind review.
         for pattern in self.patterns.get("keep_patterns", []):
             if matches_pattern(domain, pattern):
                 return Classification(
-                    email_type=EmailType.TRANSACTIONAL,
-                    action=Action.KEEP,
-                    confidence=0.90,
-                    reasoning=f"Matched keep pattern: {pattern}",
-                    source="preset",
+                    email_type=EmailType.UNKNOWN,
+                    action=Action.REVIEW,
+                    confidence=0.50,
+                    reasoning=f"Matched protected review pattern: {pattern}",
+                    source="safety_policy",
                 )
 
         # Check unsub patterns

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nothx"
-version = "0.1.5"
+version = "0.1.12"
 description = "Smart enough to say no."
 readme = "README.md"
 license = "MIT"
@@ -61,11 +61,12 @@ dev = [
 nothx = "nothx.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/nothx/nothx"
-Repository = "https://github.com/nothx/nothx"
+Homepage = "https://github.com/sainihas/nothx"
+Repository = "https://github.com/sainihas/nothx"
 
 [tool.hatch.build.targets.wheel]
 packages = ["nothx"]
+include = ["nothx/**/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

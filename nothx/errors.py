@@ -2,6 +2,8 @@
 
 import functools
 import logging
+import math
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,6 +32,15 @@ class ErrorCode(Enum):
     IMAP_AUTH_FAILED = "imap_auth_failed"
     IMAP_TIMEOUT = "imap_timeout"
     IMAP_FETCH_ERROR = "imap_fetch_error"
+
+    # OAuth errors
+    OAUTH_DEVICE_FLOW_FAILED = "oauth_device_flow_failed"
+    OAUTH_TOKEN_REFRESH_FAILED = "oauth_token_refresh_failed"
+    OAUTH_TOKEN_MISSING = "oauth_token_missing"
+    OAUTH_RECONSENT_REQUIRED = "oauth_reconsent_required"
+    OAUTH_FLOW_CANCELLED = "oauth_flow_cancelled"
+    OAUTH_NETWORK_ERROR = "oauth_network_error"
+    OAUTH_CACHE_ERROR = "oauth_cache_error"
 
     # HTTP errors
     HTTP_CONNECTION_ERROR = "http_connection_error"
@@ -85,6 +96,30 @@ class AIError(NothxError):
 
 class IMAPError(NothxError):
     """IMAP-related errors."""
+
+    pass
+
+
+class OAuthError(NothxError):
+    """Microsoft OAuth2 authentication error."""
+
+    pass
+
+
+class OAuthTransientError(OAuthError):
+    """Retryable OAuth transport or service error."""
+
+    pass
+
+
+class OAuthReconsentRequired(OAuthError):
+    """Cached authorization cannot satisfy the currently required scopes."""
+
+    pass
+
+
+class OAuthCancelledError(OAuthError):
+    """The user cancelled an in-progress OAuth device flow."""
 
     pass
 
@@ -221,6 +256,15 @@ def validate_confidence(confidence: float, context: str = "") -> float:
 
     Logs a warning if the value was out of range.
     """
+    # NaN fails every comparison, so it would pass the range check unchanged
+    if math.isnan(confidence) or math.isinf(confidence):
+        logger.warning(
+            "Confidence value %r is not finite%s, using 0.5",
+            confidence,
+            f" in {context}" if context else "",
+            extra={"original_confidence": str(confidence), "context": context},
+        )
+        return 0.5
     if confidence < 0.0 or confidence > 1.0:
         logger.warning(
             "Confidence value %.4f out of range [0.0, 1.0]%s, clamping",
@@ -245,11 +289,26 @@ class RateLimiter:
     burst_size: int = 5
     _tokens: float = field(default=0.0, init=False, repr=False)
     _last_update: float = field(default=0.0, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize tokens to burst size."""
         self._tokens = float(self.burst_size)
         self._last_update = time.time()
+
+    def _refill_and_take(self) -> bool:
+        """Refill tokens and take one if available. Caller must hold the lock."""
+        now = time.time()
+        elapsed = now - self._last_update
+        self._tokens = min(
+            self.burst_size,
+            self._tokens + elapsed * self.requests_per_second,
+        )
+        self._last_update = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        return False
 
     def acquire(self, timeout: float = 30.0) -> bool:
         """Acquire a token, waiting if necessary.
@@ -263,25 +322,17 @@ class RateLimiter:
         start_time = time.time()
 
         while True:
-            # Refill tokens based on elapsed time
-            now = time.time()
-            elapsed = now - self._last_update
-            self._tokens = min(
-                self.burst_size,
-                self._tokens + elapsed * self.requests_per_second,
-            )
-            self._last_update = now
-
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return True
+            with self._lock:
+                if self._refill_and_take():
+                    return True
+                deficit = 1.0 - self._tokens
 
             # Check timeout
             if time.time() - start_time >= timeout:
                 return False
 
-            # Wait a bit before retrying
-            time.sleep(min(0.1, (1.0 - self._tokens) / self.requests_per_second))
+            # Wait a bit before retrying (outside the lock)
+            time.sleep(min(0.1, deficit / self.requests_per_second))
 
     def try_acquire(self) -> bool:
         """Try to acquire a token without waiting.
@@ -289,19 +340,8 @@ class RateLimiter:
         Returns:
             True if token acquired, False otherwise
         """
-        # Refill tokens based on elapsed time
-        now = time.time()
-        elapsed = now - self._last_update
-        self._tokens = min(
-            self.burst_size,
-            self._tokens + elapsed * self.requests_per_second,
-        )
-        self._last_update = now
-
-        if self._tokens >= 1.0:
-            self._tokens -= 1.0
-            return True
-        return False
+        with self._lock:
+            return self._refill_and_take()
 
 
 def safe_truncate(text: str, max_length: int, suffix: str = "...") -> str:

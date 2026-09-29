@@ -358,3 +358,9 @@ MIT — see [LICENSE](LICENSE)
 **nothx** — Because your inbox should work for you, not against you.
 
 *Made with mass frustration at marketing emails.*
+
+### Sonnet model (September 29, 2026)
+
+The optional Sonnet choice uses `claude-sonnet-5-5`; the Haiku default is unchanged. Short Sonnet completion paths request
+`between_tools` to preserve the output budget; explicit adaptive reasoning
+remains available. Existing model environment overrides still take precedence.

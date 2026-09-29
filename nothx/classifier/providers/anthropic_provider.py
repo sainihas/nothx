@@ -34,11 +34,11 @@ class AnthropicProvider(BaseAIProvider):
 
     @property
     def default_model(self) -> str:
-        return "claude-sonnet-4-20250514"
+        return "claude-sonnet-5-5"
 
     def get_model_options(self) -> list[str]:
         return [
-            "claude-sonnet-4-20250514",
+            "claude-sonnet-5-5",
             "claude-opus-4-20250514",
             "claude-3-5-sonnet-20241022",
             "claude-3-5-haiku-20241022",
@@ -70,11 +70,12 @@ class AnthropicProvider(BaseAIProvider):
             response = client.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
+                **({"thinking": {"type": "between_tools"}} if self.model == "claude-sonnet-5-5" else {}),
                 messages=[{"role": "user", "content": prompt}],
             )
 
             return ProviderResponse(
-                text=response.content[0].text,
+                text="".join(block.text for block in response.content if block.type == "text"),
                 model=self.model,
                 usage={
                     "input_tokens": response.usage.input_tokens,

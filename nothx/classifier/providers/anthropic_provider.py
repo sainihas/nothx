@@ -17,10 +17,11 @@ MODEL_REPLACEMENTS = {
     "claude-3-5-sonnet-20240620": "claude-sonnet-4-6",
     "claude-3-5-sonnet-20241022": "claude-sonnet-4-6",
     "claude-3-sonnet-20240229": "claude-sonnet-4-6",
-    "claude-3-haiku-20240307": "claude-haiku-4-5-20251001",
-    "claude-3-5-haiku-20241022": "claude-haiku-4-5-20251001",
+    "claude-3-haiku-20240307": "claude-haiku-5-5",
+    "claude-3-5-haiku-20241022": "claude-haiku-5-5",
     # Earlier nothx releases used the short Haiku alias. Use the documented ID.
-    "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+    "claude-haiku-4-5": "claude-haiku-5-5",
+    "claude-haiku-4-5-20251001": "claude-haiku-5-5",
 }
 
 
@@ -63,11 +64,11 @@ class AnthropicProvider(BaseAIProvider):
     @property
     def default_model(self) -> str:
         # Haiku is the cost-effective choice for high-volume header classification
-        return "claude-haiku-4-5-20251001"
+        return "claude-haiku-5-5"
 
     def get_model_options(self) -> list[str]:
         return [
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-5-5",
             "claude-sonnet-5-5",
             "claude-sonnet-4-6",
             "claude-opus-4-8",
@@ -131,6 +132,8 @@ class AnthropicProvider(BaseAIProvider):
                 **(
                     {"thinking": {"type": "between_tools"}}
                     if self.model == "claude-sonnet-5-5"
+                    else {"thinking": {"type": "disabled"}}
+                    if self.model == "claude-haiku-5-5"
                     else {}
                 ),
                 messages=[{"role": "user", "content": prompt}],

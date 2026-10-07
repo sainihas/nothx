@@ -12,7 +12,7 @@ class TestAnthropicProvider:
     def test_default_model_uses_current_haiku_id(self):
         provider = AnthropicProvider(api_key="test-key")
 
-        assert provider.model == "claude-haiku-4-5-20251001"
+        assert provider.model == "claude-haiku-5-5"
 
     def test_retired_sonnet_model_is_replaced(self):
         provider = AnthropicProvider(api_key="test-key", model="claude-sonnet-4-20250514")
@@ -24,10 +24,11 @@ class TestAnthropicProvider:
 
         assert provider.model == "claude-sonnet-5"
 
-    def test_short_haiku_alias_is_replaced(self):
-        provider = AnthropicProvider(api_key="test-key", model="claude-haiku-4-5")
+    @pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-haiku-4-5-20251001"])
+    def test_short_haiku_alias_is_replaced(self, model):
+        provider = AnthropicProvider(api_key="test-key", model=model)
 
-        assert provider.model == "claude-haiku-4-5-20251001"
+        assert provider.model == "claude-haiku-5-5"
 
     def test_extract_response_text_skips_thinking_blocks(self):
         provider = AnthropicProvider(api_key="test-key")

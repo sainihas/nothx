@@ -10,13 +10,13 @@ logger = logging.getLogger("nothx.providers.anthropic")
 
 MODEL_REPLACEMENTS = {
     # Retired on the Anthropic API in 2026; keep existing user configs working.
-    "claude-sonnet-4-20250514": "claude-sonnet-4-6",
-    "claude-opus-4-20250514": "claude-opus-4-8",
-    "claude-opus-4-1-20250805": "claude-opus-4-8",
-    "claude-3-7-sonnet-20250219": "claude-sonnet-4-6",
-    "claude-3-5-sonnet-20240620": "claude-sonnet-4-6",
-    "claude-3-5-sonnet-20241022": "claude-sonnet-4-6",
-    "claude-3-sonnet-20240229": "claude-sonnet-4-6",
+    "claude-sonnet-4-20250514": "claude-sonnet-5-5",
+    "claude-opus-4-20250514": "claude-opus-5-5",
+    "claude-opus-4-1-20250805": "claude-opus-5-5",
+    "claude-3-7-sonnet-20250219": "claude-sonnet-5-5",
+    "claude-3-5-sonnet-20240620": "claude-sonnet-5-5",
+    "claude-3-5-sonnet-20241022": "claude-sonnet-5-5",
+    "claude-3-sonnet-20240229": "claude-sonnet-5-5",
     "claude-3-haiku-20240307": "claude-haiku-5-5",
     "claude-3-5-haiku-20241022": "claude-haiku-5-5",
     # Earlier nothx releases used the short Haiku alias. Use the documented ID.
@@ -70,8 +70,7 @@ class AnthropicProvider(BaseAIProvider):
         return [
             "claude-haiku-5-5",
             "claude-sonnet-5-5",
-            "claude-sonnet-4-6",
-            "claude-opus-4-8",
+            "claude-opus-5-5",
         ]
 
     def _get_client(self):

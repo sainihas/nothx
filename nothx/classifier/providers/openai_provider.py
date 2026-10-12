@@ -7,6 +7,16 @@ from .base import BaseAIProvider, ProviderError, ProviderErrorType, ProviderResp
 
 logger = logging.getLogger("nothx.providers.openai")
 
+# Reasoning models reject max_tokens on Chat Completions and need
+# max_completion_tokens, which also covers their reasoning tokens.
+_REASONING_MODEL_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+
+
+def _token_limit_kwargs(model: str, max_tokens: int) -> dict[str, int]:
+    if model.startswith(_REASONING_MODEL_PREFIXES):
+        return {"max_completion_tokens": max_tokens}
+    return {"max_tokens": max_tokens}
+
 
 def _sanitize_error_message(error: Exception) -> str:
     """Sanitize error message to avoid exposing API keys."""
@@ -40,14 +50,13 @@ class OpenAIProvider(BaseAIProvider):
 
     @property
     def default_model(self) -> str:
-        # Mini is the cost-effective choice for high-volume header classification
-        return "gpt-4o-mini"
+        # Luna is the cost-effective choice for high-volume header classification
+        return "gpt-6-luna"
 
     def get_model_options(self) -> list[str]:
         return [
-            "gpt-4o-mini",
-            "gpt-4o",
-            "gpt-4.1-mini",
+            "gpt-6-luna",
+            "gpt-6.1-sol",
         ]
 
     def _get_client(self):
@@ -81,7 +90,7 @@ class OpenAIProvider(BaseAIProvider):
             client = self._get_client()
             response = client.chat.completions.create(
                 model=self.model,
-                max_tokens=max_tokens,
+                **_token_limit_kwargs(self.model, max_tokens),
                 messages=[{"role": "user", "content": prompt}],
             )
 

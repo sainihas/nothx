@@ -246,7 +246,7 @@ unsubscribe email.
 
 **Anthropic (Claude)** — Best for email classification. [Get API key](https://console.anthropic.com)
 
-**OpenAI (GPT)** — GPT-4o models. [Get API key](https://platform.openai.com/api-keys)
+**OpenAI (GPT)** — GPT-6 models. [Get API key](https://platform.openai.com/api-keys)
 
 **Google (Gemini)** — Free tier available. [Get API key](https://aistudio.google.com/apikey)
 

@@ -34,13 +34,13 @@ class GeminiProvider(BaseAIProvider):
 
     @property
     def default_model(self) -> str:
-        return "gemini-2.0-flash"
+        return "gemini-3.8-flash"
 
     def get_model_options(self) -> list[str]:
         return [
-            "gemini-2.0-flash",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-pro-preview",
         ]
 
     def _get_client(self):

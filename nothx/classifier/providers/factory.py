@@ -13,7 +13,7 @@ SUPPORTED_PROVIDERS = {
     },
     "openai": {
         "name": "OpenAI (GPT)",
-        "description": "GPT-4o and GPT-4 models.",
+        "description": "GPT-6 models.",
         "requires_key": True,
         "key_url": "https://platform.openai.com/api-keys",
         "key_env": "OPENAI_API_KEY",

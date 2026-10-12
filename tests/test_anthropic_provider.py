@@ -17,7 +17,13 @@ class TestAnthropicProvider:
     def test_retired_sonnet_model_is_replaced(self):
         provider = AnthropicProvider(api_key="test-key", model="claude-sonnet-4-20250514")
 
-        assert provider.model == "claude-sonnet-4-6"
+        assert provider.model == "claude-sonnet-5-5"
+
+    @pytest.mark.parametrize("model", ["claude-opus-4-20250514", "claude-opus-4-1-20250805"])
+    def test_retired_opus_model_is_replaced(self, model):
+        provider = AnthropicProvider(api_key="test-key", model=model)
+
+        assert provider.model == "claude-opus-5-5"
 
     def test_sonnet_5_model_is_preserved(self):
         provider = AnthropicProvider(api_key="test-key", model="claude-sonnet-5")

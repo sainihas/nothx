@@ -238,6 +238,8 @@ class Config:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     scan_days: int = 30
     scan_junk: bool = True
+    review_engaged_marketing: bool = True
+    microsoft_client_id: str | None = None
     footer_scan_enabled: bool = False
     # Granted by default (see the CONSENT_REVOKED note above). Revoking stores
     # CONSENT_REVOKED; anything else — including the version constant — permits.
@@ -277,6 +279,8 @@ class Config:
             "scoring": asdict(self.scoring),
             "scan_days": self.scan_days,
             "scan_junk": self.scan_junk,
+            "review_engaged_marketing": self.review_engaged_marketing,
+            "microsoft_client_id": self.microsoft_client_id,
             "footer_scan_enabled": self.footer_scan_enabled,
             "unsubscribe_consent_version": self.unsubscribe_consent_version,
             "mailbox_mutation_consent_version": self.mailbox_mutation_consent_version,
@@ -288,7 +292,7 @@ class Config:
         """Load configuration from disk."""
         config_path = get_config_path()
         if not config_path.exists():
-            return cls()
+            return cls(microsoft_client_id=os.environ.get("NOTHX_MICROSOFT_CLIENT_ID"))
 
         with open(config_path) as f:
             data = json.load(f)
@@ -350,6 +354,10 @@ class Config:
 
         config.scan_days = data.get("scan_days", 30)
         config.scan_junk = data.get("scan_junk", True)
+        config.review_engaged_marketing = data.get("review_engaged_marketing", True)
+        config.microsoft_client_id = os.environ.get("NOTHX_MICROSOFT_CLIENT_ID") or data.get(
+            "microsoft_client_id"
+        )
         config.footer_scan_enabled = data.get("footer_scan_enabled", False)
         config.unsubscribe_consent_version = data.get(
             "unsubscribe_consent_version", CURRENT_UNSUBSCRIBE_CONSENT_VERSION

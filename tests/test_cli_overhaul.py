@@ -23,6 +23,7 @@ from nothx.cli import (
     _unsubscribe_operation_plan,
     account_add,
     account_remove,
+    cleanup,
     config_cmd,
     consent,
     export,
@@ -678,7 +679,7 @@ def test_active_unsubscribe_policy_cannot_be_reclassified_to_keep(configured_cli
     record.assert_called_once()
 
 
-def test_persisted_junk_evidence_overrides_active_unsubscribe_policy(configured_cli):
+def test_persisted_junk_and_fresh_inbox_evidence_require_review(configured_cli):
     runner, config = configured_cli
     config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
     config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
@@ -714,9 +715,9 @@ def test_persisted_junk_evidence_overrides_active_unsubscribe_policy(configured_
         result = runner.invoke(run, ["--auto"])
 
     assert result.exit_code == 0
-    block.assert_called_once()
+    block.assert_not_called()
     unsubscribe.assert_not_called()
-    assert db.get_subscription(subscription["id"])["policy_action"] == "block"
+    assert db.get_subscription(subscription["id"])["policy_action"] == "review"
 
 
 def test_persistence_uses_promoted_scanner_identity(configured_cli):
@@ -1746,3 +1747,287 @@ def test_interactive_unsubscribe_retry_escalation_is_automatic_not_manual_block(
     assert stored["policy_source"] == "automatic"
     assert stored["classification_source"] == "retry_policy"
     assert stored["ai_recommended_action"] == "unsub"
+
+
+def test_cleanup_preview_is_full_inbox_ai_without_actions_or_saved_decisions(configured_cli):
+    runner, _config = configured_cli
+    scan_result, classifications = _subscription_scan(Action.UNSUB)
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result) as scan,
+        patch("nothx.cli.ClassificationEngine") as engine,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+        patch("nothx.cli._block_subscription") as block,
+        patch("nothx.cli._reconcile_due_operations") as reconcile,
+        patch("nothx.cli._persist_subscription_records") as persist,
+        patch("nothx.cli.db.log_run") as log,
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(cleanup, [])
+    assert result.exit_code == 0, result.output
+    assert scan.call_args.kwargs["full_history"] is True
+    assert scan.call_args.kwargs["inbox_only"] is True
+    assert scan.call_args.kwargs["persist"] is False
+    assert engine.return_value.classify_batch.call_args.kwargs == {
+        "persist": False,
+        "allow_ai": True,
+    }
+    for mutation in (unsub, block, reconcile, persist, log):
+        mutation.assert_not_called()
+    assert "Sale" in result.output
+    assert "cleanup --apply" in result.output
+
+
+def test_normal_run_rechecks_recent_headers_unless_new_only(configured_cli):
+    runner, _config = configured_cli
+    with patch("nothx.cli.scan_inbox", return_value=ScanResult({}, {})) as scan:
+        result = runner.invoke(run, ["--dry-run"])
+        assert result.exit_code == 0
+        assert scan.call_args.kwargs["rescan"] is True
+        result = runner.invoke(run, ["--dry-run", "--new-only"])
+        assert result.exit_code == 0
+        assert scan.call_args.kwargs["rescan"] is False
+        assert "No marketing emails" not in result.output
+
+
+def test_coverage_shows_backlog_and_no_new_does_not_mean_clean(configured_cli):
+    from nothx.scanner import MailboxCoverage
+
+    runner, _config = configured_cli
+    empty = ScanResult(
+        {},
+        {},
+        coverage=[MailboxCoverage("default", "INBOX", "inbox", "incremental", 100, 0, 0, True)],
+    )
+    with patch("nothx.cli.scan_inbox", return_value=empty):
+        result = runner.invoke(run, ["--dry-run", "--new-only"])
+    assert result.exit_code == 0
+    assert "100 Inbox messages were outside" in result.output
+    assert "No marketing emails" not in result.output
+    assert "incremental" in result.output
+
+
+def test_outlook_reuses_client_and_keeps_signin_when_imap_unavailable(configured_cli):
+    from nothx.msauth import ConsentStatus
+
+    runner, config = configured_cli
+    config.microsoft_client_id = "public-app-id"
+    config.save()
+    with (
+        patch("nothx.cli.questionary.select") as select,
+        patch("nothx.cli.questionary.text") as text_prompt,
+        patch("nothx.cli.msauth.get_consent_status", return_value=ConsentStatus(True)),
+        patch("nothx.cli.msauth.get_access_token", return_value="access-token"),
+        patch("nothx.cli.msauth.start_device_flow") as start,
+        patch("nothx.cli.msauth.delete_token") as delete,
+        patch("nothx.cli.test_account", return_value=(False, "IMAP unavailable")),
+    ):
+        select.return_value.ask.return_value = "outlook"
+        text_prompt.return_value.ask.return_value = "person@example.com"
+        result = runner.invoke(account_add, [])
+    assert result.exit_code == 0, result.output
+    start.assert_not_called()
+    delete.assert_not_called()
+    assert text_prompt.call_count == 1
+    account = next(
+        account for account in Config.load().accounts.values() if account.provider == "outlook"
+    )
+    assert account.uses_oauth
+    assert account.client_id == "public-app-id"
+    assert "Sign-in saved, but Inbox access failed" in result.output
+    assert "Let devices and apps use IMAP" in result.output
+
+
+@pytest.mark.parametrize(
+    "source,expected", [("automatic", "1 to unsubscribe"), ("manual", "1 to keep")]
+)
+def test_fresh_ai_reconsiders_automatic_keep_but_honors_manual_keep(
+    configured_cli, source, expected
+):
+    runner, _config = configured_cli
+    scan_result, classifications = _subscription_scan(Action.UNSUB)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    classifications[sender.classification_key].source = "ai"
+    subscription = db.upsert_subscription(
+        sender.account_key, sender.identity_kind, sender.identity_value
+    )
+    db.set_subscription_policy(subscription["id"], "keep", source=source)
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine") as engine,
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(run, ["--preview"])
+    assert result.exit_code == 0, result.output
+    assert expected in result.output
+    assert db.get_subscription(subscription["id"])["policy_action"] == "keep"
+
+
+@pytest.mark.parametrize("action", [Action.UNSUB, Action.BLOCK])
+def test_incomplete_scan_defers_actions_even_with_explicit_rules(configured_cli, action):
+    from nothx.scanner import MailboxCoverage
+
+    runner, _config = configured_cli
+    scan_result, classifications = _subscription_scan(action)
+    scan_result.coverage = [
+        MailboxCoverage("default", "INBOX", "inbox", "full history", 20, 20, 1, False)
+    ]
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine") as engine,
+        patch("nothx.cli._reconcile_due_operations"),
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+        patch("nothx.cli._block_subscription") as block,
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    unsub.assert_not_called()
+    block.assert_not_called()
+    assert "Incomplete scan" in result.output
+    assert "1 need review" in result.output
+
+
+def test_missing_unsubscribe_method_does_not_bypass_volume_safeguard(configured_cli):
+    runner, _config = configured_cli
+    scan_result, classifications = _subscription_scan(Action.BLOCK)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    sender.total_emails = 1
+    classification = classifications[sender.classification_key]
+    classification.source = "method_policy"
+    classification.original_source = "ai"
+    classification.recommended_action = Action.UNSUB
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine") as engine,
+        patch("nothx.cli._reconcile_due_operations"),
+        patch("nothx.cli._block_subscription") as block,
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    block.assert_not_called()
+    subscription = db.get_subscription(
+        account=sender.account_key,
+        identity_kind=sender.identity_kind,
+        identity_value=sender.identity_value,
+    )
+    assert subscription["policy_action"] == "review"
+    assert subscription["classification_source"] == "volume_policy"
+
+
+def test_incomplete_scan_cannot_verify_or_escalate_existing_operations(configured_cli):
+    from nothx.scanner import MailboxCoverage
+
+    runner, _config = configured_cli
+    scan_result = ScanResult(
+        {},
+        {},
+        coverage=[MailboxCoverage("default", "INBOX", "inbox", "full history", 100, 100, 0, False)],
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli._reconcile_due_operations") as reconcile,
+    ):
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert reconcile.call_args.kwargs["accounts"] == set()
+
+
+def test_fresh_inbox_evidence_conflicts_with_stored_junk_in_preview(configured_cli):
+    from nothx.cli import _persisted_threat_action
+
+    runner, _config = configured_cli
+    del runner
+    scan_result, _ = _subscription_scan(Action.UNSUB)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    subscription = db.upsert_subscription(
+        sender.account_key, sender.identity_kind, sender.identity_value
+    )
+    db.upsert_message_ref(subscription["id"], sender.account_key, "Spam", "junk", 1, 1)
+    assert _persisted_threat_action(subscription["id"]) is Action.BLOCK
+    assert _persisted_threat_action(subscription["id"], sender=sender) is Action.REVIEW
+    sender.provider_threat = True
+    assert _persisted_threat_action(subscription["id"], sender=sender) is Action.BLOCK
+
+
+def test_old_automatic_block_cannot_override_a_service_notice_guard(configured_cli):
+    runner, _config = configured_cli
+    scan_result, classifications = _subscription_scan(Action.REVIEW)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    classifications[sender.classification_key].source = "transactional_policy"
+    subscription = db.upsert_subscription(
+        sender.account_key, sender.identity_kind, sender.identity_value
+    )
+    db.set_subscription_policy(subscription["id"], "block", source="automatic")
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine") as engine,
+        patch("nothx.cli._block_subscription") as block,
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(run, ["--preview"])
+    assert result.exit_code == 0, result.output
+    assert "1 need review" in result.output
+    block.assert_not_called()
+
+
+def test_reconnecting_revoked_microsoft_account_preserves_name_and_preferences(configured_cli):
+    from nothx.errors import ErrorCode, OAuthError
+    from nothx.msauth import ConsentStatus
+
+    runner, config = configured_cli
+    config.accounts["personal"] = AccountConfig(
+        "outlook",
+        "person@example.com",
+        auth="oauth",
+        client_id="public-app",
+        junk_mailbox="Junk",
+        extra_scan_mailboxes=["Receipts"],
+    )
+    config.microsoft_client_id = "public-app"
+    config.save()
+    revoked = OAuthError(
+        code=ErrorCode.OAUTH_TOKEN_REFRESH_FAILED,
+        message="Authorization expired",
+        details={"error": "invalid_grant"},
+    )
+    with (
+        patch("nothx.cli.questionary.select") as select,
+        patch("nothx.cli.questionary.text") as text_prompt,
+        patch("nothx.cli.msauth.get_consent_status", return_value=ConsentStatus(True)),
+        patch("nothx.cli.msauth.get_access_token", side_effect=revoked),
+        patch(
+            "nothx.cli.msauth.start_device_flow",
+            return_value={
+                "verification_uri": "https://microsoft.com/devicelogin",
+                "user_code": "ABCD-EFGH",
+                "device_code": "device",
+                "expires_in": 900,
+            },
+        ) as start,
+        patch("nothx.cli.msauth.poll_for_token", return_value={"access_token": "new"}),
+        patch("nothx.cli.msauth.save_token") as save,
+        patch("nothx.cli.webbrowser.open", return_value=True),
+        patch("nothx.cli.test_account", return_value=(True, "Connected")),
+    ):
+        select.return_value.ask.return_value = "outlook"
+        text_prompt.return_value.ask.return_value = "PERSON@example.com"
+        result = runner.invoke(account_add, [])
+    assert result.exit_code == 0, result.output
+    start.assert_called_once_with("public-app")
+    save.assert_called_once()
+    loaded = Config.load()
+    assert set(loaded.accounts) == {"default", "personal"}
+    assert loaded.accounts["personal"].junk_mailbox == "Junk"
+    assert loaded.accounts["personal"].extra_scan_mailboxes == ["Receipts"]
+    assert "Updated account" in result.output
+
+
+def test_engaged_marketing_preference_is_saved(configured_cli):
+    runner, _config = configured_cli
+    assert Config.load().review_engaged_marketing is True
+    result = runner.invoke(config_cmd, ["--engaged-marketing", "allow"])
+    assert result.exit_code == 0, result.output
+    assert Config.load().review_engaged_marketing is False
+    runner.invoke(config_cmd, ["--engaged-marketing", "review"])
+    assert Config.load().review_engaged_marketing is True

@@ -212,3 +212,39 @@ def test_footer_form_signal_is_preserved_even_when_candidates_exist() -> None:
         assert imap.fetch_footer_candidates(header) == (candidate,)
 
     assert header.footer_requires_user is True
+
+
+def test_fetch_reports_mailbox_size_scope_and_selected_count() -> None:
+    imap = connection(HeaderClient())
+    list(imap.fetch_marketing_emails(since_uid=10, expected_uidvalidity=7))
+    assert imap.last_fetch_mailbox_total == 2
+    assert imap.last_fetch_selected == 2
+    assert imap.last_fetch_scope == "incremental"
+    list(imap.fetch_marketing_emails(since_uid=500, expected_uidvalidity=6))
+    assert imap.last_fetch_scope == "lookback"
+    list(imap.fetch_marketing_emails(full_history=True))
+    assert imap.last_fetch_scope == "full history"
+    assert imap.last_fetch_selected == 3
+
+
+def test_interrupted_scan_keeps_read_headers_without_checkpointing_or_reusing_socket() -> None:
+    class InterruptedClient(HeaderClient):
+        def uid(self, command: str, *args: Any) -> tuple[str, list[Any]]:
+            if command == "SEARCH":
+                return "OK", [b" ".join(str(uid).encode() for uid in range(1, 102))]
+            if str(args[0]) == "101":
+                raise TimeoutError("interrupted")
+            return super().uid(command, *args)
+
+    client = InterruptedClient()
+    imap = connection(client)
+    progress: list[tuple[int, int]] = []
+    headers = list(
+        imap.fetch_marketing_emails(
+            full_history=True, on_progress=lambda count, total: progress.append((count, total))
+        )
+    )
+    assert len(headers) == 100
+    assert imap.last_fetch_complete is False
+    assert imap.last_fetch_selected == 101
+    assert progress == [(0, 101), (100, 101)]

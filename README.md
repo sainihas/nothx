@@ -244,7 +244,7 @@ only complete Microsoft sign-in. App IDs are public identifiers; no client secre
 is used.
 
 1. In [Azure App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade), create a public-client app that supports **Personal Microsoft accounts only**.
-2. Under **Authentication**, enable **Allow public client flows**. No client secret or redirect URI is needed.
+2. Under **Authentication**, enable **Allow public client flows**. No client secret or redirect URI is needed. If you already created an organizational single-tenant app, [change its supported account types](https://learn.microsoft.com/en-us/entra/identity-platform/howto-modify-supported-accounts) to include personal Microsoft accounts; single-tenant organizational registrations cannot sign in Live/Hotmail accounts.
 3. Set `NOTHX_MICROSOFT_CLIENT_ID` to the **Application (client) ID**, or provide it once when `nothx init` or `nothx account add` asks. nothx saves it for later accounts.
 4. Open the displayed Microsoft device-login URL, enter its short code, and approve IMAP and SMTP access using the same personal email address entered in nothx.
 5. In [Outlook web](https://outlook.live.com/mail/), open **Settings → Mail → Forwarding and IMAP**, enable **Let devices and apps use IMAP**, and save. Microsoft disables IMAP by default. If sign-in succeeds but Inbox access fails, nothx preserves the sign-in; run `nothx test` after enabling IMAP.

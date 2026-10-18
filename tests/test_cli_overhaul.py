@@ -2202,3 +2202,115 @@ def test_all_failed_authentication_is_not_counted_as_clean_inbox(configured_cli)
     assert result.exit_code == 0, result.output
     block.assert_called_once()
     unsubscribe.assert_not_called()
+
+
+@pytest.mark.parametrize("has_inbox", [False, True])
+def test_consent_resume_preserves_automatic_provenance_and_requires_fresh_scope(
+    configured_cli, has_inbox
+):
+    from nothx.cli import _record_block_needs_consent
+
+    runner, config = configured_cli
+    scan, classes = _subscription_scan(Action.BLOCK)
+    key, sender = next(iter(scan.subscription_stats.items()))
+    classes[key].source = "ai"
+    _record_block_needs_consent(sender, scan.subscription_emails[key], classes[key])
+    subscription = db.get_subscription(
+        account=sender.account_key,
+        identity_kind=sender.identity_kind,
+        identity_value=sender.identity_value,
+    )
+    if not has_inbox:
+        with db.get_db() as connection:
+            connection.execute("DELETE FROM message_refs")
+    else:
+        db.upsert_message_ref(
+            subscription["id"],
+            sender.account_key,
+            "INBOX",
+            "inbox",
+            44,
+            100,
+            message_id="<old-security@example.com>",
+            flags=[r"\Seen"],
+        )
+    config.mailbox_mutation_consent_version = CONSENT_REVOKED
+    config.save()
+    with patch("nothx.cli.IMAPConnection") as imap:
+        result = runner.invoke(consent, ["--mailbox-actions", "--yes"])
+    assert result.exit_code == 0, result.output
+    imap.assert_not_called()
+    stored = db.get_subscription(subscription["id"])
+    assert stored["policy_source"] == "automatic"
+    assert stored["policy_action"] == ("review" if has_inbox else "block")
+    assert db.count_consent_parked_blocks() == 0
+    if has_inbox:
+        assert "Fresh classification required" in " ".join(result.output.split())
+        assert "Deferred automatic block" in result.output
+
+
+def test_manual_mixed_evidence_block_uses_displayed_scope_snapshot(configured_cli):
+    runner, config = configured_cli
+    scan, classes = _subscription_scan(Action.REVIEW)
+    key, sender = next(iter(scan.subscription_stats.items()))
+    classes[key].source = "provider_policy"
+    header = scan.subscription_emails[key][0]
+    header.keywords = ("$Phishing",)
+    subscription, _ = _persist_subscription_records(
+        sender, [header], classes[key], policy_action="review"
+    )
+    db.upsert_message_ref(
+        subscription["id"],
+        sender.account_key,
+        "INBOX",
+        "inbox",
+        44,
+        100,
+        message_id="<old-clean@example.com>",
+        flags=[r"\Seen"],
+    )
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.conn = MagicMock()
+    junk = MailboxInfo("Junk", "Junk", attributes=(r"\Junk",))
+    connection.discover_mailboxes.return_value = MailboxDiscovery(
+        mailboxes=(junk,),
+        inbox=None,
+        junk=junk,
+        junk_candidates=(junk,),
+    )
+    connection.move_message_to_junk.side_effect = lambda locator, target: MailboxActionResult(
+        MailboxActionOutcome.MOVED,
+        locator,
+        target.wire_name,
+        source_removed=True,
+    )
+
+    def approve():
+        db.upsert_message_ref(
+            subscription["id"],
+            sender.account_key,
+            "INBOX",
+            "inbox",
+            44,
+            102,
+            message_id="<arrived-after-preview@example.com>",
+        )
+        return "block"
+
+    with (
+        patch("nothx.cli.questionary.select") as select,
+        patch("nothx.cli.IMAPConnection", return_value=connection),
+    ):
+        select.return_value.ask.side_effect = approve
+        result = runner.invoke(review, [])
+    assert result.exit_code == 0, result.output
+    assert "Stored Inbox refs" in result.output
+    assert "recorded history" in result.output
+    stored = db.get_subscription(subscription["id"])
+    assert (stored["policy_action"], stored["policy_source"]) == ("block", "manual")
+    assert {call.args[0].uid for call in connection.move_message_to_junk.call_args_list} == {
+        100,
+        101,
+    }
+    assert "Blocked: 2 moved, 0 partial/failed" in result.output

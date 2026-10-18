@@ -1168,19 +1168,38 @@ def _record_persisted_block_needs_consent(subscription: dict[str, Any]) -> None:
 
 
 def _drain_consent_parked_blocks(config: Config) -> tuple[int, int, int]:
-    """Apply BLOCK decisions that were queued while mailbox consent was missing.
-
-    These rows carry a decision the user already made, so they are work to
-    finish rather than questions to ask. Most no longer have Inbox locators at
-    all -- the mail moved or aged out -- and settle without any IMAP traffic.
-
-    Returns (subscriptions drained, messages moved, message actions failed).
-    """
+    """Resume manual blocks; reclassify automatic decisions with unproven scope."""
     if not config.permits_mailbox_mutation:
         return 0, 0, 0
     parked = db.list_consent_parked_blocks()
     if not parked:
         return 0, 0, 0
+
+    scopes = {
+        row["id"]: {
+            int(message["id"])
+            for message in db.list_message_refs(
+                subscription_id=row["id"], mailbox_role="inbox", limit=100_000
+            )
+        }
+        for row in parked
+    }
+    table = Table(title="Queued block scope")
+    table.add_column("Account / identity")
+    table.add_column("Inbox refs")
+    table.add_column("Action")
+    for row in parked:
+        table.add_row(
+            f"{row['account']} · {row['identity_kind']}:{row['identity_value']}",
+            str(len(scopes[row["id"]])),
+            "Move recorded history"
+            if row.get("policy_source") == "manual"
+            else "Fresh classification required"
+            if scopes[row["id"]]
+            else "No Inbox action",
+        )
+    console.print(table)
+    console.print("[muted]Recorded locators may no longer be present in the mailbox.[/muted]")
 
     drained = 0
     moved_total = 0
@@ -1195,7 +1214,35 @@ def _drain_consent_parked_blocks(config: Config) -> tuple[int, int, int]:
     ) as progress:
         task = progress.add_task("Applying queued blocks...", total=len(parked))
         for subscription in parked:
-            moved, failed = _apply_manual_subscription_block(config, subscription)
+            message_ids = scopes[subscription["id"]]
+            if subscription.get("policy_source") != "manual":
+                if message_ids:
+                    db.set_subscription_policy(subscription["id"], "review", source="automatic")
+                    for operation in db.list_unsubscribe_operations(
+                        subscription_id=subscription["id"], outcome="needs_user"
+                    ):
+                        if operation.get("error_code") == "mailbox_consent_required":
+                            db.update_unsubscribe_operation_outcome(
+                                operation["id"],
+                                "needs_user",
+                                error_code="block_rescan_required",
+                                detail_redacted="Automatic block requires fresh classification before mailbox actions",
+                            )
+                    console.print(
+                        "[warning]Deferred automatic block to review. Run `nothx run` "
+                        "to classify the current message scope before applying it.[/warning]"
+                    )
+                    progress.advance(task)
+                    continue
+                operation = db.get_or_create_unsubscribe_operation(
+                    subscription["id"], "parked-empty-block-v1", kind="block"
+                )
+                db.update_unsubscribe_operation_outcome(operation["id"], "blocked")
+                moved, failed = 0, 0
+            else:
+                moved, failed = _apply_manual_subscription_block(
+                    config, subscription, message_ids=message_ids
+                )
             moved_total += moved
             failed_total += failed
             if not failed:
@@ -1224,9 +1271,12 @@ def _report_consent_parked_blocks(config: Config) -> None:
 def _apply_manual_subscription_block(
     config: Config,
     subscription: dict[str, Any],
+    *,
+    message_ids: set[int] | None = None,
 ) -> tuple[int, int]:
     """Apply an explicitly approved account/list BLOCK to persisted Inbox refs."""
     db.set_subscription_policy(subscription["id"], "block")
+    subscription = db.get_subscription(subscription["id"]) or subscription
     if not config.permits_mailbox_mutation:
         _record_persisted_block_needs_consent(subscription)
         return 0, 0
@@ -1235,11 +1285,14 @@ def _apply_manual_subscription_block(
         mailbox_role="inbox",
         limit=100_000,
     )
-    newest_message_id = max((int(row["id"]) for row in inbox_messages), default=0)
+    if message_ids is None:
+        message_ids = {int(row["id"]) for row in inbox_messages}
+    newest_message_id = max(message_ids, default=0)
+    scope_key = hashlib.sha256(",".join(map(str, sorted(message_ids))).encode()).hexdigest()
     claim_owner = uuid.uuid4().hex
     operation, acquired = db.claim_unsubscribe_operation(
         subscription["id"],
-        f"manual-block-v2-{newest_message_id}",
+        f"manual-block-v3-{scope_key}",
         claim_owner,
         kind="block",
         trigger_message_ref_id=newest_message_id or None,
@@ -1251,6 +1304,7 @@ def _apply_manual_subscription_block(
         subscription,
         operation["id"],
         claim_owner=claim_owner,
+        message_ids=message_ids,
     )
 
 
@@ -3516,19 +3570,34 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 f"[muted]Showing the newest {_MANUAL_QUEUE_LIMIT} of each queue; "
                 "run this again to reach the rest.[/muted]"
             )
+        scopes = {
+            row["id"]: {
+                int(message["id"])
+                for message in db.list_message_refs(
+                    subscription_id=row["id"], mailbox_role="inbox", limit=100_000
+                )
+            }
+            for row in manual_subscriptions
+        }
         table = Table(show_header=True)
         table.add_column("ID")
         table.add_column("Account")
-        table.add_column("List identity")
+        table.add_column("List identity", overflow="fold")
         table.add_column("Outcome")
+        table.add_column("Inbox refs")
         for subscription in manual_subscriptions:
             table.add_row(
                 str(subscription["id"]),
                 subscription["account"],
                 f"{subscription['identity_kind']}:{subscription['identity_value']}",
                 subscription.get("last_outcome") or "review",
+                str(len(scopes[subscription["id"]])),
             )
         console.print(table)
+        console.print(
+            "[muted]Stored Inbox refs: BLOCK moves the displayed count across recorded history, "
+            "then blocks future matching mail. These locators may no longer be present.[/muted]"
+        )
 
         for subscription in manual_subscriptions:
             identity = f"{subscription['identity_kind']}:{subscription['identity_value']}"
@@ -3544,7 +3613,10 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
             choices.extend(
                 [
                     questionary.Choice("Keep future mail", value="keep"),
-                    questionary.Choice("Block future mail / move to Junk", value="block"),
+                    questionary.Choice(
+                        f"Block future mail and move {len(scopes[subscription['id']])} stored Inbox refs",
+                        value="block",
+                    ),
                     questionary.Choice("Skip", value="skip"),
                 ]
             )
@@ -3564,7 +3636,9 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                     yes=False,
                 )
             elif choice == "block":
-                moved, failed = _apply_manual_subscription_block(config, subscription)
+                moved, failed = _apply_manual_subscription_block(
+                    config, subscription, message_ids=scopes[subscription["id"]]
+                )
                 _learn_subscription_policy(subscription, choice)
                 if domain := subscription.get("sender_domain"):
                     handled_manual_domains.add(domain.casefold())

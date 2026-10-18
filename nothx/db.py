@@ -73,6 +73,7 @@ def init_db() -> None:
             and has_user_tables
             and (
                 not _column_exists(conn, "mailbox_actions", "retryable")
+                or not _column_exists(conn, "subscriptions", "policy_source")
                 or any(
                     not _column_exists(conn, "unsubscribe_operations", column)
                     for column in ("claim_owner", "claimed_at", "claim_expires_at")
@@ -279,6 +280,7 @@ def _migrate(conn: sqlite3.Connection, version: int | None = None) -> None:
     _add_column_if_missing(conn, "rules", "source", "TEXT NOT NULL DEFAULT 'user'")
     _add_column_if_missing(conn, "rules", "match_type", "TEXT NOT NULL DEFAULT 'pattern'")
     _create_authoritative_tables(conn)
+    _add_column_if_missing(conn, "subscriptions", "policy_source", "TEXT")
     # Repair pre-release v2 databases created before durable execution claims
     # were added. These columns contain no endpoint or credential material.
     _add_column_if_missing(conn, "unsubscribe_operations", "claim_owner", "TEXT")
@@ -339,6 +341,7 @@ def _create_authoritative_tables(conn: sqlite3.Connection) -> None:
             policy_action TEXT
                 CHECK (policy_action IS NULL OR policy_action IN
                     ('keep', 'unsub', 'block', 'review')),
+            policy_source TEXT CHECK (policy_source IS NULL OR policy_source IN ('manual', 'automatic')),
             ai_email_type TEXT,
             ai_recommended_action TEXT
                 CHECK (ai_recommended_action IS NULL OR ai_recommended_action IN
@@ -678,6 +681,7 @@ def upsert_subscription(
     from_address: str | None = None,
     sender_domain: str | None = None,
     policy_action: str | None = None,
+    policy_source: str | None = None,
     ai_email_type: str | None = None,
     ai_recommended_action: str | None = None,
     classification_source: str | None = None,
@@ -702,6 +706,9 @@ def upsert_subscription(
         from_address = identity_value
     if policy_action not in (None, "keep", "unsub", "block", "review"):
         raise ValueError("Invalid subscription policy action")
+    if policy_source not in (None, "manual", "automatic"):
+        raise ValueError("Invalid subscription policy source")
+    policy_source = (policy_source or "automatic") if policy_action is not None else None
     if ai_recommended_action not in (None, "keep", "unsub", "block", "review"):
         raise ValueError("Invalid AI recommended action")
     if unwanted_confidence is not None and not 0.0 <= unwanted_confidence <= 1.0:
@@ -720,15 +727,24 @@ def upsert_subscription(
             """
             INSERT INTO subscriptions (
                 account, identity_kind, identity_value, list_id, from_address,
-                sender_domain, policy_action, ai_email_type, ai_recommended_action,
+                sender_domain, policy_action, policy_source, ai_email_type, ai_recommended_action,
                 classification_source, unwanted_confidence, last_delivery_at,
                 first_seen, last_seen, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account, identity_kind, identity_value) DO UPDATE SET
                 list_id = COALESCE(excluded.list_id, subscriptions.list_id),
                 from_address = COALESCE(excluded.from_address, subscriptions.from_address),
                 sender_domain = COALESCE(excluded.sender_domain, subscriptions.sender_domain),
-                policy_action = COALESCE(excluded.policy_action, subscriptions.policy_action),
+                policy_action = CASE
+                    WHEN subscriptions.policy_source = 'manual'
+                         AND COALESCE(excluded.policy_source, '') != 'manual'
+                    THEN subscriptions.policy_action
+                    ELSE COALESCE(excluded.policy_action, subscriptions.policy_action) END,
+                policy_source = CASE
+                    WHEN subscriptions.policy_source = 'manual'
+                         AND COALESCE(excluded.policy_source, '') != 'manual'
+                    THEN subscriptions.policy_source
+                    ELSE COALESCE(excluded.policy_source, subscriptions.policy_source) END,
                 ai_email_type = COALESCE(excluded.ai_email_type, subscriptions.ai_email_type),
                 ai_recommended_action = COALESCE(
                     excluded.ai_recommended_action, subscriptions.ai_recommended_action
@@ -757,6 +773,7 @@ def upsert_subscription(
                 from_address,
                 sender_domain,
                 policy_action,
+                policy_source,
                 ai_email_type,
                 ai_recommended_action,
                 classification_source,
@@ -969,14 +986,18 @@ def promote_subscription_identity(
         return dict(row)
 
 
-def set_subscription_policy(subscription_id: int, action: str | None) -> bool:
+def set_subscription_policy(
+    subscription_id: int, action: str | None, *, source: str = "manual"
+) -> bool:
     """Set or clear the durable future policy for a subscription."""
     if action not in (None, "keep", "unsub", "block", "review"):
         raise ValueError("Invalid subscription policy action")
+    if source not in ("manual", "automatic"):
+        raise ValueError("Invalid subscription policy source")
     with get_db() as conn:
         cursor = conn.execute(
-            "UPDATE subscriptions SET policy_action = ?, updated_at = ? WHERE id = ?",
-            (action, _iso_timestamp(), subscription_id),
+            "UPDATE subscriptions SET policy_action = ?, policy_source = ?, updated_at = ? WHERE id = ?",
+            (action, source if action is not None else None, _iso_timestamp(), subscription_id),
         )
         return cursor.rowcount > 0
 

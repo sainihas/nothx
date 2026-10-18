@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import imaplib
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -415,6 +416,13 @@ def test_nonretryable_partial_mailbox_action_is_not_copied_again(configured_cli)
 
     with (
         patch("nothx.cli.IMAPConnection", return_value=connection),
+        patch("nothx.cli.validate_uid_locator", side_effect=imaplib.IMAP4.abort("disconnected")),
+    ):
+        assert _block_subscription(config, sender, headers, classification) == (0, 1)
+    assert db.list_mailbox_actions()[0]["outcome"] == "partial"
+
+    with (
+        patch("nothx.cli.IMAPConnection", return_value=connection),
         patch(
             "nothx.cli.validate_uid_locator",
             return_value=UIDValidation(False, 44, False, exact_search_completed=True),
@@ -597,6 +605,7 @@ def test_provider_junk_overrides_explicit_unsubscribe_rule(configured_cli):
     scan_result, classifications = _subscription_scan(Action.UNSUB)
     sender = next(iter(scan_result.subscription_stats.values()))
     sender.junk_keyword_emails = 1
+    sender.clean_inbox_emails = 0
     engine = MagicMock()
     engine.classify_batch.return_value = classifications
     with (
@@ -639,6 +648,9 @@ def test_active_unsubscribe_policy_cannot_be_reclassified_to_keep(configured_cli
     config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
     config.save()
     scan_result, classifications = _subscription_scan(Action.KEEP)
+    # This is an inferred preference, not a new explicit user KEEP rule.
+    for classification in classifications.values():
+        classification.source = "heuristics"
     sender = next(iter(scan_result.subscription_stats.values()))
     db.upsert_subscription(
         sender.account_key,
@@ -1563,3 +1575,57 @@ def test_status_uses_current_subscription_outcomes_instead_of_legacy_success(con
         "verified_quiet": 0,
         "pending_review": 1,
     }
+
+
+@pytest.mark.parametrize("policy", ["keep", "block"])
+def test_explicit_policy_survives_moved_junk_and_new_inbox_delivery(configured_cli, policy):
+    runner, config = configured_cli
+    first_scan, initial = _subscription_scan(Action.REVIEW)
+    key, stats = next(iter(first_scan.subscription_stats.items()))
+    original = first_scan.get_emails_for_subscription(key)[0]
+    subscription, _ = _persist_subscription_records(stats, [original], initial[key])
+    db.set_subscription_policy(subscription["id"], policy)
+    junk_header = EmailHeader(
+        original.sender,
+        "Offer",
+        original.date,
+        "<moved>",
+        list_id=original.list_id,
+        account_key=original.account_key,
+        mailbox_name="Junk",
+        mailbox_role="junk",
+        uidvalidity=45,
+        uid=2,
+    )
+    _persist_subscription_records(stats, [junk_header], initial[key])
+    later = EmailHeader(
+        original.sender,
+        "Offer",
+        original.date,
+        "<later>",
+        list_id=original.list_id,
+        account_key=original.account_key,
+        account_name="default",
+        uidvalidity=44,
+        uid=102,
+    )
+    new_stats = _stats_for_emails(later.domain, [later])
+    scan = ScanResult(
+        {later.domain: new_stats},
+        {later.domain: [later]},
+        {key: new_stats},
+        {key: [later]},
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=initial),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert block.call_count == (1 if policy == "block" else 0)
+    unsub.assert_not_called()
+    stored = db.get_subscription(subscription["id"])
+    assert stored["policy_action"] == policy
+    assert stored["policy_source"] == "manual"

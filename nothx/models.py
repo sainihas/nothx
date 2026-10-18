@@ -435,6 +435,7 @@ class SenderStats:
     identity_kind: str | None = None
     identity_value: str | None = None
     inbox_emails: int = 0
+    clean_inbox_emails: int = 0
     junk_emails: int = 0
     junk_keyword_emails: int = 0
     not_junk_emails: int = 0
@@ -445,6 +446,13 @@ class SenderStats:
     authentication_unknown_emails: int = 0
     provider_bulk_emails: int = 0
     provider_threat: bool = False
+
+    @property
+    def has_junk_conflict(self) -> bool:
+        return bool(
+            (self.clean_inbox_emails or self.not_junk_emails)
+            and (self.junk_emails or self.junk_keyword_emails)
+        )
 
     @property
     def open_rate(self) -> float:

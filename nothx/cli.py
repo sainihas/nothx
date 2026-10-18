@@ -2,6 +2,7 @@
 
 import csv
 import hashlib
+import imaplib
 import json
 import logging
 import re
@@ -471,7 +472,9 @@ def _learn_subscription_policy(subscription: dict[str, Any], action_value: str) 
     get_learner().update_from_action(record)
 
 
-def _persisted_threat_action(subscription_id: int) -> Action | None:
+def _persisted_threat_action(
+    subscription_id: int, *, folder_evidence: bool = True
+) -> Action | None:
     """Distinguish hard threats from conflicting Inbox/Junk folder evidence."""
     junk = False
     inbox = False
@@ -495,7 +498,7 @@ def _persisted_threat_action(subscription_id: int) -> Action | None:
         junk |= is_junk
         inbox |= message.get("mailbox_role") == "inbox" and not is_junk
         not_junk |= bool(normalized & {"$notjunk", r"\notjunk", "notjunk", "$nonjunk"})
-    if junk:
+    if folder_evidence and junk:
         return Action.REVIEW if inbox or not_junk else Action.BLOCK
     return None
 
@@ -554,6 +557,7 @@ def _persist_subscription_records(
         else headers[0].sender_address or None,
         sender_domain=sender.domain,
         policy_action=policy_action,
+        policy_source="manual" if classification.source == "user_rule" else "automatic",
         ai_email_type=classification.email_type.value if has_ai_recommendation else None,
         ai_recommended_action=(classification.recommended_action or classification.action).value
         if has_ai_recommendation
@@ -862,7 +866,7 @@ def _reconcile_due_operations(
             # endpoint while excluding every previously accepted fingerprint.
             continue
 
-        db.set_subscription_policy(operation["subscription_id"], "block")
+        db.set_subscription_policy(operation["subscription_id"], "block", source="automatic")
         if not allow_mailbox_actions or not config.permits_mailbox_mutation:
             block_operation = db.get_or_create_unsubscribe_operation(
                 operation["subscription_id"],
@@ -1081,7 +1085,7 @@ def _move_persisted_subscription_to_junk(
                     moved += 1
                 else:
                     failed += 1
-    except (IMAPError, OSError) as error:
+    except (IMAPError, OSError, imaplib.IMAP4.error) as error:
         failed = len(inbox_messages)
         db.update_unsubscribe_operation_outcome(
             operation_id,
@@ -2324,9 +2328,39 @@ def _run_scan(
             persisted_threat = (
                 _persisted_threat_action(subscription["id"]) if subscription is not None else None
             )
+            current = classifications.get(sender.classification_key)
+            explicit_action = None
+            if (
+                subscription is not None
+                and subscription.get("policy_source") == "manual"
+                and subscription.get("policy_action") in {"keep", "block"}
+            ):
+                explicit_action = Action(subscription["policy_action"])
+            elif (
+                current is not None
+                and current.source == "user_rule"
+                and current.action in {Action.KEEP, Action.BLOCK}
+            ):
+                explicit_action = current.action
+            if (
+                explicit_action is not None
+                and (
+                    subscription is None
+                    or _persisted_threat_action(subscription["id"], folder_evidence=False) is None
+                )
+                and not (sender.provider_threat or sender.phishing_emails)
+            ):
+                classifications[sender.classification_key] = Classification(
+                    email_type=EmailType.UNKNOWN,
+                    action=explicit_action,
+                    confidence=1.0,
+                    reasoning="Explicit local policy resolves soft folder evidence",
+                    source="user_rule",
+                )
+                continue
             if subscription is not None and persisted_threat is not None:
                 if not dry_run and persisted_threat is Action.BLOCK:
-                    db.set_subscription_policy(subscription["id"], "block")
+                    db.set_subscription_policy(subscription["id"], "block", source="automatic")
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.UNKNOWN,
                     action=persisted_threat,
@@ -2354,7 +2388,7 @@ def _run_scan(
                     action=action,
                     confidence=1.0,
                     reasoning=f"Stored subscription policy: {policy}",
-                    source="user_rule",
+                    source="stored_policy",
                 )
 
             # Threat evidence is an unconditional local disposition. It must
@@ -2363,7 +2397,7 @@ def _run_scan(
                 sender.provider_threat
                 or sender.phishing_emails
                 or (
-                    not (sender.not_junk_emails or sender.inbox_emails > sender.junk_keyword_emails)
+                    not sender.has_junk_conflict
                     and (sender.junk_emails or sender.junk_keyword_emails)
                 )
             ):
@@ -2374,9 +2408,7 @@ def _run_scan(
                     reasoning="Provider junk/phishing evidence requires local suppression",
                     source="provider_policy",
                 )
-            elif (sender.junk_emails or sender.junk_keyword_emails) and (
-                sender.not_junk_emails or sender.inbox_emails > sender.junk_keyword_emails
-            ):
+            elif sender.has_junk_conflict:
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.UNKNOWN,
                     action=Action.REVIEW,
@@ -2424,6 +2456,7 @@ def _run_scan(
         "auth_policy",
         "method_policy",
         "retry_policy",
+        "stored_policy",
     }
 
     for key, sender in sender_stats.items():
@@ -2440,7 +2473,7 @@ def _run_scan(
         # highest priority and are never deferred by the email-count guard.
         if (
             classification.action in (Action.UNSUB, Action.BLOCK)
-            and classification.source != "user_rule"
+            and classification.source not in {"user_rule", "stored_policy"}
             and not (
                 classification.action is Action.BLOCK
                 and (
@@ -2649,7 +2682,9 @@ def _run_scan(
                             subscription, messages = _persist_subscription_records(
                                 sender, headers, classification
                             )
-                            db.set_subscription_policy(subscription["id"], "unsub")
+                            db.set_subscription_policy(
+                                subscription["id"], "unsub", source="automatic"
+                            )
                             execute, exclusions, retry_generation, escalate = (
                                 _unsubscribe_operation_plan(subscription)
                             )

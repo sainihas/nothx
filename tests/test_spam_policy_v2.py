@@ -484,6 +484,7 @@ def test_policy_transformation_preserves_original_ai_recommendation(policy_engin
         ["50% of budget reached", "90% of budget reached"],
         ["[Action Required] Mark OAuth clients for Workspace MCP"],
         ["Re: [owner/repo] Upgrade models (PR #417)", "[owner/repo] PR run failed: CI"],
+        ["Re: [owner/repo] Quick question (PR #417)"],
     ],
 )
 def test_operational_notifications_are_never_automatically_suppressed(
@@ -518,6 +519,7 @@ def test_mixed_inbox_and_junk_requires_review_without_explicit_threat(policy_eng
         domain="service.example",
         total_emails=5,
         inbox_emails=1,
+        clean_inbox_emails=1,
         junk_emails=4,
         authenticated_emails=5,
     )
@@ -529,3 +531,23 @@ def test_mixed_inbox_and_junk_requires_review_without_explicit_threat(policy_eng
     assert result.action is Action.REVIEW
     sender.provider_threat = "PHSH"
     assert policy_engine.classify(sender).action is Action.BLOCK
+
+
+@pytest.mark.parametrize("junk_count", [1, 3])
+def test_real_header_aggregation_preserves_clean_inbox_conflict(policy_engine, junk_count):
+    headers = [EmailHeader("news@sender.example", "Offer", datetime.now(UTC), "<inbox>")]
+    headers.extend(
+        EmailHeader(
+            "news@sender.example",
+            "Offer",
+            datetime.now(UTC),
+            f"<junk-{i}>",
+            mailbox_role="junk",
+        )
+        for i in range(junk_count)
+    )
+    stats = _stats_for_emails("sender.example", headers)
+    assert stats.clean_inbox_emails == 1
+    assert stats.junk_keyword_emails == junk_count
+    assert stats.has_junk_conflict
+    assert policy_engine.classify(stats).action is Action.REVIEW

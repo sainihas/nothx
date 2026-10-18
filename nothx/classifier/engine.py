@@ -73,6 +73,10 @@ class ClassificationEngine:
         if result:
             return result
 
+        result = self._operational_precheck(sender)
+        if result:
+            return result
+
         result = self._cold_outreach_precheck(sender)
         if result:
             return result
@@ -169,9 +173,7 @@ class ClassificationEngine:
                 reasoning="Mailbox provider classified this subscription as junk/phishing",
                 source="provider_policy",
             )
-        if (sender.not_junk_emails or sender.inbox_emails > sender.junk_keyword_emails) and (
-            sender.junk_emails or sender.junk_keyword_emails
-        ):
+        if sender.has_junk_conflict:
             return Classification(
                 email_type=EmailType.UNKNOWN,
                 action=Action.REVIEW,
@@ -236,6 +238,21 @@ class ClassificationEngine:
             return result
         return None
 
+    def _operational_precheck(self, sender: SenderStats) -> Classification | None:
+        if any(
+            pattern.search(subject)
+            for subject in sender.sample_subjects
+            for pattern in OPERATIONAL_SUBJECT_PATTERNS
+        ):
+            return Classification(
+                email_type=EmailType.TRANSACTIONAL,
+                action=Action.REVIEW,
+                confidence=0.9,
+                reasoning="Operational notifications require review before suppression",
+                source="transactional_policy",
+            )
+        return None
+
     def _transactional_precheck(self, sender: SenderStats) -> Classification | None:
         """Keep strong transactional/security evidence local and non-destructive.
 
@@ -251,18 +268,6 @@ class ClassificationEngine:
         # Repository notifications and infrastructure alerts often contain
         # uppercase tokens, bulk headers and unsubscribe links. Those facts
         # must not turn operational mail into an automatic opt-out or block.
-        operational = [
-            any(pattern.search(subject) for pattern in OPERATIONAL_SUBJECT_PATTERNS)
-            for subject in subjects
-        ]
-        if any(operational):
-            return Classification(
-                email_type=EmailType.TRANSACTIONAL,
-                action=Action.REVIEW,
-                confidence=0.9,
-                reasoning="Operational notifications require review before suppression",
-                source="transactional_policy",
-            )
         safe_subjects = [
             any(pattern.search(subject) for pattern in SAFE_SUBJECT_PATTERNS)
             for subject in subjects
@@ -457,6 +462,13 @@ class ClassificationEngine:
                 results[sender.classification_key] = result
                 source_counts.setdefault("auth_policy", 0)
                 source_counts["auth_policy"] += 1
+                continue
+
+            result = self._operational_precheck(sender)
+            if result:
+                results[sender.classification_key] = result
+                source_counts.setdefault("transactional_policy", 0)
+                source_counts["transactional_policy"] += 1
                 continue
 
             result = self._cold_outreach_precheck(sender)

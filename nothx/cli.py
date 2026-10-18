@@ -2746,8 +2746,22 @@ def _run_scan(
                             )
                             if escalate:
                                 if config.permits_mailbox_mutation:
+                                    block_classification = Classification(
+                                        email_type=EmailType.UNKNOWN,
+                                        action=Action.BLOCK,
+                                        confidence=1.0,
+                                        reasoning="The allowed unsubscribe retry was exhausted",
+                                        source="retry_policy",
+                                        recommended_action=(
+                                            classification.recommended_action
+                                            or classification.action
+                                        ),
+                                        original_source=(
+                                            classification.original_source or classification.source
+                                        ),
+                                    )
                                     moved, move_failed = _block_subscription(
-                                        config, sender, headers, classification
+                                        config, sender, headers, block_classification
                                     )
                                     if moved or not move_failed:
                                         db.update_sender_status(sender.domain, SenderStatus.BLOCKED)

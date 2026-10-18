@@ -1715,3 +1715,36 @@ def test_interactive_scan_choices_remain_manual_after_new_junk_evidence(
     unsub.assert_not_called()
     assert db.get_subscription(sub["id"])["policy_action"] == choice
     assert db.get_subscription(sub["id"])["policy_source"] == "manual"
+
+
+def test_interactive_unsubscribe_retry_escalation_is_automatic_not_manual_block(configured_cli):
+    runner, _config = configured_cli
+    scan, classes = _subscription_scan(Action.UNSUB)
+    key, stats = next(iter(scan.subscription_stats.items()))
+    original = scan.get_emails_for_subscription(key)[0]
+    now = datetime.now(UTC)
+    original.received_at = now
+    classes[key].source = "ai"
+    sub, _ = _persist_subscription_records(stats, [original], classes[key])
+    op = db.get_or_create_unsubscribe_operation(sub["id"], "failed-final-retry", retry_generation=1)
+    db.update_unsubscribe_operation_outcome(
+        op["id"], "failed", completed_at=now - timedelta(hours=1)
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._styled_confirm", return_value=True),
+        patch("nothx.cli.questionary.select") as select,
+        patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(1, 0)) as move,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        select.return_value.ask.return_value = "unsub"
+        result = runner.invoke(run, [])
+    assert result.exit_code == 0, result.output
+    move.assert_called_once()
+    unsub.assert_not_called()
+    stored = db.get_subscription(sub["id"])
+    assert stored["policy_action"] == "block"
+    assert stored["policy_source"] == "automatic"
+    assert stored["classification_source"] == "retry_policy"
+    assert stored["ai_recommended_action"] == "unsub"

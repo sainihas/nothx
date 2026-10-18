@@ -1631,7 +1631,7 @@ def test_explicit_policy_survives_moved_junk_and_new_inbox_delivery(configured_c
 
 
 @pytest.mark.parametrize("origin", ["saved", "rule"])
-def test_dominant_trusted_auth_failure_wins_over_explicit_keep(configured_cli, origin):
+def test_all_failed_deliveries_do_not_condemn_saved_clean_history(configured_cli, origin):
     runner, _config = configured_cli
     scan, classes = _subscription_scan(Action.KEEP)
     key, stats = next(iter(scan.subscription_stats.items()))
@@ -1645,6 +1645,7 @@ def test_dominant_trusted_auth_failure_wins_over_explicit_keep(configured_cli, o
         )
     stats.authenticated_emails = 0
     stats.authentication_failed_emails = 4
+    stats.clean_inbox_emails = 0
     with (
         patch("nothx.cli.scan_inbox", return_value=scan),
         patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
@@ -1653,7 +1654,10 @@ def test_dominant_trusted_auth_failure_wins_over_explicit_keep(configured_cli, o
     ):
         result = runner.invoke(run, ["--auto"])
     assert result.exit_code == 0, result.output
-    block.assert_called_once()
+    if origin == "saved":
+        block.assert_not_called()
+    else:
+        block.assert_called_once()
     unsub.assert_not_called()
 
 

@@ -499,8 +499,7 @@ def _persisted_threat_action(
             flags = []
         normalized = {str(flag).casefold() for flag in flags}
         verdict = str(message.get("provider_verdict") or "").casefold()
-        # "junk" is also synthesized from a message's folder/flags by the
-        # scanner; it is not an independent provider phishing verdict.
+        # Folder-derived "junk" is soft evidence, not a phishing verdict.
         if (verdict and verdict != "junk") or "$phishing" in normalized:
             return Action.BLOCK
         is_junk = (

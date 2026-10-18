@@ -505,10 +505,6 @@ def scan_inbox(
                         fetched_headers = list(fetched)
                         headers = []
                         for header in fetched_headers:
-                            # An absent/malformed From cannot be safely scoped or
-                            # checked against protected domains. Leave it in the
-                            # mailbox instead of creating a shared "unknown"
-                            # identity that crashes persistence or merges mail.
                             if not header.sender_address:
                                 skipped_invalid_senders += 1
                                 logger.warning(

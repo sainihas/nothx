@@ -953,8 +953,6 @@ def test_redirect_loop_needs_user_and_never_replays_another_endpoint(monkeypatch
     item = header(one_click=one_click, can_unsubscribe=True)
     item.list_unsubscribe += ", <https://mailer.example/alternate>"
     if one_click:
-        # Keep RFC 8058's single HTTPS target on the newest message, with a
-        # separate older source offering the possible fallback.
         item.list_unsubscribe = "<https://mailer.example/unsubscribe/token>"
     older = header("https://mailer.example/older", days=-1)
     result = unsubscriber.unsubscribe_subscription([item, older], consented_config())

@@ -406,7 +406,6 @@ def test_nonretryable_partial_mailbox_action_is_not_copied_again(configured_cli)
     assert actions[0]["outcome"] == "partial"
     assert actions[0]["retryable"] == 0
 
-    # A different UID namespace is never proof that the original is gone.
     with (
         patch("nothx.cli.IMAPConnection", return_value=connection),
         patch("nothx.cli.validate_uid_locator", return_value=UIDValidation(False, 99, False)),
@@ -648,7 +647,6 @@ def test_active_unsubscribe_policy_cannot_be_reclassified_to_keep(configured_cli
     config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
     config.save()
     scan_result, classifications = _subscription_scan(Action.KEEP)
-    # This is an inferred preference, not a new explicit user KEEP rule.
     for classification in classifications.values():
         classification.source = "heuristics"
     sender = next(iter(scan_result.subscription_stats.values()))

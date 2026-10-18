@@ -265,9 +265,6 @@ class ClassificationEngine:
         subjects = [subject for subject in sender.sample_subjects if subject.strip()]
         if not subjects:
             return None
-        # Repository notifications and infrastructure alerts often contain
-        # uppercase tokens, bulk headers and unsubscribe links. Those facts
-        # must not turn operational mail into an automatic opt-out or block.
         safe_subjects = [
             any(pattern.search(subject) for pattern in SAFE_SUBJECT_PATTERNS)
             for subject in subjects

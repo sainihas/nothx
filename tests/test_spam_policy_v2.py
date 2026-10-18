@@ -482,9 +482,9 @@ def test_policy_transformation_preserves_original_ai_recommendation(policy_engin
     "subjects",
     [
         ["50% of budget reached", "90% of budget reached"],
-        ["[Action Required] Mark OAuth clients for Workspace MCP"],
-        ["Re: [owner/repo] Upgrade models (PR #417)", "[owner/repo] PR run failed: CI"],
-        ["Re: [owner/repo] Quick question (PR #417)"],
+        ["[Action Required] Renew test API credentials"],
+        ["Re: [example/project] Routine update (PR #123)", "[example/project] PR run failed: CI"],
+        ["Re: [example/project] Quick question (PR #123)"],
     ],
 )
 def test_operational_notifications_are_never_automatically_suppressed(

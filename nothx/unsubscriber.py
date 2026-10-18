@@ -724,8 +724,7 @@ def _retry_delay(attempt: int, headers) -> float:
 
 
 def _redirect_limit_result(method: UnsubMethod) -> UnsubResult:
-    # The initial endpoint was contacted and may already have accepted the
-    # request. Stop here: another method could duplicate that side effect.
+    # The endpoint may already have accepted; never replay through a fallback.
     return _mark_attempt(
         UnsubResult(
             success=False,

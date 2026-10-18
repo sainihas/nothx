@@ -192,9 +192,7 @@ class IMAPConnection:
             else:
                 self.conn.login(self.account.email, self.account.password)
 
-            # imaplib caches the greeting's pre-authentication capabilities.
-            # Gmail only advertises MOVE, UIDPLUS and SPECIAL-USE after login;
-            # using the old cache silently falls back to incomplete COPYs.
+            # imaplib caches pre-login capabilities; Gmail's MOVE/UIDPLUS appear after login.
             status, capability_data = self.conn.capability()
             if status not in ("OK", b"OK"):
                 raise imaplib.IMAP4.error("Post-authentication CAPABILITY failed")
@@ -909,9 +907,6 @@ class IMAPConnection:
                     try:
                         result.append(part.decode(charset or "utf-8", errors="replace"))
                     except LookupError:
-                        # Raw 8-bit headers use the pseudo-charset unknown-8bit;
-                        # senders can also advertise a nonexistent codec. Always
-                        # return text so address parsing and Rich stay usable.
                         result.append(part.decode("utf-8", errors="replace"))
                 else:
                     result.append(part)

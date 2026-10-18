@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 from . import db
 from .authres import has_aligned_dkim_pass
 from .config import Config
-from .errors import IMAPError
+from .errors import ErrorCode, IMAPError
 from .footer import MAX_MESSAGES_PER_ACCOUNT
 from .imap import IMAPConnection
 from .mailbox import MailboxDiscovery
@@ -394,7 +394,10 @@ def _stats_for_emails(
         identity_value=identity.value if identity else None,
         inbox_emails=sum(header.mailbox_role == "inbox" for header in emails),
         clean_inbox_emails=sum(
-            header.mailbox_role == "inbox" and not header.server_junk and not header.server_phishing
+            header.mailbox_role == "inbox"
+            and not header.server_junk
+            and not header.server_phishing
+            and not header.strongly_failed_authentication
             for header in emails
         ),
         junk_emails=sum(header.mailbox_role == "junk" for header in emails),
@@ -755,5 +758,10 @@ def get_emails_for_domain(
                     header.account_name = name
                     header.account_key = account.email.casefold()
                     emails.append(header)
+            if not conn.last_fetch_complete:
+                raise IMAPError(
+                    code=ErrorCode.IMAP_FETCH_ERROR,
+                    message="Mailbox scan was incomplete; no unsubscribe contact is permitted",
+                )
 
     return emails

@@ -434,7 +434,7 @@ def test_nonretryable_partial_mailbox_action_is_not_copied_again(configured_cli)
     assert db.list_mailbox_actions()[0]["outcome"] == "not_found"
 
 
-def test_block_moves_all_persisted_inbox_refs_not_only_current_scan(configured_cli):
+def test_block_moves_only_inbox_refs_in_the_approved_scan(configured_cli):
     _runner, config = configured_cli
     scan_result, classifications = _subscription_scan(Action.BLOCK)
     key = next(iter(scan_result.subscription_emails))
@@ -474,9 +474,9 @@ def test_block_moves_all_persisted_inbox_refs_not_only_current_scan(configured_c
     with patch("nothx.cli.IMAPConnection", return_value=connection):
         moved, failed = _block_subscription(config, sender, headers, classification)
 
-    assert (moved, failed) == (2, 0)
+    assert (moved, failed) == (1, 0)
     moved_uids = {call.args[0].uid for call in connection.move_message_to_junk.call_args_list}
-    assert moved_uids == {100, 101}
+    assert moved_uids == {101}
     assert {row["outcome"] for row in db.list_mailbox_actions()} == {"moved"}
 
 
@@ -950,7 +950,7 @@ def test_reconciliation_respects_selected_account_scope(configured_cli):
     ]
 
 
-def test_second_post_grace_delivery_blocks_persisted_refs_without_current_scan(
+def test_second_post_grace_delivery_waits_for_classification_and_approval(
     configured_cli,
 ):
     _runner, config = configured_cli
@@ -999,10 +999,8 @@ def test_second_post_grace_delivery_blocks_persisted_refs_without_current_scan(
         _reconcile_due_operations(config)
 
     assert db.get_unsubscribe_operation(operation["id"])["outcome"] == "ineffective"
-    assert db.get_subscription(subscription["id"])["policy_action"] == "block"
-    move.assert_called_once()
-    moved_subscription = move.call_args.args[1]
-    assert moved_subscription["id"] == subscription["id"]
+    assert db.get_subscription(subscription["id"])["policy_action"] != "block"
+    move.assert_not_called()
 
 
 def test_failure_detail_redaction_removes_query_and_mailto_tokens():
@@ -2091,3 +2089,116 @@ def test_existing_manual_boundary_is_not_counted_as_a_new_unsubscribe(configured
     assert result.exit_code == 0, result.output
     assert "0 to unsubscribe now" in result.output
     assert "1 unsubscribe requests need manual action" in result.output
+
+
+@pytest.mark.parametrize("manual_keep", [False, True])
+@pytest.mark.parametrize("auto", [False, True])
+def test_due_retry_cannot_move_fresh_service_notice_before_approval(
+    configured_cli, manual_keep, auto
+):
+    from nothx.scanner import MailboxCoverage
+
+    runner, _config = configured_cli
+    scan, classes = _subscription_scan(Action.REVIEW)
+    scan.coverage = [MailboxCoverage("default", "INBOX", "inbox", "recent", 1, 1, 1, True)]
+    key, sender = next(iter(scan.subscription_stats.items()))
+    header = scan.subscription_emails[key][0]
+    header.subject = "Privacy policy update"
+    header.received_at = datetime.now(UTC)
+    classes[key].source = "transactional_policy"
+    subscription, _ = _persist_subscription_records(sender, [header], classes[key])
+    if manual_keep:
+        db.set_subscription_policy(subscription["id"], "keep", source="manual")
+    operation = db.get_or_create_unsubscribe_operation(
+        subscription["id"], "second-request", retry_generation=1, outcome="requested"
+    )
+    due = {
+        **operation,
+        "last_delivery_at": header.received_at.isoformat(),
+        "grace_until": (header.received_at - timedelta(hours=1)).isoformat(),
+    }
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli.db.list_operations_due_for_verification", return_value=[due]),
+        patch("nothx.cli.IMAPConnection") as connection,
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe,
+        patch("nothx.cli._styled_confirm", return_value=False),
+        patch("nothx.cli.questionary.select") as select,
+    ):
+        select.return_value.ask.return_value = "skip"
+        result = runner.invoke(run, ["--auto"] if auto else [])
+    assert result.exit_code == 0, result.output
+    connection.assert_not_called()
+    unsubscribe.assert_not_called()
+    assert db.get_unsubscribe_operation(operation["id"])["outcome"] == "ineffective"
+    assert db.get_subscription(subscription["id"])["policy_action"] != "block"
+
+
+def test_open_unsubscribe_refuses_an_incomplete_rescan(configured_cli):
+    from nothx.scanner import MailboxCoverage
+
+    runner, _config = configured_cli
+    scan, classes = _subscription_scan(Action.UNSUB)
+    key, sender = next(iter(scan.subscription_stats.items()))
+    subscription, _ = _persist_subscription_records(
+        sender, scan.subscription_emails[key], classes[key]
+    )
+    scan.coverage = [MailboxCoverage("default", "INBOX", "inbox", "recent", 100, 100, 1, False)]
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.webbrowser.open") as browser,
+    ):
+        result = runner.invoke(open_unsubscribe, [str(subscription["id"]), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "incomplete" in result.output
+    browser.assert_not_called()
+
+
+def test_domain_contact_scan_rejects_an_interrupted_prefix(configured_cli):
+    from nothx.errors import IMAPError
+    from nothx.scanner import get_emails_for_domain
+
+    _runner, config = configured_cli
+    scan, _classes = _subscription_scan(Action.UNSUB)
+    header = next(iter(scan.subscription_emails.values()))[0]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.fetch_marketing_emails.return_value = [header]
+    connection.last_fetch_complete = False
+    with (
+        patch("nothx.scanner.IMAPConnection", return_value=connection),
+        pytest.raises(IMAPError, match="incomplete"),
+    ):
+        get_emails_for_domain(config, header.domain)
+
+
+def test_all_failed_authentication_is_not_counted_as_clean_inbox(configured_cli):
+    from nothx.models import AuthenticationEvidence, AuthResult
+
+    runner, _config = configured_cli
+    scan, _classes = _subscription_scan(Action.UNSUB)
+    header = next(iter(scan.subscription_emails.values()))[0]
+    header.authentication = AuthenticationEvidence(
+        trusted=True, spf=AuthResult.FAIL, dkim=AuthResult.FAIL, dmarc=AuthResult.FAIL
+    )
+    sender = _stats_for_emails(header.domain, [header])
+    assert sender.clean_inbox_emails == 0
+    assert sender.authentication_failed_emails == 1
+    key = sender.classification_key
+    scan.subscription_stats[key] = sender
+    scan.sender_stats[header.domain] = sender
+    _persist_subscription_records(
+        sender,
+        [header],
+        Classification(EmailType.UNKNOWN, Action.REVIEW, 0.5, "fixture", "auth_policy"),
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe,
+    ):
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    block.assert_called_once()
+    unsubscribe.assert_not_called()

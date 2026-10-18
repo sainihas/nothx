@@ -891,10 +891,9 @@ def _is_unsubscribe_consent_resume(subscription: dict[str, Any], config: Config)
 def _reconcile_due_operations(
     config: Config,
     *,
-    allow_mailbox_actions: bool = True,
     accounts: set[str] | None = None,
 ) -> None:
-    """Verify post-grace quietness and escalate a second failed request."""
+    """Verify post-grace quietness without changing policies or moving mail."""
     operations = (
         db.list_operations_due_for_verification()
         if accounts is None
@@ -916,47 +915,6 @@ def _reconcile_due_operations(
             continue
 
         db.update_unsubscribe_operation_outcome(operation["id"], "ineffective")
-        if int(operation.get("retry_generation") or 0) < 1:
-            # The normal classification/execution pass may now use one fresh
-            # endpoint while excluding every previously accepted fingerprint.
-            continue
-
-        db.set_subscription_policy(operation["subscription_id"], "block", source="automatic")
-        if not allow_mailbox_actions or not config.permits_mailbox_mutation:
-            block_operation = db.get_or_create_unsubscribe_operation(
-                operation["subscription_id"],
-                "post-retry-block-consent-v1",
-                kind="block",
-            )
-            db.update_unsubscribe_operation_outcome(
-                block_operation["id"],
-                "needs_user",
-                error_code="mailbox_approval_required",
-                detail_redacted="Post-retry Junk movement requires consent and approval",
-            )
-            continue
-
-        subscription = db.get_subscription(operation["subscription_id"])
-        if subscription is None:
-            continue
-        claim_owner = uuid.uuid4().hex
-        block_operation, acquired = db.claim_unsubscribe_operation(
-            subscription["id"],
-            f"post-retry-block-v1-{operation['id']}",
-            kind="block",
-            claim_owner=claim_owner,
-        )
-        if not acquired:
-            continue
-        moved, failed = _move_persisted_subscription_to_junk(
-            config,
-            subscription,
-            block_operation["id"],
-            claim_owner=claim_owner,
-        )
-        sender_domain = subscription.get("sender_domain")
-        if sender_domain and (moved or not failed):
-            db.update_sender_status(sender_domain, SenderStatus.BLOCKED)
 
 
 def _block_subscription(
@@ -965,7 +923,7 @@ def _block_subscription(
     headers: list[EmailHeader],
     classification: Classification,
 ) -> tuple[int, int]:
-    """Apply the spam path: move every matching Inbox UID and never unsubscribe."""
+    """Move only Inbox messages included in the approved classification."""
     subscription, messages = _persist_subscription_records(
         sender,
         headers,
@@ -987,6 +945,7 @@ def _block_subscription(
         subscription,
         operation["id"],
         claim_owner=claim_owner,
+        message_ids={message["id"] for _header, message in messages},
     )
 
 
@@ -996,13 +955,16 @@ def _move_persisted_subscription_to_junk(
     operation_id: int,
     *,
     claim_owner: str,
+    message_ids: set[int] | None = None,
 ) -> tuple[int, int]:
-    """Move every persisted Inbox locator for one account/list identity."""
+    """Move approved Inbox locators, or the explicitly approved full identity."""
     inbox_messages = db.list_message_refs(
         subscription_id=subscription["id"],
         mailbox_role="inbox",
         limit=100_000,
     )
+    if message_ids is not None:
+        inbox_messages = [message for message in inbox_messages if message["id"] in message_ids]
     if not inbox_messages:
         db.update_unsubscribe_operation_outcome(
             operation_id,
@@ -2496,7 +2458,6 @@ def _run_scan(
             }
         _reconcile_due_operations(
             config,
-            allow_mailbox_actions=config.operation_mode != "confirm",
             accounts=verification_accounts,
         )
 
@@ -3747,6 +3708,13 @@ def open_unsubscribe(subscription_id: int, yes: bool):
         )
     except (IMAPError, OSError) as error:
         console.print(f"[error]Mailbox rescan failed: {_redact_failure_detail(str(error))}[/error]")
+        return
+
+    if any(row.account == account_name and not row.complete for row in scanned.coverage):
+        console.print(
+            "[warning]Mailbox rescan was incomplete; no destination was opened. "
+            "Retry after the connection is restored.[/warning]"
+        )
         return
 
     candidates: list[str] = []

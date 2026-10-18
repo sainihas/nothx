@@ -386,7 +386,7 @@ def test_authenticated_messages_outweigh_one_authentication_failure(policy_engin
     policy_engine.ai.classify_single.assert_not_called()
 
 
-def test_dominant_authentication_failures_still_block(policy_engine):
+def test_dominant_authentication_failures_cannot_condemn_authenticated_mail(policy_engine):
     sender = SenderStats(
         domain="spoofed.example",
         total_emails=3,
@@ -396,7 +396,7 @@ def test_dominant_authentication_failures_still_block(policy_engine):
 
     result = policy_engine.classify(sender)
 
-    assert result.action is Action.BLOCK
+    assert result.action is Action.REVIEW
     assert result.source == "auth_policy"
 
 
@@ -482,6 +482,9 @@ def test_policy_transformation_preserves_original_ai_recommendation(policy_engin
     "subjects",
     [
         ["50% of budget reached", "90% of budget reached"],
+        ["Upcoming revision to the terms of use"],
+        ["Our privacy notice changes next month"],
+        ["Revised terms and conditions of sale"],
         ["[Action Required] Renew test API credentials"],
         ["Re: [example/project] Routine update (PR #123)", "[example/project] PR run failed: CI"],
         ["Re: [example/project] Quick question (PR #123)"],
@@ -529,7 +532,9 @@ def test_mixed_inbox_and_junk_requires_review_without_explicit_threat(policy_eng
         else policy_engine.classify(sender)
     )
     assert result.action is Action.REVIEW
-    sender.provider_threat = "PHSH"
+    sender.provider_threat = True
+    assert policy_engine.classify(sender).action is Action.REVIEW
+    sender.clean_inbox_emails = 0
     assert policy_engine.classify(sender).action is Action.BLOCK
 
 
@@ -551,3 +556,157 @@ def test_real_header_aggregation_preserves_clean_inbox_conflict(policy_engine, j
     assert stats.junk_keyword_emails == junk_count
     assert stats.has_junk_conflict
     assert policy_engine.classify(stats).action is Action.REVIEW
+
+
+def test_ai_preview_keeps_personal_and_operational_headers_local(policy_engine):
+    marketing = SenderStats(
+        domain="letters.example",
+        total_emails=8,
+        has_unsubscribe=True,
+        sample_subjects=["Summer offers"],
+        authenticated_emails=8,
+    )
+    personal = SenderStats(
+        domain="personal.example", total_emails=1, sample_subjects=["Dinner on Friday"]
+    )
+    operational = SenderStats(
+        domain="service.example",
+        total_emails=4,
+        has_unsubscribe=True,
+        sample_subjects=["[Action Required] Renew test API credentials"],
+    )
+    policy_engine.ai.is_available = Mock(return_value=True)
+    policy_engine.ai.classify_batch = Mock(return_value={})
+    policy_engine.classify_batch([marketing, personal, operational], persist=False, allow_ai=True)
+    policy_engine.ai.classify_batch.assert_called_once_with(
+        [marketing], persist=False, allow_egress=True
+    )
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("action", [Action.KEEP, Action.REVIEW, Action.UNSUB, Action.BLOCK])
+def test_ai_uncertainty_cannot_become_a_destructive_heuristic_fallback(
+    policy_engine, batch, action
+):
+    sender = SenderStats(
+        domain="letters.example",
+        total_emails=30,
+        has_unsubscribe=True,
+        sample_subjects=["SPECIAL SALE!"],
+        authenticated_emails=30,
+    )
+    uncertain = Classification(
+        email_type=EmailType.MARKETING,
+        action=action,
+        confidence=0.6,
+        reasoning="Mixed evidence",
+        source="ai",
+    )
+    policy_engine.ai.is_available = Mock(return_value=True)
+    policy_engine.ai.classify_single = Mock(return_value=uncertain)
+    policy_engine.ai.classify_batch = Mock(return_value={sender.classification_key: uncertain})
+    policy_engine.heuristics.classify = Mock(
+        return_value=Classification(
+            email_type=EmailType.MARKETING,
+            action=Action.UNSUB,
+            confidence=0.99,
+            reasoning="Keyword score",
+            source="heuristics",
+        )
+    )
+    result = (
+        policy_engine.classify_batch([sender])[sender.classification_key]
+        if batch
+        else policy_engine.classify(sender)
+    )
+    assert result.action is Action.REVIEW
+    assert result.source == "ai"
+    assert result.recommended_action is action
+    assert "review required" in result.reasoning
+
+
+@pytest.mark.parametrize("email_type", [EmailType.TRANSACTIONAL, EmailType.SECURITY])
+def test_ai_cannot_automatically_block_protected_content_types(policy_engine, email_type):
+    sender = SenderStats(domain="notices.example", total_emails=20, authenticated_emails=20)
+    recommendation = Classification(
+        email_type=email_type,
+        action=Action.BLOCK,
+        confidence=0.99,
+        reasoning="Model recommendation",
+        source="ai",
+    )
+    result = policy_engine._apply_action_policy(sender, recommendation)
+    assert result.action is Action.REVIEW
+    assert result.recommended_action is Action.BLOCK
+    assert result.source == "safety_policy"
+
+
+@pytest.mark.parametrize("action", [Action.UNSUB, Action.BLOCK])
+def test_engaged_marketing_requires_preference_review_unless_enabled(policy_engine, action):
+    sender = SenderStats(
+        domain="letters.example",
+        total_emails=20,
+        seen_emails=10,
+        authenticated_emails=20,
+        has_unsubscribe=True,
+    )
+    recommendation = Classification(
+        email_type=EmailType.MARKETING,
+        action=action,
+        confidence=0.99,
+        reasoning="Promotional content",
+        source="ai",
+    )
+    assert policy_engine._apply_action_policy(sender, recommendation).action is Action.REVIEW
+    policy_engine.config.review_engaged_marketing = False
+    assert policy_engine._apply_action_policy(sender, recommendation).action is action
+    policy_engine.config.review_engaged_marketing = True
+    recommendation.source = "user_rule"
+    assert policy_engine._apply_action_policy(sender, recommendation).action is action
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_one_flagged_security_message_cannot_block_the_clean_sender_group(policy_engine, batch):
+    sender = SenderStats(
+        domain="security.example",
+        total_emails=12,
+        inbox_emails=12,
+        clean_inbox_emails=11,
+        phishing_emails=1,
+        authenticated_emails=12,
+        sample_subjects=["Security settings changed"],
+    )
+    result = (
+        policy_engine.classify_batch([sender])[sender.classification_key]
+        if batch
+        else policy_engine.classify(sender)
+    )
+    assert result.action is Action.REVIEW
+    assert result.source == "provider_policy"
+
+
+@pytest.mark.parametrize("known_passes", [0, 1])
+def test_failed_authentication_mixed_with_pass_or_unknown_is_reviewed(policy_engine, known_passes):
+    sender = SenderStats(
+        domain="letters.example",
+        total_emails=10,
+        authenticated_emails=known_passes,
+        authentication_failed_emails=3,
+        authentication_unknown_emails=7 - known_passes,
+    )
+    assert policy_engine.classify(sender).action is Action.REVIEW
+    sender.authentication_failed_emails = 10
+    sender.authenticated_emails = sender.authentication_unknown_emails = 0
+    assert policy_engine.classify(sender).action is Action.BLOCK
+
+
+def test_engaged_cold_outreach_still_needs_review_when_promotions_are_allowed(policy_engine):
+    sender = SenderStats(
+        domain="letters.example",
+        total_emails=5,
+        seen_emails=5,
+        authenticated_emails=5,
+        sample_subjects=["Following up about a meeting"],
+    )
+    policy_engine.config.review_engaged_marketing = False
+    assert policy_engine.classify(sender).action is Action.REVIEW

@@ -206,3 +206,16 @@ class TestPromptPayload:
         assert '"2026-06-01"' in prompt
         # All five available subjects are forwarded, not just three.
         assert "Sale again" in prompt
+
+
+def test_explicit_ai_preview_sends_prompt_without_saving_classification(temp_db):
+    response = '[{"domain":"mailer.example","type":"marketing","action":"unsub","confidence":0.95}]'
+    provider = _FakeProvider([response])
+    classifier = _classifier(provider)
+    with patch("nothx.classifier.ai.db.update_sender_classification") as save:
+        assert classifier.classify_batch([_sender()], persist=False) == {}
+        assert provider.calls == []
+        result = classifier.classify_batch([_sender()], persist=False, allow_egress=True)
+    assert result["mailer.example"].action is Action.UNSUB
+    assert len(provider.calls) == 1
+    save.assert_not_called()

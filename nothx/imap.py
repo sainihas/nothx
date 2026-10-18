@@ -7,7 +7,7 @@ import logging
 import re
 import shlex
 import socket
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from email.header import Header, decode_header
 from email.message import Message
@@ -128,6 +128,7 @@ IMAP_SERVERS = {
     "icloud": "imap.mail.me.com",
 }
 OUTLOOK_OAUTH_IMAP_SERVER = "outlook.office365.com"
+IMAP_TIMEOUT = 60
 
 
 class IMAPConnection:
@@ -147,6 +148,9 @@ class IMAPConnection:
         self.last_fetch_uidvalidity: int | None = None
         self.last_fetch_highest_uid = 0
         self.last_fetch_complete = False
+        self.last_fetch_mailbox_total: int | None = None
+        self.last_fetch_selected = 0
+        self.last_fetch_scope = "lookback"
 
     def connect(self) -> bool:
         """Connect to the IMAP server with retry logic."""
@@ -161,7 +165,7 @@ class IMAPConnection:
             ),
         )
         def _connect():
-            self.conn = imaplib.IMAP4_SSL(self.server)
+            self.conn = imaplib.IMAP4_SSL(self.server, timeout=IMAP_TIMEOUT)
             if self.account.uses_oauth:
                 if self.account.provider != "outlook" or not self.account.client_id:
                     raise OAuthError(
@@ -184,7 +188,7 @@ class IMAPConnection:
                     token = msauth.get_access_token(
                         self.account.email, self.account.client_id, force_refresh=True
                     )
-                    self.conn = imaplib.IMAP4_SSL(self.server)
+                    self.conn = imaplib.IMAP4_SSL(self.server, timeout=IMAP_TIMEOUT)
                     self.conn.authenticate(
                         "XOAUTH2",
                         lambda _challenge: msauth.build_xoauth2_bytes(self.account.email, token),
@@ -326,6 +330,7 @@ class IMAPConnection:
         since_uid: int | None = None,
         expected_uidvalidity: int | None = None,
         full_history: bool = False,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> Iterator[EmailHeader]:
         """
         Fetch every message header needed by local spam/subscription policy.
@@ -341,11 +346,16 @@ class IMAPConnection:
         self.last_fetch_uidvalidity = None
         self.last_fetch_highest_uid = 0
         self.last_fetch_complete = False
+        self.last_fetch_mailbox_total = None
+        self.last_fetch_selected = 0
+        self.last_fetch_scope = "lookback"
 
         try:
-            select_status, _ = self.conn.select(_imap_mailbox_arg(folder), readonly=True)
+            select_status, select_data = self.conn.select(_imap_mailbox_arg(folder), readonly=True)
             if select_status not in ("OK", b"OK"):
                 raise imaplib.IMAP4.error(f"SELECT returned {select_status!r}")
+            if select_data and isinstance(select_data[0], bytes) and select_data[0].isdigit():
+                self.last_fetch_mailbox_total = int(select_data[0])
         except (imaplib.IMAP4.error, ValueError) as e:
             logger.error(
                 "Failed to select folder %s: %s",
@@ -388,6 +398,13 @@ class IMAPConnection:
             )
             since_uid = None
 
+        self.last_fetch_scope = (
+            "incremental"
+            if since_uid is not None
+            else "full history"
+            if full_history
+            else "lookback"
+        )
         since_date = _imap_date(datetime.now() - timedelta(days=days))
         uid_command = cast(Any, self.conn).uid
         try:
@@ -434,6 +451,7 @@ class IMAPConnection:
             )
         if since_uid is not None:
             message_ids = [value for value in message_ids if int(value) > since_uid]
+        self.last_fetch_selected = len(message_ids)
         searched_high_water = max((int(value) for value in message_ids), default=0)
         self.last_fetch_highest_uid = max(selected_high_water or 0, searched_high_water)
         logger.debug(
@@ -442,6 +460,9 @@ class IMAPConnection:
             since_date,
             extra={"message_count": len(message_ids), "since_date": since_date},
         )
+
+        if on_progress:
+            on_progress(0, len(message_ids))
 
         fetch_errors = 0
         parse_errors = 0
@@ -551,6 +572,11 @@ class IMAPConnection:
                         uid_set,
                     )
 
+            except (OSError, imaplib.IMAP4.abort):
+                fetch_errors += len(batch)
+                all_requested_uids_parsed = False
+                logger.warning("IMAP connection interrupted while fetching headers")
+                break
             except imaplib.IMAP4.error as e:
                 fetch_errors += 1
                 all_requested_uids_parsed = False
@@ -578,6 +604,9 @@ class IMAPConnection:
                     e,
                     extra={"uid_set": uid_set, "error_type": type(e).__name__},
                 )
+
+            if on_progress:
+                on_progress(yielded_count, len(message_ids))
 
         # Log summary if there were errors
         if fetch_errors or parse_errors:

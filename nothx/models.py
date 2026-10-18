@@ -448,6 +448,13 @@ class SenderStats:
     provider_threat: bool = False
 
     @property
+    def has_threat_conflict(self) -> bool:
+        return bool(
+            (self.provider_threat or self.phishing_emails)
+            and (self.clean_inbox_emails or self.not_junk_emails)
+        )
+
+    @property
     def has_junk_conflict(self) -> bool:
         return bool(
             (self.clean_inbox_emails or self.not_junk_emails)

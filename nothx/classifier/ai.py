@@ -161,7 +161,7 @@ class AIClassifier:
         return provider.is_available()
 
     def classify_batch(
-        self, senders: list[SenderStats], persist: bool = True
+        self, senders: list[SenderStats], persist: bool = True, *, allow_egress: bool = False
     ) -> dict[str, Classification]:
         """
         Classify a batch of senders using AI, in chunks.
@@ -171,9 +171,10 @@ class AIClassifier:
         limit; a single oversized request would truncate mid-JSON and lose
         every classification in it. ``persist=False`` is the privacy boundary
         used by dry-run and pre-consent scans: it disables both provider egress
-        and database writes.
+        and database writes. Explicit ``allow_egress=True`` permits a read-only
+        AI preview while leaving database writes disabled.
         """
-        if not persist:
+        if not persist and not allow_egress:
             logger.info("AI egress disabled for non-persistent classification")
             return {}
 

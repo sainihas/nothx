@@ -1147,7 +1147,7 @@ def _is_transient_smtp_error(exc: BaseException) -> bool:
 # Valid SMTP providers - reject any provider not in this whitelist
 SMTP_CONFIGS = {
     "gmail": ("smtp.gmail.com", 465, False),
-    "outlook": ("smtp.office365.com", 587, True),  # STARTTLS; 465 unsupported
+    "outlook": ("smtp-mail.outlook.com", 587, True),  # STARTTLS; 465 unsupported
     "yahoo": ("smtp.mail.yahoo.com", 465, False),
     "icloud": ("smtp.mail.me.com", 587, True),  # STARTTLS
 }

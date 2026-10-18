@@ -429,3 +429,39 @@ def test_invalid_sender_cannot_abort_or_poison_other_messages(
     else:
         assert db.list_subscriptions() == []
         assert db.get_mailbox_state("me@example.com", "INBOX") is None
+
+
+def test_full_inbox_scan_excludes_junk_and_custom_and_reports_coverage(database: Path) -> None:
+    del database
+    junk = MailboxInfo("Spam", "Spam", "/", (r"\junk",))
+    conn = fake_connection(
+        {"INBOX": [header(1)]}, discovery=MailboxDiscovery((junk,), None, junk, (junk,))
+    )
+    conn.last_fetch_mailbox_total = 100
+    conn.last_fetch_selected = 1
+    conn.last_fetch_scope = "full history"
+    config = Config(
+        accounts={
+            "main": AccountConfig("gmail", "me@example.com", "pw", extra_scan_mailboxes=["Archive"])
+        }
+    )
+    with patch("nothx.scanner.IMAPConnection", return_value=conn):
+        result = scan_inbox(config, persist=False, full_history=True, inbox_only=True)
+    assert [call.kwargs["folder"] for call in conn.fetch_marketing_emails.call_args_list] == [
+        "INBOX"
+    ]
+    conn.discover_mailboxes.assert_not_called()
+    assert result.coverage[0].total == 100
+    assert result.coverage[0].selected == result.coverage[0].fetched == 1
+    assert result.coverage[0].scope == "full history"
+    assert db.list_subscriptions() == []
+
+
+def test_partial_fetch_is_visible_in_coverage(database: Path) -> None:
+    del database
+    conn = fake_connection({"INBOX": [header(1)]}, complete=False)
+    with patch("nothx.scanner.IMAPConnection", return_value=conn):
+        result = scan_inbox(
+            Config(accounts={"main": AccountConfig("gmail", "me@example.com", "pw")}), persist=False
+        )
+    assert result.coverage[0].complete is False

@@ -325,7 +325,7 @@ def _attempt_unsubscribe_for_domain(config: Config, domain: str, sender: dict) -
             error="This subscription exhausted its safe retry and must be blocked",
             outcome=UnsubscribeOutcome.BLOCKED,
         )
-        db.set_subscription_policy(subscription["id"], "block")
+        db.set_subscription_policy(subscription["id"], "block", source="automatic")
         console.print(f"{_L} [warning]{result.error}; no request was sent[/warning]")
         return result
     if not execute:
@@ -441,6 +441,19 @@ def _subscription_label(sender: SenderStats) -> str:
     else:
         identity = sender.domain
     return f"{account} · {identity}"
+
+
+def _manual_classification(original: Classification, action: Action) -> Classification:
+    """Keep model attribution separate from a confirmed local user choice."""
+    return Classification(
+        email_type=original.email_type,
+        action=action,
+        confidence=1.0,
+        reasoning="Explicit choice during scan review",
+        source="user_rule",
+        recommended_action=original.recommended_action or original.action,
+        original_source=original.original_source or original.source,
+    )
 
 
 def _learn_subscription_policy(subscription: dict[str, Any], action_value: str) -> None:
@@ -2328,6 +2341,21 @@ def _run_scan(
             persisted_threat = (
                 _persisted_threat_action(subscription["id"]) if subscription is not None else None
             )
+            if sender.authentication_failed_emails > sender.authenticated_emails:
+                classifications[sender.classification_key] = Classification(
+                    email_type=EmailType.UNKNOWN,
+                    action=Action.BLOCK,
+                    confidence=1.0,
+                    reasoning="Trusted authentication failures dominate authenticated deliveries",
+                    source="auth_policy",
+                )
+                if (
+                    not dry_run
+                    and subscription is not None
+                    and subscription.get("policy_action") != "block"
+                ):
+                    db.set_subscription_policy(subscription["id"], "block", source="automatic")
+                continue
             current = classifications.get(sender.classification_key)
             explicit_action = None
             if (
@@ -2520,6 +2548,7 @@ def _run_scan(
 
             # Review items marked for unsubscribe
             review_cancelled = False
+            reviewed_keys: set[str] = set()
             for key, sender, classification in to_unsub[:]:  # Slice to allow modification
                 action = questionary.select(
                     f"[{sender.total_emails} emails] {sender.domain}",
@@ -2539,16 +2568,26 @@ def _run_scan(
 
                 if action == "keep":
                     to_unsub.remove((key, sender, classification))
-                    to_keep.append((key, sender, classification))
+                    to_keep.append(
+                        (key, sender, _manual_classification(classification, Action.KEEP))
+                    )
+                    reviewed_keys.add(key)
                     console.print(f"{_L} [keep]→ Changed to keep[/keep]")
                 elif action == "skip":
                     to_unsub.remove((key, sender, classification))
                     to_review.append((key, sender, classification))
                     console.print(f"{_L} [review]→ Moved to review[/review]")
+                elif action == "unsub":
+                    to_unsub.remove((key, sender, classification))
+                    to_unsub.append(
+                        (key, sender, _manual_classification(classification, Action.UNSUB))
+                    )
 
             # Review items marked to keep (only if not cancelled)
             if not review_cancelled:
                 for key, sender, classification in to_keep[:]:  # Slice to allow modification
+                    if key in reviewed_keys:
+                        continue
                     # Offering "unsubscribe" for a sender with no discovered
                     # endpoint guarantees a failure the user cannot act on;
                     # blocking is the only thing that actually stops the mail.
@@ -2578,16 +2617,25 @@ def _run_scan(
 
                     if action == "unsub":
                         to_keep.remove((key, sender, classification))
-                        to_unsub.append((key, sender, classification))
+                        to_unsub.append(
+                            (key, sender, _manual_classification(classification, Action.UNSUB))
+                        )
                         console.print(f"{_L} [unsubscribe]→ Changed to unsubscribe[/unsubscribe]")
                     elif action == "block":
                         to_keep.remove((key, sender, classification))
-                        to_block.append((key, sender, classification))
+                        to_block.append(
+                            (key, sender, _manual_classification(classification, Action.BLOCK))
+                        )
                         console.print(f"{_L} [block]→ Changed to block[/block]")
                     elif action == "skip":
                         to_keep.remove((key, sender, classification))
                         to_review.append((key, sender, classification))
                         console.print(f"{_L} [review]→ Moved to review[/review]")
+                    elif action == "keep":
+                        to_keep.remove((key, sender, classification))
+                        to_keep.append(
+                            (key, sender, _manual_classification(classification, Action.KEEP))
+                        )
 
             # Updated summary
             # Updated summary as tree
@@ -2683,7 +2731,11 @@ def _run_scan(
                                 sender, headers, classification
                             )
                             db.set_subscription_policy(
-                                subscription["id"], "unsub", source="automatic"
+                                subscription["id"],
+                                "unsub",
+                                source="manual"
+                                if classification.source == "user_rule"
+                                else "automatic",
                             )
                             execute, exclusions, retry_generation, escalate = (
                                 _unsubscribe_operation_plan(subscription)

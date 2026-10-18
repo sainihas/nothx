@@ -737,11 +737,13 @@ def upsert_subscription(
                 sender_domain = COALESCE(excluded.sender_domain, subscriptions.sender_domain),
                 policy_action = CASE
                     WHEN subscriptions.policy_source = 'manual'
+                         AND subscriptions.policy_action IN ('keep', 'block')
                          AND COALESCE(excluded.policy_source, '') != 'manual'
                     THEN subscriptions.policy_action
                     ELSE COALESCE(excluded.policy_action, subscriptions.policy_action) END,
                 policy_source = CASE
                     WHEN subscriptions.policy_source = 'manual'
+                         AND subscriptions.policy_action IN ('keep', 'block')
                          AND COALESCE(excluded.policy_source, '') != 'manual'
                     THEN subscriptions.policy_source
                     ELSE COALESCE(excluded.policy_source, subscriptions.policy_source) END,

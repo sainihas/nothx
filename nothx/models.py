@@ -292,11 +292,16 @@ class EmailHeader:
         except (TypeError, AttributeError):
             return ""
         addr = addr.lower().strip()
-        if "@" not in addr:
-            return ""
-        domain = addr.rsplit("@", 1)[1]
         if (
-            not domain
+            len(addr) > 320
+            or addr.count("@") != 1
+            or any(ch.isspace() or ord(ch) < 33 for ch in addr)
+        ):
+            return ""
+        local, domain = addr.rsplit("@", 1)
+        if (
+            not local
+            or not domain
             or " " in domain
             or "." not in domain
             or domain.startswith(".")

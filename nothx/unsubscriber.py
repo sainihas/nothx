@@ -27,7 +27,7 @@ from .models import (
     UnsubscribeAttemptResult,
     UnsubscribeOutcome,
 )
-from .safefetch import SSRFBlockedError, redacted_host, redacted_url, safe_fetch
+from .safefetch import RedirectLimitError, SSRFBlockedError, redacted_host, redacted_url, safe_fetch
 
 
 class UnsafeUnsubscribeError(Exception):
@@ -723,6 +723,22 @@ def _retry_delay(attempt: int, headers) -> float:
     return min(float(2 ** (attempt - 1)), 10.0)
 
 
+def _redirect_limit_result(method: UnsubMethod) -> UnsubResult:
+    # The initial endpoint was contacted and may already have accepted the
+    # request. Stop here: another method could duplicate that side effect.
+    return _mark_attempt(
+        UnsubResult(
+            success=False,
+            method=method,
+            needs_confirmation=True,
+            error="Unsubscribe page exceeded its redirect limit; manual review is required",
+        ),
+        "needs_user",
+        "redirect_limit",
+        ambiguous_send=True,
+    )
+
+
 def _execute_one_click(url: str) -> UnsubResult:
     """Execute RFC 8058 one-click unsubscribe (POST request)."""
     limited = _rate_limited(UnsubMethod.ONE_CLICK)
@@ -761,6 +777,8 @@ def _execute_one_click(url: str) -> UnsubResult:
             "retryable_failure" if retryable else "permanent_failure",
             "http_retryable" if retryable else "http_permanent",
         )
+    except RedirectLimitError:
+        return _redirect_limit_result(UnsubMethod.ONE_CLICK)
     except SSRFBlockedError:
         logger.warning("Blocked unsafe one-click destination %s", _redact_target(url))
         return _mark_attempt(
@@ -844,6 +862,8 @@ def _execute_get(url: str) -> UnsubResult:
             "retryable_failure" if retryable else "permanent_failure",
             "http_retryable" if retryable else "unconfirmed_response",
         )
+    except RedirectLimitError:
+        return _redirect_limit_result(UnsubMethod.GET)
     except SSRFBlockedError:
         logger.warning("Blocked unsafe GET destination %s", _redact_target(url))
         return _mark_attempt(

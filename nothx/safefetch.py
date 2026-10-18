@@ -39,6 +39,12 @@ class ResolutionError(OSError):
     pass
 
 
+class RedirectLimitError(SSRFBlockedError):
+    """A public site did not finish its redirect flow within the request budget."""
+
+    pass
+
+
 @dataclass
 class FetchResponse:
     """Result of a safe_fetch call."""
@@ -327,7 +333,7 @@ def safe_fetch(
                     f"Redirect (HTTP {e.code}) not allowed for this request"
                 ) from e
             if redirects >= max_redirects:
-                raise SSRFBlockedError(f"Too many redirects (>{max_redirects})") from e
+                raise RedirectLimitError(f"Too many redirects (>{max_redirects})") from e
             location = e.headers.get("Location")
             if not location:
                 raise SSRFBlockedError("Redirect without Location header") from e

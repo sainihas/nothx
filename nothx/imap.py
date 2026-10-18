@@ -9,7 +9,7 @@ import shlex
 import socket
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from email.header import decode_header
+from email.header import Header, decode_header
 from email.message import Message
 from typing import Any, cast
 
@@ -191,6 +191,19 @@ class IMAPConnection:
                     )
             else:
                 self.conn.login(self.account.email, self.account.password)
+
+            # imaplib caches the greeting's pre-authentication capabilities.
+            # Gmail only advertises MOVE, UIDPLUS and SPECIAL-USE after login;
+            # using the old cache silently falls back to incomplete COPYs.
+            status, capability_data = self.conn.capability()
+            if status not in ("OK", b"OK"):
+                raise imaplib.IMAP4.error("Post-authentication CAPABILITY failed")
+            self.conn.capabilities = tuple(
+                token.upper()
+                for part in capability_data
+                if isinstance(part, bytes)
+                for token in part.decode("ascii", errors="replace").split()
+            )
 
         try:
             _connect()
@@ -884,7 +897,7 @@ class IMAPConnection:
             )
             return None
 
-    def _decode_header_value(self, value: str) -> str:
+    def _decode_header_value(self, value: str | Header) -> str:
         """Decode a potentially encoded header value."""
         if not value:
             return ""
@@ -893,12 +906,18 @@ class IMAPConnection:
             result = []
             for part, charset in decoded_parts:
                 if isinstance(part, bytes):
-                    result.append(part.decode(charset or "utf-8", errors="replace"))
+                    try:
+                        result.append(part.decode(charset or "utf-8", errors="replace"))
+                    except LookupError:
+                        # Raw 8-bit headers use the pseudo-charset unknown-8bit;
+                        # senders can also advertise a nonexistent codec. Always
+                        # return text so address parsing and Rich stay usable.
+                        result.append(part.decode("utf-8", errors="replace"))
                 else:
                     result.append(part)
             return "".join(result)
         except Exception:
-            return value
+            return str(value)
 
 
 def test_account(account: AccountConfig) -> tuple[bool, str]:

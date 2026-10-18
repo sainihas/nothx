@@ -8,7 +8,7 @@ import re
 import uuid
 import webbrowser
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import click
 import humanize
@@ -34,6 +34,7 @@ from .config import (
 )
 from .errors import IMAPError, OAuthError
 from .imap import IMAPConnection, test_account
+from .mailbox import validate_uid_locator
 from .models import (
     Action,
     Classification,
@@ -470,19 +471,38 @@ def _learn_subscription_policy(subscription: dict[str, Any], action_value: str) 
     get_learner().update_from_action(record)
 
 
-def _subscription_has_persisted_threat(subscription_id: int) -> bool:
-    """Return whether stored server evidence forbids contacting this sender."""
+def _persisted_threat_action(subscription_id: int) -> Action | None:
+    """Distinguish hard threats from conflicting Inbox/Junk folder evidence."""
+    junk = False
+    inbox = False
+    not_junk = False
     for message in db.list_message_refs(subscription_id=subscription_id, limit=100_000):
-        if message.get("mailbox_role") == "junk" or message.get("provider_verdict"):
-            return True
         try:
             flags = json.loads(message.get("flags_json") or "[]")
         except (TypeError, json.JSONDecodeError):
             flags = []
         normalized = {str(flag).casefold() for flag in flags}
-        if normalized & {"$junk", r"\junk", "$phishing", "spam", r"\spam"}:
-            return True
-    return False
+        verdict = str(message.get("provider_verdict") or "").casefold()
+        # "junk" is also synthesized from a message's folder/flags by the
+        # scanner; it is not an independent provider phishing verdict.
+        if (verdict and verdict != "junk") or "$phishing" in normalized:
+            return Action.BLOCK
+        is_junk = (
+            verdict == "junk"
+            or message.get("mailbox_role") == "junk"
+            or bool(normalized & {"$junk", r"\junk", "spam", r"\spam"})
+        )
+        junk |= is_junk
+        inbox |= message.get("mailbox_role") == "inbox" and not is_junk
+        not_junk |= bool(normalized & {"$notjunk", r"\notjunk", "notjunk", "$nonjunk"})
+    if junk:
+        return Action.REVIEW if inbox or not_junk else Action.BLOCK
+    return None
+
+
+def _subscription_has_persisted_threat(subscription_id: int) -> bool:
+    """Return whether stored server evidence forbids contacting this sender."""
+    return _persisted_threat_action(subscription_id) is not None
 
 
 def _matching_account(config: Config, headers: list[EmailHeader]) -> AccountConfig | None:
@@ -983,6 +1003,12 @@ def _move_persisted_subscription_to_junk(
             }
             for message in inbox_messages:
                 action_key = "move-to-junk-v1"
+                locator = MessageRef(
+                    message["account"],
+                    message["mailbox"],
+                    int(message["uidvalidity"]),
+                    int(message["uid"]),
+                )
                 previous = existing.get((message["id"], action_key))
                 if previous and previous["outcome"] in {
                     "moved",
@@ -995,14 +1021,20 @@ def _move_persisted_subscription_to_junk(
                     # COPY may already have placed this message in Junk. A
                     # non-retryable partial is durably terminal so a later run
                     # cannot create another destination copy.
+                    if previous["outcome"] == "partial":
+                        validation = validate_uid_locator(
+                            cast(Any, connection.conn), locator, readonly=True
+                        )
+                        if (
+                            validation.exact_search_completed
+                            and validation.selected_uidvalidity == locator.uidvalidity
+                            and not validation.uid_exists
+                            and db.reconcile_missing_mailbox_source(previous["id"])
+                        ):
+                            moved += 1
+                            continue
                     failed += 1
                     continue
-                locator = MessageRef(
-                    message["account"],
-                    message["mailbox"],
-                    int(message["uidvalidity"]),
-                    int(message["uid"]),
-                )
                 action_claim = db.record_mailbox_action(
                     subscription["id"],
                     message["id"],
@@ -1903,13 +1935,10 @@ def init(ctx):
         _run_scan(config, verbose=True, dry_run=True)
 
     console.print(
-        "\n[warning]Unsubscribe and mailbox-write automation are disabled until you "
-        "explicitly grant consent.[/warning]"
+        f"\nUnsubscribe automation: {'permitted' if config.permits_unsubscribe else 'revoked'}; "
+        f"mailbox writes: {'permitted' if config.permits_mailbox_mutation else 'revoked'}."
     )
-    console.print(
-        "Run [bold]nothx consent --all --yes[/bold] after reviewing the network and "
-        "mailbox-write permissions."
-    )
+    console.print("Run [bold]nothx consent[/bold] to inspect or change these permissions.")
 
     # Schedule setup. Daily scanning makes stored BLOCK policies effective on
     # new deliveries and permits complete post-grace verification.
@@ -2192,6 +2221,15 @@ def _run_scan(
         for err in scan_errors:
             console.print(f"[warning]! Skipped account: {err}[/warning]")
 
+    skipped_invalid = getattr(scan_result, "skipped_invalid_senders", 0)
+    if not isinstance(skipped_invalid, int):
+        skipped_invalid = 0
+    if skipped_invalid:
+        console.print(
+            f"[warning]! Left {skipped_invalid} messages with missing or invalid From "
+            "addresses unchanged; inspect them in your mail app.[/warning]"
+        )
+
     if not dry_run:
         verification_accounts = (
             {
@@ -2209,7 +2247,12 @@ def _run_scan(
         )
 
     if not sender_stats:
-        console.print("[success]✓ No marketing emails found.[/success]")
+        if scan_errors or skipped_invalid:
+            console.print(
+                "[warning]No processable messages found; see scan warnings above.[/warning]"
+            )
+        else:
+            console.print("[success]✓ No marketing emails found.[/success]")
         return
 
     stats.emails_scanned = sum(s.total_emails for s in sender_stats.values())
@@ -2278,14 +2321,21 @@ def _run_scan(
                 identity_kind=sender.identity_kind,
                 identity_value=sender.identity_value,
             )
-            if subscription is not None and _subscription_has_persisted_threat(subscription["id"]):
-                if not dry_run:
+            persisted_threat = (
+                _persisted_threat_action(subscription["id"]) if subscription is not None else None
+            )
+            if subscription is not None and persisted_threat is not None:
+                if not dry_run and persisted_threat is Action.BLOCK:
                     db.set_subscription_policy(subscription["id"], "block")
                 classifications[sender.classification_key] = Classification(
-                    email_type=EmailType.COLD_OUTREACH,
-                    action=Action.BLOCK,
+                    email_type=EmailType.UNKNOWN,
+                    action=persisted_threat,
                     confidence=1.0,
-                    reasoning=("Persisted Junk/phishing evidence requires local suppression"),
+                    reasoning=(
+                        "Stored Inbox/Junk conflict requires review"
+                        if persisted_threat is Action.REVIEW
+                        else "Persisted Junk/phishing evidence requires local suppression"
+                    ),
                     source="provider_policy",
                 )
                 continue
@@ -2313,7 +2363,7 @@ def _run_scan(
                 sender.provider_threat
                 or sender.phishing_emails
                 or (
-                    not sender.not_junk_emails
+                    not (sender.not_junk_emails or sender.inbox_emails > sender.junk_keyword_emails)
                     and (sender.junk_emails or sender.junk_keyword_emails)
                 )
             ):
@@ -2322,6 +2372,16 @@ def _run_scan(
                     action=Action.BLOCK,
                     confidence=1.0,
                     reasoning="Provider junk/phishing evidence requires local suppression",
+                    source="provider_policy",
+                )
+            elif (sender.junk_emails or sender.junk_keyword_emails) and (
+                sender.not_junk_emails or sender.inbox_emails > sender.junk_keyword_emails
+            ):
+                classifications[sender.classification_key] = Classification(
+                    email_type=EmailType.UNKNOWN,
+                    action=Action.REVIEW,
+                    confidence=0.5,
+                    reasoning="Conflicting Inbox/Junk evidence requires review without sender contact",
                     source="provider_policy",
                 )
             elif sender.authentication_failed_emails > sender.authenticated_emails:
@@ -2853,6 +2913,7 @@ def status(learning: bool):
 
     # Stats summary as columns
     stats = db.get_stats()
+    subscription_stats = db.get_subscription_stats()
     successful, failed = db.get_unsub_success_rate()
     total_unsub_attempts = successful + failed
     success_rate = (successful / total_unsub_attempts * 100) if total_unsub_attempts > 0 else 0
@@ -2863,8 +2924,19 @@ def status(learning: bool):
         (f"[count]{stats['kept']}[/count]", "Kept"),
         (f"[count]{success_rate:.0f}%[/count]", "Success"),
     ]
+    if subscription_stats["total"]:
+        panel_data = [
+            (f"[count]{subscription_stats['total']}[/count]", "Subscriptions"),
+            (f"[count]{subscription_stats['requested']}[/count]", "Requested"),
+            (f"[count]{subscription_stats['kept']}[/count]", "Kept"),
+            (f"[count]{subscription_stats['verified_quiet']}[/count]", "Quiet"),
+        ]
     stat_panels = [
-        Panel(f"{value}\n[muted]{label}[/muted]", width=14, border_style="#808080")
+        Panel(
+            f"{value}\n[muted]{label}[/muted]",
+            width=max(14, len(label) + 4),
+            border_style="#808080",
+        )
         for value, label in panel_data
     ]
     console.print(Columns(stat_panels, padding=(0, 1)))
@@ -2892,7 +2964,12 @@ def status(learning: bool):
             f"[error]{failed} failed[/error]"
         )
 
-    console.print(f"{_L} Pending review: [count]{stats['pending_review']}[/count]")
+    pending_review = (
+        subscription_stats["pending_review"]
+        if subscription_stats["total"]
+        else stats["pending_review"]
+    )
+    console.print(f"{_L} Pending review: [count]{pending_review}[/count]")
     console.print(f"{_L} Total runs: [count]{stats['total_runs']}[/count]")
 
     grouped = db.get_grouped_metrics()
@@ -3055,6 +3132,11 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 continue
             by_id[subscription["id"]] = subscription
         manual_subscriptions = list(by_id.values())
+        handled_manual_domains = {
+            subscription["sender_domain"].casefold()
+            for subscription in manual_subscriptions
+            if subscription.get("sender_domain")
+        }
 
     if manual_subscriptions:
         console.print(
@@ -3100,10 +3182,12 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
             choice = questionary.select(
                 f"{subscription['account']} · {identity}",
                 choices=choices,
+                default="skip",
                 **Q_COMMON,
             ).ask()
             if choice is None:
-                break
+                console.print(f"{_L} [muted]Cancelled[/muted]")
+                return
             if choice == "open":
                 click.get_current_context().invoke(
                     open_unsubscribe,
@@ -3181,6 +3265,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 questionary.Choice("Block - Block sender entirely", value="block"),
                 questionary.Choice("Skip - Decide later", value="skip"),
             ],
+            default="skip",
             **Q_COMMON,
         ).ask()
 
@@ -4072,11 +4157,12 @@ def export(type_: str, output: str):
 
 
 @main.command("test")
-def test_connection():
-    """Test email connection."""
+@click.option("--ai", "check_ai", is_flag=True, help="Also test the configured AI provider")
+def test_connection(check_ai: bool = False):
+    """Test email connections and optionally the configured AI provider."""
     config = Config.load()
 
-    if not config.accounts:
+    if not config.accounts and not check_ai:
         console.print("[error]No accounts configured. Run 'nothx init' first.[/error]")
         return
 
@@ -4115,6 +4201,31 @@ def test_connection():
                 for tip in tips:
                     console.print(f"{_L}{tip[1:]}" if tip.startswith("  ") else tip)
             console.print(f"{_L} • Make sure IMAP is enabled in your email settings")
+
+    if check_ai:
+        console.print(f"\n[header]Testing AI provider: {config.ai.provider}[/header]")
+        if not config.ai.enabled:
+            console.print(
+                "[warning]AI is disabled; scans currently use local heuristics.[/warning]"
+            )
+        with console.status("Testing AI connection...", spinner_style="#ffaf00"):
+            success, msg = test_ai_connection(config)
+        if success:
+            console.print(f"[success]✓ {msg}[/success]")
+            if not config.ai.enabled and config.ai.provider != "none":
+                console.print("Run [bold]nothx config --ai on[/bold] to enable this provider.")
+        else:
+            console.print(f"[error]✗ AI connection failed: {_redact_failure_detail(msg)}[/error]")
+            packages = {
+                "anthropic": "anthropic",
+                "openai": "openai",
+                "gemini": "google-generativeai",
+            }
+            if "not installed" in msg and config.ai.provider in packages:
+                console.print(
+                    f"For pipx installs, run [bold]pipx inject nothx {packages[config.ai.provider]}"
+                    "[/bold], then retry [bold]nothx test --ai[/bold]."
+                )
 
 
 # This exported Click command is imported by CLI tests; prevent pytest from

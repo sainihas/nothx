@@ -2236,6 +2236,25 @@ def list_mailbox_actions(
         return [dict(row) for row in rows]
 
 
+def reconcile_missing_mailbox_source(action_id: int) -> bool:
+    """Close a partial move after the caller proves its exact source UID absent.
+
+    This records observation only; it must never authorize replaying COPY or
+    MOVE. The caller must freshly verify the original UIDVALIDITY as well.
+    """
+    with get_db() as conn:
+        result = conn.execute(
+            """UPDATE mailbox_actions
+               SET outcome = 'not_found', error_code = NULL,
+                   detail_redacted = 'Source absence verified without replaying mailbox mutation',
+                   completed_at = ?
+               WHERE id = ? AND action = 'move_to_junk'
+                 AND outcome = 'partial' AND retryable = 0""",
+            (_iso_timestamp(), action_id),
+        )
+        return result.rowcount == 1
+
+
 def get_operation_metrics(
     *, account: str | None = None, since: datetime | str | None = None
 ) -> dict[str, int]:
@@ -2613,6 +2632,22 @@ def delete_rule(pattern: str) -> bool:
     with get_db() as conn:
         cursor = conn.execute("DELETE FROM rules WHERE pattern = ?", (pattern,))
         return cursor.rowcount > 0
+
+
+def get_subscription_stats() -> dict[str, int]:
+    """Count current account/list state rather than historical operation attempts."""
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS total,
+                COALESCE(SUM(policy_action = 'keep'), 0) AS kept,
+                COALESCE(SUM(last_outcome = 'requested'), 0) AS requested,
+                COALESCE(SUM(last_outcome = 'verified_quiet'), 0) AS verified_quiet,
+                COALESCE(SUM(policy_action = 'review' OR
+                    (last_outcome = 'needs_user' AND COALESCE(policy_action, '') NOT IN ('keep', 'block'))), 0)
+                    AS pending_review
+                FROM subscriptions"""
+        ).fetchone()
+        return {key: int(row[key]) for key in row.keys()}
 
 
 def get_stats() -> dict:

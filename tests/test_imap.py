@@ -118,3 +118,43 @@ class TestParseHeader:
         h2 = conn._parse_header(parse_message(raw_bad), is_seen=False)
         assert h1 is not None and h2 is not None
         assert sorted([h1.date, h2.date])  # raises TypeError if naive/aware mixed
+
+
+class TestHeaderDecoding:
+    def test_raw_utf8_headers_remain_text_and_keep_sender_identity(self):
+        msg = email.message_from_bytes(
+            "From: Caf\u00e9 <news@example.com>\r\nSubject: D\u00e9j\u00e0 vu\r\n\r\n".encode()
+        )
+        header = make_connection()._parse_header(msg, is_seen=False)
+        assert header is not None
+        assert isinstance(header.sender, str)
+        assert header.sender_address == "news@example.com"
+        assert header.subject == "D\u00e9j\u00e0 vu"
+
+    def test_unknown_encoded_word_charset_uses_text_fallback(self):
+        msg = parse_message(
+            "From: =?not-a-real-charset?Q?Caf=C3=A9?= <news@example.com>\r\n"
+            "Subject: =?not-a-real-charset?Q?D=C3=A9j=C3=A0_vu?=\r\n\r\n"
+        )
+        header = make_connection()._parse_header(msg, is_seen=False)
+        assert header is not None
+        assert header.sender == "Caf\u00e9 <news@example.com>"
+        assert header.sender_address == "news@example.com"
+        assert header.subject == "D\u00e9j\u00e0 vu"
+
+
+class TestAuthenticatedCapabilities:
+    def test_refreshes_greeting_cache_before_discovery_and_move(self):
+        client = MagicMock()
+        client.capabilities = ("IMAP4REV1", "AUTH=PLAIN")
+        client.capability.return_value = ("OK", [b"IMAP4rev1 MOVE UIDPLUS SPECIAL-USE X-GM-EXT-1"])
+        connection = IMAPConnection(AccountConfig("gmail", "me@example.com", "secret"))
+        with patch("nothx.imap.imaplib.IMAP4_SSL", return_value=client):
+            assert connection.connect()
+        assert "MOVE" in client.capabilities
+        assert "UIDPLUS" in client.capabilities
+        assert "SPECIAL-USE" in client.capabilities
+        assert connection._has_capability("X-GM-EXT-1")
+        assert client.method_calls[0][0] == "login"
+        assert client.method_calls[1][0] == "capability"
+        connection.disconnect()

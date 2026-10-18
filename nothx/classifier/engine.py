@@ -7,6 +7,7 @@ from ..config import Config
 from ..models import Action, Classification, EmailType, SenderStats
 from .ai import AIClassifier
 from .heuristics import (
+    OPERATIONAL_SUBJECT_PATTERNS,
     SAFE_SENDER_PATTERNS,
     SAFE_SUBJECT_PATTERNS,
     SPAM_SUBJECT_CASE_PATTERNS,
@@ -168,12 +169,14 @@ class ClassificationEngine:
                 reasoning="Mailbox provider classified this subscription as junk/phishing",
                 source="provider_policy",
             )
-        if sender.not_junk_emails and (sender.junk_emails or sender.junk_keyword_emails):
+        if (sender.not_junk_emails or sender.inbox_emails > sender.junk_keyword_emails) and (
+            sender.junk_emails or sender.junk_keyword_emails
+        ):
             return Classification(
                 email_type=EmailType.UNKNOWN,
                 action=Action.REVIEW,
                 confidence=0.5,
-                reasoning="Mailbox has conflicting Junk and NotJunk verdicts",
+                reasoning="Mailbox has conflicting Junk and Inbox/NotJunk evidence",
                 source="provider_policy",
             )
         if sender.junk_emails or sender.junk_keyword_emails:
@@ -245,6 +248,21 @@ class ClassificationEngine:
         subjects = [subject for subject in sender.sample_subjects if subject.strip()]
         if not subjects:
             return None
+        # Repository notifications and infrastructure alerts often contain
+        # uppercase tokens, bulk headers and unsubscribe links. Those facts
+        # must not turn operational mail into an automatic opt-out or block.
+        operational = [
+            any(pattern.search(subject) for pattern in OPERATIONAL_SUBJECT_PATTERNS)
+            for subject in subjects
+        ]
+        if any(operational):
+            return Classification(
+                email_type=EmailType.TRANSACTIONAL,
+                action=Action.REVIEW,
+                confidence=0.9,
+                reasoning="Operational notifications require review before suppression",
+                source="transactional_policy",
+            )
         safe_subjects = [
             any(pattern.search(subject) for pattern in SAFE_SUBJECT_PATTERNS)
             for subject in subjects

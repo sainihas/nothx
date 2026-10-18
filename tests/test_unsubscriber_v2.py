@@ -939,3 +939,25 @@ class TestMailtoHardening:
         assert all(instance.closed for instance in instances)
         assert instances[1].initial_response_ok is True
         assert "fresh-token" in instances[1].response
+
+
+@pytest.mark.parametrize("one_click", [False, True])
+def test_redirect_loop_needs_user_and_never_replays_another_endpoint(monkeypatch, one_click):
+    calls = []
+
+    def looping_fetch(url, **kwargs):
+        calls.append(url)
+        raise unsubscriber.RedirectLimitError("Too many redirects (>5)")
+
+    monkeypatch.setattr(unsubscriber, "safe_fetch", looping_fetch)
+    item = header(one_click=one_click, can_unsubscribe=True)
+    item.list_unsubscribe += ", <https://mailer.example/alternate>"
+    if one_click:
+        item.list_unsubscribe = "<https://mailer.example/unsubscribe/token>"
+    older = header("https://mailer.example/older", days=-1)
+    result = unsubscriber.unsubscribe_subscription([item, older], consented_config())
+    assert result.outcome is UnsubscribeOutcome.NEEDS_USER
+    assert result.needs_confirmation
+    assert result.attempt_results[0].error_code == "redirect_limit"
+    assert result.attempt_results[0].ambiguous_send
+    assert len(calls) == 1

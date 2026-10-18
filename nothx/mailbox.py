@@ -379,7 +379,9 @@ def _capabilities(client: IMAPMailboxClient) -> frozenset[str]:
     )
 
 
-def validate_uid_locator(client: IMAPMailboxClient, locator: MessageRef) -> UIDValidation:
+def validate_uid_locator(
+    client: IMAPMailboxClient, locator: MessageRef, *, readonly: bool = False
+) -> UIDValidation:
     """Reselect read-write and prove that a UID still belongs to this mailbox."""
     if locator.uid <= 0 or locator.uidvalidity <= 0:
         return UIDValidation(False, None, False, error="UID and UIDVALIDITY must be positive")
@@ -388,7 +390,7 @@ def validate_uid_locator(client: IMAPMailboxClient, locator: MessageRef) -> UIDV
     except ValueError as exc:
         return UIDValidation(False, None, False, error=str(exc))
 
-    status, _ = client.select(source, readonly=False)
+    status, _ = client.select(source, readonly=readonly)
     if not _is_ok(status):
         return UIDValidation(False, None, False, error="source mailbox is not writable")
 

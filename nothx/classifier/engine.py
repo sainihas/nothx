@@ -7,6 +7,7 @@ from ..config import Config
 from ..models import Action, Classification, EmailType, SenderStats
 from .ai import AIClassifier
 from .heuristics import (
+    OPERATIONAL_SUBJECT_PATTERNS,
     SAFE_SENDER_PATTERNS,
     SAFE_SUBJECT_PATTERNS,
     SPAM_SUBJECT_CASE_PATTERNS,
@@ -69,6 +70,10 @@ class ClassificationEngine:
             return result
 
         result = self._authentication_precheck(sender)
+        if result:
+            return result
+
+        result = self._operational_precheck(sender)
         if result:
             return result
 
@@ -168,12 +173,12 @@ class ClassificationEngine:
                 reasoning="Mailbox provider classified this subscription as junk/phishing",
                 source="provider_policy",
             )
-        if sender.not_junk_emails and (sender.junk_emails or sender.junk_keyword_emails):
+        if sender.has_junk_conflict:
             return Classification(
                 email_type=EmailType.UNKNOWN,
                 action=Action.REVIEW,
                 confidence=0.5,
-                reasoning="Mailbox has conflicting Junk and NotJunk verdicts",
+                reasoning="Mailbox has conflicting Junk and Inbox/NotJunk evidence",
                 source="provider_policy",
             )
         if sender.junk_emails or sender.junk_keyword_emails:
@@ -231,6 +236,21 @@ class ClassificationEngine:
             and result.email_type is EmailType.COLD_OUTREACH
         ):
             return result
+        return None
+
+    def _operational_precheck(self, sender: SenderStats) -> Classification | None:
+        if any(
+            pattern.search(subject)
+            for subject in sender.sample_subjects
+            for pattern in OPERATIONAL_SUBJECT_PATTERNS
+        ):
+            return Classification(
+                email_type=EmailType.TRANSACTIONAL,
+                action=Action.REVIEW,
+                confidence=0.9,
+                reasoning="Operational notifications require review before suppression",
+                source="transactional_policy",
+            )
         return None
 
     def _transactional_precheck(self, sender: SenderStats) -> Classification | None:
@@ -439,6 +459,13 @@ class ClassificationEngine:
                 results[sender.classification_key] = result
                 source_counts.setdefault("auth_policy", 0)
                 source_counts["auth_policy"] += 1
+                continue
+
+            result = self._operational_precheck(sender)
+            if result:
+                results[sender.classification_key] = result
+                source_counts.setdefault("transactional_policy", 0)
+                source_counts["transactional_policy"] += 1
                 continue
 
             result = self._cold_outreach_precheck(sender)

@@ -400,3 +400,32 @@ def test_unaligned_dkim_cannot_authorize_footer_body_fetch(database: Path) -> No
         scan_inbox(config, persist=False)
 
     conn.fetch_footer_candidates.assert_not_called()
+
+
+@pytest.mark.parametrize("persist", [False, True])
+@pytest.mark.parametrize(
+    "bad_sender", ["", "not an address", "@example.com", '"space here"@example.com']
+)
+@pytest.mark.parametrize("bad_list_id", [None, "<valid.list.example>"])
+def test_invalid_sender_cannot_abort_or_poison_other_messages(
+    database: Path, persist: bool, bad_sender: str, bad_list_id: str | None
+) -> None:
+    del database
+    valid = header(1)
+    invalid = header(2, sender=bad_sender, list_id=bad_list_id)
+    conn = fake_connection({"INBOX": [valid, invalid]})
+    config = Config(accounts={"main": AccountConfig("gmail", "me@example.com", "pw")})
+
+    with patch("nothx.scanner.IMAPConnection", return_value=conn):
+        result = scan_inbox(config, persist=persist)
+
+    assert result.skipped_invalid_senders == 1
+    assert list(result.domain_emails) == ["letters.example"]
+    assert sum(s.total_emails for s in result.subscription_stats.values()) == 1
+    if persist:
+        assert len(db.list_subscriptions()) == 1
+        state = db.get_mailbox_state("me@example.com", "INBOX")
+        assert state["last_uid"] == 2
+    else:
+        assert db.list_subscriptions() == []
+        assert db.get_mailbox_state("me@example.com", "INBOX") is None

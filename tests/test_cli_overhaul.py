@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import imaplib
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -39,7 +40,7 @@ from nothx.config import (
     AccountConfig,
     Config,
 )
-from nothx.mailbox import MailboxActionResult, MailboxDiscovery
+from nothx.mailbox import MailboxActionResult, MailboxDiscovery, UIDValidation
 from nothx.models import (
     Action,
     Classification,
@@ -392,7 +393,10 @@ def test_nonretryable_partial_mailbox_action_is_not_copied_again(configured_cli)
         error="copied but source remains",
     )
 
-    with patch("nothx.cli.IMAPConnection", return_value=connection):
+    with (
+        patch("nothx.cli.IMAPConnection", return_value=connection),
+        patch("nothx.cli.validate_uid_locator", return_value=UIDValidation(True, 44, True)),
+    ):
         assert _block_subscription(config, sender, headers, classification) == (0, 1)
         assert _block_subscription(config, sender, headers, classification) == (0, 1)
 
@@ -401,6 +405,32 @@ def test_nonretryable_partial_mailbox_action_is_not_copied_again(configured_cli)
     assert len(actions) == 1
     assert actions[0]["outcome"] == "partial"
     assert actions[0]["retryable"] == 0
+
+    with (
+        patch("nothx.cli.IMAPConnection", return_value=connection),
+        patch("nothx.cli.validate_uid_locator", return_value=UIDValidation(False, 99, False)),
+    ):
+        assert _block_subscription(config, sender, headers, classification) == (0, 1)
+    assert db.list_mailbox_actions()[0]["outcome"] == "partial"
+
+    with (
+        patch("nothx.cli.IMAPConnection", return_value=connection),
+        patch("nothx.cli.validate_uid_locator", side_effect=imaplib.IMAP4.abort("disconnected")),
+    ):
+        assert _block_subscription(config, sender, headers, classification) == (0, 1)
+    assert db.list_mailbox_actions()[0]["outcome"] == "partial"
+
+    with (
+        patch("nothx.cli.IMAPConnection", return_value=connection),
+        patch(
+            "nothx.cli.validate_uid_locator",
+            return_value=UIDValidation(False, 44, False, exact_search_completed=True),
+        ) as validate,
+    ):
+        assert _block_subscription(config, sender, headers, classification) == (1, 0)
+    assert validate.call_args.kwargs["readonly"] is True
+    assert connection.move_message_to_junk.call_count == 1
+    assert db.list_mailbox_actions()[0]["outcome"] == "not_found"
 
 
 def test_block_moves_all_persisted_inbox_refs_not_only_current_scan(configured_cli):
@@ -574,6 +604,7 @@ def test_provider_junk_overrides_explicit_unsubscribe_rule(configured_cli):
     scan_result, classifications = _subscription_scan(Action.UNSUB)
     sender = next(iter(scan_result.subscription_stats.values()))
     sender.junk_keyword_emails = 1
+    sender.clean_inbox_emails = 0
     engine = MagicMock()
     engine.classify_batch.return_value = classifications
     with (
@@ -616,6 +647,8 @@ def test_active_unsubscribe_policy_cannot_be_reclassified_to_keep(configured_cli
     config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
     config.save()
     scan_result, classifications = _subscription_scan(Action.KEEP)
+    for classification in classifications.values():
+        classification.source = "heuristics"
     sender = next(iter(scan_result.subscription_stats.values()))
     db.upsert_subscription(
         sender.account_key,
@@ -1426,3 +1459,290 @@ class TestConsentParkedBlockDrain:
         assert result.exit_code == 0, result.output
         assert "need manual action" not in result.output
         assert "nothx review --apply-pending" in result.output
+
+
+def test_invalid_sender_warning_is_visible_without_false_success(configured_cli):
+    runner, _config = configured_cli
+    empty = ScanResult({}, {}, {}, {}, skipped_invalid_senders=2)
+    with patch("nothx.cli.scan_inbox", return_value=empty):
+        result = runner.invoke(run, ["--dry-run", "--auto"])
+    assert result.exit_code == 0
+    assert "Left 2 messages" in result.output
+    assert "inspect them in your mail app" in " ".join(result.output.split())
+    assert "No marketing emails found" not in result.output
+
+
+def test_persisted_folder_conflict_is_reviewed_and_never_contacted(configured_cli):
+    from nothx.cli import _persisted_threat_action, _subscription_has_persisted_threat
+
+    runner, _config = configured_cli
+    scan, classifications = _subscription_scan(Action.UNSUB)
+    key, stats = next(iter(scan.subscription_stats.items()))
+    headers = scan.get_emails_for_subscription(key)
+    subscription, _ = _persist_subscription_records(stats, headers, classifications[key])
+    junk_header = EmailHeader(
+        sender=headers[0].sender,
+        subject="Offer",
+        date=headers[0].date,
+        message_id="<junk@example>",
+        list_id=headers[0].list_id,
+        account_key=headers[0].account_key,
+        mailbox_name="Junk",
+        mailbox_role="junk",
+        uidvalidity=45,
+        uid=2,
+    )
+    _persist_subscription_records(stats, [junk_header], classifications[key])
+    assert _subscription_has_persisted_threat(subscription["id"])
+    assert _persisted_threat_action(subscription["id"]) is Action.REVIEW
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classifications),
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+        patch("nothx.cli._block_subscription") as block,
+    ):
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert "1 need review" in result.output
+    unsub.assert_not_called()
+    block.assert_not_called()
+
+
+def test_ai_diagnostics_explain_disabled_provider_and_pipx_recovery(configured_cli):
+    from nothx.cli import test_connection
+
+    runner, config = configured_cli
+    config.ai.enabled = False
+    config.ai.provider = "anthropic"
+    config.save()
+    with (
+        patch("nothx.cli.test_account", return_value=(True, "ok")),
+        patch("nothx.cli.test_ai_connection", return_value=(False, "Anthropic SDK not installed")),
+    ):
+        result = runner.invoke(test_connection, ["--ai"])
+    assert result.exit_code == 0
+    output = " ".join(result.output.split())
+    assert "AI is disabled" in output
+    assert "pipx inject nothx anthropic" in output
+    assert "nothx test --ai" in output
+
+
+@pytest.mark.parametrize("choice", [None, "skip"])
+def test_manual_review_cancel_or_skip_never_falls_into_same_domain_legacy_prompt(
+    configured_cli, choice
+):
+    runner, _config = configured_cli
+    db.upsert_subscription(
+        "user@example.com",
+        "from",
+        "notice@sender.example",
+        sender_domain="sender.example",
+        policy_action="review",
+    )
+    db.upsert_sender("sender.example", 4, 0, ["Notification"], True)
+    with patch("nothx.cli.questionary.select") as select:
+        select.return_value.ask.return_value = choice
+        result = runner.invoke(review, [])
+    assert result.exit_code == 0, result.output
+    assert select.call_count == 1
+    assert select.call_args.kwargs["default"] == "skip"
+
+
+def test_status_uses_current_subscription_outcomes_instead_of_legacy_success(configured_cli):
+    from nothx.cli import status
+
+    runner, _config = configured_cli
+    sub = db.upsert_subscription(
+        "user@example.com", "from", "offers@sender.example", policy_action="unsub"
+    )
+    operation = db.get_or_create_unsubscribe_operation(sub["id"], "accepted-test")
+    db.update_unsubscribe_operation_outcome(operation["id"], "requested")
+    db.upsert_subscription(
+        "user@example.com", "from", "alerts@sender.example", policy_action="review"
+    )
+    result = runner.invoke(status, [])
+    assert result.exit_code == 0, result.output
+    assert "Subscriptions" in result.output
+    assert "Requested" in result.output
+    assert "Pending review: 1" in result.output
+    assert "Unsubbed" not in result.output
+    assert db.get_subscription_stats() == {
+        "total": 2,
+        "kept": 0,
+        "requested": 1,
+        "verified_quiet": 0,
+        "pending_review": 1,
+    }
+
+
+@pytest.mark.parametrize("policy", ["keep", "block"])
+def test_explicit_policy_survives_moved_junk_and_new_inbox_delivery(configured_cli, policy):
+    runner, config = configured_cli
+    first_scan, initial = _subscription_scan(Action.REVIEW)
+    key, stats = next(iter(first_scan.subscription_stats.items()))
+    original = first_scan.get_emails_for_subscription(key)[0]
+    subscription, _ = _persist_subscription_records(stats, [original], initial[key])
+    db.set_subscription_policy(subscription["id"], policy)
+    junk_header = EmailHeader(
+        original.sender,
+        "Offer",
+        original.date,
+        "<moved>",
+        list_id=original.list_id,
+        account_key=original.account_key,
+        mailbox_name="Junk",
+        mailbox_role="junk",
+        uidvalidity=45,
+        uid=2,
+    )
+    _persist_subscription_records(stats, [junk_header], initial[key])
+    later = EmailHeader(
+        original.sender,
+        "Offer",
+        original.date,
+        "<later>",
+        list_id=original.list_id,
+        account_key=original.account_key,
+        account_name="default",
+        uidvalidity=44,
+        uid=102,
+    )
+    new_stats = _stats_for_emails(later.domain, [later])
+    scan = ScanResult(
+        {later.domain: new_stats},
+        {later.domain: [later]},
+        {key: new_stats},
+        {key: [later]},
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=initial),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert block.call_count == (1 if policy == "block" else 0)
+    unsub.assert_not_called()
+    stored = db.get_subscription(subscription["id"])
+    assert stored["policy_action"] == policy
+    assert stored["policy_source"] == "manual"
+
+
+@pytest.mark.parametrize("origin", ["saved", "rule"])
+def test_dominant_trusted_auth_failure_wins_over_explicit_keep(configured_cli, origin):
+    runner, _config = configured_cli
+    scan, classes = _subscription_scan(Action.KEEP)
+    key, stats = next(iter(scan.subscription_stats.items()))
+    if origin == "saved":
+        sub, _ = _persist_subscription_records(
+            stats, scan.get_emails_for_subscription(key), classes[key]
+        )
+        db.set_subscription_policy(sub["id"], "keep")
+        classes[key] = Classification(
+            EmailType.UNKNOWN, Action.BLOCK, 1.0, "Failed auth", "auth_policy"
+        )
+    stats.authenticated_emails = 0
+    stats.authentication_failed_emails = 4
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    block.assert_called_once()
+    unsub.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "initial_action,choice", [(Action.UNSUB, "keep"), (Action.KEEP, "keep"), (Action.KEEP, "block")]
+)
+def test_interactive_scan_choices_remain_manual_after_new_junk_evidence(
+    configured_cli, initial_action, choice
+):
+    runner, _config = configured_cli
+    scan, classes = _subscription_scan(initial_action)
+    key, stats = next(iter(scan.subscription_stats.items()))
+    original = scan.get_emails_for_subscription(key)[0]
+    classes[key].source = "ai"
+    if choice == "block":
+        stats.has_unsubscribe = False
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._styled_confirm", return_value=True),
+        patch("nothx.cli.questionary.select") as select,
+        patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(1, 0)),
+    ):
+        select.return_value.ask.return_value = choice
+        first = runner.invoke(run, [])
+    assert first.exit_code == 0, first.output
+    assert select.call_count == 1
+    sub = db.get_subscription(
+        account=stats.account_key,
+        identity_kind=stats.identity_kind,
+        identity_value=stats.identity_value,
+    )
+    assert sub["policy_action"] == choice
+    assert sub["policy_source"] == "manual"
+    assert sub["ai_recommended_action"] == initial_action.value
+    junk = EmailHeader(
+        original.sender,
+        "Offer",
+        original.date,
+        "<moved-junk>",
+        list_id=original.list_id,
+        account_key=original.account_key,
+        mailbox_name="Junk",
+        mailbox_role="junk",
+        uidvalidity=45,
+        uid=2,
+    )
+    _persist_subscription_records(stats, [junk], classes[key])
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        second = runner.invoke(run, ["--auto"])
+    assert second.exit_code == 0, second.output
+    assert block.call_count == (1 if choice == "block" else 0)
+    unsub.assert_not_called()
+    assert db.get_subscription(sub["id"])["policy_action"] == choice
+    assert db.get_subscription(sub["id"])["policy_source"] == "manual"
+
+
+def test_interactive_unsubscribe_retry_escalation_is_automatic_not_manual_block(configured_cli):
+    runner, _config = configured_cli
+    scan, classes = _subscription_scan(Action.UNSUB)
+    key, stats = next(iter(scan.subscription_stats.items()))
+    original = scan.get_emails_for_subscription(key)[0]
+    now = datetime.now(UTC)
+    original.received_at = now
+    classes[key].source = "ai"
+    sub, _ = _persist_subscription_records(stats, [original], classes[key])
+    op = db.get_or_create_unsubscribe_operation(sub["id"], "failed-final-retry", retry_generation=1)
+    db.update_unsubscribe_operation_outcome(
+        op["id"], "failed", completed_at=now - timedelta(hours=1)
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._styled_confirm", return_value=True),
+        patch("nothx.cli.questionary.select") as select,
+        patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(1, 0)) as move,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        select.return_value.ask.return_value = "unsub"
+        result = runner.invoke(run, [])
+    assert result.exit_code == 0, result.output
+    move.assert_called_once()
+    unsub.assert_not_called()
+    stored = db.get_subscription(sub["id"])
+    assert stored["policy_action"] == "block"
+    assert stored["policy_source"] == "automatic"
+    assert stored["classification_source"] == "retry_policy"
+    assert stored["ai_recommended_action"] == "unsub"

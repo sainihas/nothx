@@ -475,3 +475,79 @@ def test_policy_transformation_preserves_original_ai_recommendation(policy_engin
     assert result.action is Action.REVIEW
     assert result.recommended_action is Action.UNSUB
     assert result.original_source == "ai"
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize(
+    "subjects",
+    [
+        ["50% of budget reached", "90% of budget reached"],
+        ["[Action Required] Renew test API credentials"],
+        ["Re: [example/project] Routine update (PR #123)", "[example/project] PR run failed: CI"],
+        ["Re: [example/project] Quick question (PR #123)"],
+    ],
+)
+def test_operational_notifications_are_never_automatically_suppressed(
+    policy_engine, batch, subjects
+):
+    sender = SenderStats(
+        domain="service.example",
+        total_emails=10,
+        sample_subjects=subjects,
+        sample_senders=["notifications@service.example"],
+        has_unsubscribe=True,
+        bulk_precedence=True,
+        authenticated_emails=10,
+    )
+    policy_engine.ai.is_available = Mock(return_value=True)
+    policy_engine.ai.classify_single = Mock()
+    policy_engine.ai.classify_batch = Mock()
+    result = (
+        policy_engine.classify_batch([sender])[sender.classification_key]
+        if batch
+        else policy_engine.classify(sender)
+    )
+    assert result.action is Action.REVIEW
+    assert result.source == "transactional_policy"
+    policy_engine.ai.classify_single.assert_not_called()
+    policy_engine.ai.classify_batch.assert_not_called()
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_mixed_inbox_and_junk_requires_review_without_explicit_threat(policy_engine, batch):
+    sender = SenderStats(
+        domain="service.example",
+        total_emails=5,
+        inbox_emails=1,
+        clean_inbox_emails=1,
+        junk_emails=4,
+        authenticated_emails=5,
+    )
+    result = (
+        policy_engine.classify_batch([sender])[sender.classification_key]
+        if batch
+        else policy_engine.classify(sender)
+    )
+    assert result.action is Action.REVIEW
+    sender.provider_threat = "PHSH"
+    assert policy_engine.classify(sender).action is Action.BLOCK
+
+
+@pytest.mark.parametrize("junk_count", [1, 3])
+def test_real_header_aggregation_preserves_clean_inbox_conflict(policy_engine, junk_count):
+    headers = [EmailHeader("news@sender.example", "Offer", datetime.now(UTC), "<inbox>")]
+    headers.extend(
+        EmailHeader(
+            "news@sender.example",
+            "Offer",
+            datetime.now(UTC),
+            f"<junk-{i}>",
+            mailbox_role="junk",
+        )
+        for i in range(junk_count)
+    )
+    stats = _stats_for_emails("sender.example", headers)
+    assert stats.clean_inbox_emails == 1
+    assert stats.junk_keyword_emails == junk_count
+    assert stats.has_junk_conflict
+    assert policy_engine.classify(stats).action is Action.REVIEW

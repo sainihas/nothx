@@ -394,7 +394,8 @@ def _stats_for_emails(
         identity_value=identity.value if identity else None,
         inbox_emails=sum(header.mailbox_role == "inbox" for header in emails),
         clean_inbox_emails=sum(
-            header.mailbox_role == "inbox" and not header.server_junk for header in emails
+            header.mailbox_role == "inbox" and not header.server_junk and not header.server_phishing
+            for header in emails
         ),
         junk_emails=sum(header.mailbox_role == "junk" for header in emails),
         junk_keyword_emails=sum(header.server_junk for header in emails),

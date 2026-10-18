@@ -176,6 +176,15 @@ class ClassificationEngine:
 
     def _threat_precheck(self, sender: SenderStats) -> Classification | None:
         """Short-circuit provider-vetted junk/phishing without contacting it."""
+        if sender.has_threat_conflict:
+            return Classification(
+                email_type=EmailType.UNKNOWN,
+                action=Action.REVIEW,
+                confidence=0.5,
+                reasoning="Threat flags affect only part of this sender group; "
+                "inspect flagged messages individually before suppressing the sender",
+                source="provider_policy",
+            )
         if sender.provider_threat or sender.phishing_emails:
             return Classification(
                 email_type=EmailType.COLD_OUTREACH,
@@ -204,18 +213,15 @@ class ClassificationEngine:
 
     def _authentication_precheck(self, sender: SenderStats) -> Classification | None:
         """Keep strong trusted authentication failures out of AI and link paths."""
-        # A spoof or broken forward must not poison an otherwise authenticated
-        # From-grouped subscription. Treat strong failures as subscription-wide
-        # block evidence only when they outnumber authenticated deliveries.
-        if sender.authentication_failed_emails > sender.authenticated_emails:
+        if sender.authentication_failed_emails >= sender.total_emails > 0:
             return Classification(
                 email_type=EmailType.UNKNOWN,
                 action=Action.BLOCK,
                 confidence=0.95,
-                reasoning="Trusted authentication failures dominate authenticated deliveries",
+                reasoning="Every observed delivery has a trusted authentication failure",
                 source="auth_policy",
             )
-        if sender.authentication_failed_emails and sender.authenticated_emails:
+        if sender.authentication_failed_emails:
             return Classification(
                 email_type=EmailType.UNKNOWN,
                 action=Action.REVIEW,
@@ -246,7 +252,7 @@ class ClassificationEngine:
             and result.action is Action.BLOCK
             and result.email_type is EmailType.COLD_OUTREACH
         ):
-            return result
+            return self._apply_action_policy(sender, result)
         return None
 
     def _operational_precheck(self, sender: SenderStats) -> Classification | None:
@@ -404,10 +410,15 @@ class ClassificationEngine:
                 original_source=classification.original_source or classification.source,
             )
         if (
-            self.config.review_engaged_marketing
-            and classification.source != "user_rule"
+            classification.source != "user_rule"
             and classification.action in (Action.UNSUB, Action.BLOCK)
-            and classification.email_type in (EmailType.MARKETING, EmailType.NEWSLETTER)
+            and (
+                classification.email_type is EmailType.COLD_OUTREACH
+                or (
+                    self.config.review_engaged_marketing
+                    and classification.email_type in (EmailType.MARKETING, EmailType.NEWSLETTER)
+                )
+            )
             and sender.open_rate >= 25
         ):
             return Classification(

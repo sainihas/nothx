@@ -114,7 +114,7 @@ Email arrives in Inbox or Junk
 └─────────────────┘
 ```
 
-Provider threat evidence and explicit block rules are resolved before AI. Bulk mail is not automatically spam, and an unsubscribe link is not automatically safe.
+Provider threat evidence and explicit block rules are resolved before AI. Mixed clean/threat or pass/fail evidence requires review; one flagged message never authorizes suppressing the whole sender group. Bulk mail is not automatically spam, and an unsubscribe link is not automatically safe.
 
 ---
 
@@ -275,7 +275,7 @@ unsubscribe email.
 
 - Inbox and the unambiguously advertised IMAP `\Junk` mailbox are scanned. nothx does not guess localized Junk folder names; configure an override if your server advertises none or several.
 - Ordinary runs repeat the configured lookback (30 days by default), so earlier undecided mail is reclassified after AI or policy changes. `--new-only` explicitly uses `(account, mailbox, UIDVALIDITY, UID)` cursors. Full history is explicit: `cleanup` includes only Inbox, while `run --full-history` also includes configured folders.
-- Marketing/newsletters with at least 25% of messages marked read require review by default. Read flags are imperfect evidence of preference, so they never force KEEP. Choose `nothx config --engaged-marketing allow` to permit automatic actions on clear promotions even when read; explicit keep/block choices still win.
+- Marketing/newsletters with at least 25% of messages marked read require review by default. Engaged cold outreach also requires review. Read flags are imperfect evidence of preference, so they never force KEEP. Choose `nothx config --engaged-marketing allow` to permit automatic actions on clear promotions even when read; explicit keep/block choices still win.
 - Every scan reports mailbox size, selected headers, headers read, and scope. A small incremental result describes new mail, not a clean Inbox. Junk messages already outside Inbox are reported separately from Inbox messages to move.
 - Cleanup previews list every unsubscribe/block candidate with its account/list identity and recent subjects. Unsubscribe requests stop future deliveries when honored; existing marketing messages remain in Inbox. Block actions move matching messages to Junk. Preview uses configured AI only when enabled; `--dry-run` remains local.
 - Body fetching is disabled by default. The optional footer scanner examines at most two inline text tails (64 KiB each, 128 KiB total) for authenticated list/bulk candidates. It skips attachments, nested messages, images, scripts, and forms.

@@ -386,7 +386,7 @@ def test_authenticated_messages_outweigh_one_authentication_failure(policy_engin
     policy_engine.ai.classify_single.assert_not_called()
 
 
-def test_dominant_authentication_failures_still_block(policy_engine):
+def test_dominant_authentication_failures_cannot_condemn_authenticated_mail(policy_engine):
     sender = SenderStats(
         domain="spoofed.example",
         total_emails=3,
@@ -396,7 +396,7 @@ def test_dominant_authentication_failures_still_block(policy_engine):
 
     result = policy_engine.classify(sender)
 
-    assert result.action is Action.BLOCK
+    assert result.action is Action.REVIEW
     assert result.source == "auth_policy"
 
 
@@ -532,7 +532,9 @@ def test_mixed_inbox_and_junk_requires_review_without_explicit_threat(policy_eng
         else policy_engine.classify(sender)
     )
     assert result.action is Action.REVIEW
-    sender.provider_threat = "PHSH"
+    sender.provider_threat = True
+    assert policy_engine.classify(sender).action is Action.REVIEW
+    sender.clean_inbox_emails = 0
     assert policy_engine.classify(sender).action is Action.BLOCK
 
 
@@ -661,3 +663,50 @@ def test_engaged_marketing_requires_preference_review_unless_enabled(policy_engi
     policy_engine.config.review_engaged_marketing = True
     recommendation.source = "user_rule"
     assert policy_engine._apply_action_policy(sender, recommendation).action is action
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_one_flagged_security_message_cannot_block_the_clean_sender_group(policy_engine, batch):
+    sender = SenderStats(
+        domain="security.example",
+        total_emails=12,
+        inbox_emails=12,
+        clean_inbox_emails=11,
+        phishing_emails=1,
+        authenticated_emails=12,
+        sample_subjects=["Security settings changed"],
+    )
+    result = (
+        policy_engine.classify_batch([sender])[sender.classification_key]
+        if batch
+        else policy_engine.classify(sender)
+    )
+    assert result.action is Action.REVIEW
+    assert result.source == "provider_policy"
+
+
+@pytest.mark.parametrize("known_passes", [0, 1])
+def test_failed_authentication_mixed_with_pass_or_unknown_is_reviewed(policy_engine, known_passes):
+    sender = SenderStats(
+        domain="letters.example",
+        total_emails=10,
+        authenticated_emails=known_passes,
+        authentication_failed_emails=3,
+        authentication_unknown_emails=7 - known_passes,
+    )
+    assert policy_engine.classify(sender).action is Action.REVIEW
+    sender.authentication_failed_emails = 10
+    sender.authenticated_emails = sender.authentication_unknown_emails = 0
+    assert policy_engine.classify(sender).action is Action.BLOCK
+
+
+def test_engaged_cold_outreach_still_needs_review_when_promotions_are_allowed(policy_engine):
+    sender = SenderStats(
+        domain="letters.example",
+        total_emails=5,
+        seen_emails=5,
+        authenticated_emails=5,
+        sample_subjects=["Following up about a meeting"],
+    )
+    policy_engine.config.review_engaged_marketing = False
+    assert policy_engine.classify(sender).action is Action.REVIEW

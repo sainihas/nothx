@@ -1947,6 +1947,8 @@ def test_fresh_inbox_evidence_conflicts_with_stored_junk_in_preview(configured_c
     assert _persisted_threat_action(subscription["id"]) is Action.BLOCK
     assert _persisted_threat_action(subscription["id"], sender=sender) is Action.REVIEW
     sender.provider_threat = True
+    assert _persisted_threat_action(subscription["id"], sender=sender) is Action.REVIEW
+    sender.clean_inbox_emails = 0
     assert _persisted_threat_action(subscription["id"], sender=sender) is Action.BLOCK
 
 
@@ -2031,3 +2033,37 @@ def test_engaged_marketing_preference_is_saved(configured_cli):
     assert Config.load().review_engaged_marketing is False
     runner.invoke(config_cmd, ["--engaged-marketing", "review"])
     assert Config.load().review_engaged_marketing is True
+
+
+@pytest.mark.parametrize("threat", ["phishing", "auth_failure"])
+def test_automatic_block_executor_cannot_move_clean_mail_because_of_one_threat_flag(
+    configured_cli, threat
+):
+    from dataclasses import replace
+
+    runner, config = configured_cli
+    del runner
+    scan_result, classifications = _subscription_scan(Action.BLOCK)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    clean = next(iter(scan_result.subscription_emails.values()))[0]
+    flagged = replace(clean, uid=102, keywords=("$Phishing",))
+    if threat == "auth_failure":
+        from nothx.models import AuthenticationEvidence, AuthResult
+
+        flagged = replace(
+            clean,
+            uid=102,
+            authentication=AuthenticationEvidence(
+                trusted=True, spf=AuthResult.FAIL, dkim=AuthResult.FAIL, dmarc=AuthResult.FAIL
+            ),
+        )
+    classification = classifications[sender.classification_key]
+    classification.source = "provider_policy"
+    with patch("nothx.cli.IMAPConnection") as connection:
+        moved, failed = _block_subscription(config, sender, [clean, flagged], classification)
+    assert moved == 0
+    assert failed == 2
+    connection.assert_not_called()
+    subscription = db.list_subscriptions()[0]
+    assert subscription["policy_action"] == "review"
+    assert subscription["last_outcome"] == "needs_user"

@@ -492,8 +492,12 @@ def _persisted_threat_action(
     subscription_id: int, *, folder_evidence: bool = True, sender: SenderStats | None = None
 ) -> Action | None:
     """Distinguish hard threats from conflicting Inbox/Junk folder evidence."""
-    if sender is not None and (sender.provider_threat or sender.phishing_emails):
-        return Action.BLOCK
+    hard_threat = bool(
+        sender
+        and (
+            sender.provider_threat or sender.phishing_emails or sender.authentication_failed_emails
+        )
+    )
     junk = bool(sender and (sender.junk_emails or sender.junk_keyword_emails))
     inbox = bool(sender and sender.clean_inbox_emails)
     not_junk = bool(sender and sender.not_junk_emails)
@@ -505,16 +509,32 @@ def _persisted_threat_action(
         normalized = {str(flag).casefold() for flag in flags}
         verdict = str(message.get("provider_verdict") or "").casefold()
         # Folder-derived "junk" is soft evidence, not a phishing verdict.
-        if (verdict and verdict != "junk") or "$phishing" in normalized:
-            return Action.BLOCK
+        try:
+            auth = json.loads(message.get("auth_evidence_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            auth = {}
+        failed_auth = (
+            isinstance(auth, dict)
+            and auth.get("trusted") is True
+            and (
+                all(auth.get(method) == "fail" for method in ("spf", "dkim", "dmarc"))
+                and auth.get("arc") != "pass"
+            )
+        )
+        is_hard_threat = bool(
+            (verdict and verdict != "junk") or "$phishing" in normalized or failed_auth
+        )
+        hard_threat |= is_hard_threat
         is_junk = (
             verdict == "junk"
             or message.get("mailbox_role") == "junk"
             or bool(normalized & {"$junk", r"\junk", "spam", r"\spam"})
         )
         junk |= is_junk
-        inbox |= message.get("mailbox_role") == "inbox" and not is_junk
+        inbox |= message.get("mailbox_role") == "inbox" and not is_junk and not is_hard_threat
         not_junk |= bool(normalized & {"$notjunk", r"\notjunk", "notjunk", "$nonjunk"})
+    if hard_threat:
+        return Action.REVIEW if folder_evidence and (inbox or not_junk) else Action.BLOCK
     if folder_evidence and junk:
         return Action.REVIEW if inbox or not_junk else Action.BLOCK
     return None
@@ -972,6 +992,20 @@ def _move_persisted_subscription_to_junk(
             claim_owner=claim_owner,
         )
         return 0, 0
+
+    if not (
+        subscription.get("policy_source") == "manual"
+        and subscription.get("policy_action") == "block"
+    ) and (_persisted_threat_action(subscription["id"]) is Action.REVIEW):
+        db.set_subscription_policy(subscription["id"], "review", source="automatic")
+        db.update_unsubscribe_operation_outcome(
+            operation_id,
+            "needs_user",
+            claim_owner=claim_owner,
+            error_code="mixed_sender_evidence",
+            detail_redacted="Clean and flagged messages share this identity; inspect individual messages",
+        )
+        return 0, len(inbox_messages)
 
     account = next(
         (
@@ -2534,12 +2568,13 @@ def _run_scan(
                 if subscription is not None
                 else None
             )
-            if sender.authentication_failed_emails > sender.authenticated_emails:
+            mixed_threat = persisted_threat is Action.REVIEW or sender.has_threat_conflict
+            if sender.authentication_failed_emails >= sender.total_emails > 0 and not mixed_threat:
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.UNKNOWN,
                     action=Action.BLOCK,
                     confidence=1.0,
-                    reasoning="Trusted authentication failures dominate authenticated deliveries",
+                    reasoning="Every observed delivery has a trusted authentication failure",
                     source="auth_policy",
                 )
                 if (
@@ -2563,13 +2598,16 @@ def _run_scan(
                 and current.action in {Action.KEEP, Action.BLOCK}
             ):
                 explicit_action = current.action
-            if (
-                explicit_action is not None
-                and (
-                    subscription is None
-                    or _persisted_threat_action(subscription["id"], folder_evidence=False) is None
+            if explicit_action is not None and (
+                mixed_threat
+                or (
+                    (
+                        subscription is None
+                        or _persisted_threat_action(subscription["id"], folder_evidence=False)
+                        is None
+                    )
+                    and not (sender.provider_threat or sender.phishing_emails)
                 )
-                and not (sender.provider_threat or sender.phishing_emails)
             ):
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.UNKNOWN,
@@ -2597,7 +2635,7 @@ def _run_scan(
             if (
                 current is not None
                 and current.action is Action.REVIEW
-                and current.source in {"transactional_policy", "safety_policy"}
+                and current.source in {"transactional_policy", "safety_policy", "auth_policy"}
             ):
                 continue
             if (
@@ -2632,12 +2670,10 @@ def _run_scan(
             # Threat evidence is an unconditional local disposition. It must
             # never be turned into unsubscribe traffic by an old domain rule.
             if (
-                sender.provider_threat
-                or sender.phishing_emails
-                or (
-                    not sender.has_junk_conflict
-                    and (sender.junk_emails or sender.junk_keyword_emails)
-                )
+                (sender.provider_threat or sender.phishing_emails)
+                and not sender.has_threat_conflict
+            ) or (
+                not sender.has_junk_conflict and (sender.junk_emails or sender.junk_keyword_emails)
             ):
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.COLD_OUTREACH,
@@ -2646,29 +2682,25 @@ def _run_scan(
                     reasoning="Provider junk/phishing evidence requires local suppression",
                     source="provider_policy",
                 )
-            elif sender.has_junk_conflict:
+            elif sender.has_threat_conflict or sender.has_junk_conflict:
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.UNKNOWN,
                     action=Action.REVIEW,
                     confidence=0.5,
-                    reasoning="Conflicting Inbox/Junk evidence requires review without sender contact",
+                    reasoning="Conflicting clean and flagged messages require review without sender contact",
                     source="provider_policy",
                 )
-            elif sender.authentication_failed_emails > sender.authenticated_emails:
+            elif sender.authentication_failed_emails >= sender.total_emails > 0:
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.UNKNOWN,
                     action=Action.BLOCK,
                     confidence=1.0,
-                    reasoning=("Trusted authentication failures dominate authenticated deliveries"),
+                    reasoning=("Every observed delivery has a trusted authentication failure"),
                     source="auth_policy",
                 )
-            elif sender.authentication_failed_emails and sender.authenticated_emails:
+            elif sender.authentication_failed_emails:
                 current = classifications.get(sender.classification_key)
-                if (
-                    current is not None
-                    and current.action is Action.BLOCK
-                    and current.source != "user_rule"
-                ):
+                if current is not None and current.action in (Action.BLOCK, Action.UNSUB):
                     classifications[sender.classification_key] = Classification(
                         email_type=current.email_type,
                         action=Action.REVIEW,

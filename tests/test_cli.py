@@ -260,7 +260,7 @@ class TestRunCommand:
         result = runner.invoke(run, ["--dry-run"])
 
         assert result.exit_code == 0
-        assert "No marketing emails found" in result.output
+        assert "No processable headers in this scan scope" in result.output
 
     def test_run_invalid_account(self, runner, configured_env, temp_config_dir):
         """Test run with invalid account name."""
@@ -1063,7 +1063,7 @@ class TestCommandAliases:
         result = runner.invoke(main, ["r", "--help"])
 
         assert result.exit_code == 0
-        assert "Scan inbox" in result.output
+        assert "Recheck the recent lookback" in result.output
 
     def test_alias_s(self, runner, temp_config_dir):
         """Test 's' alias for status."""

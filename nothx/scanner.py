@@ -5,6 +5,7 @@ import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
 from . import db
 from .authres import has_aligned_dkim_pass
 from .config import Config
-from .errors import IMAPError
+from .errors import ErrorCode, IMAPError
 from .footer import MAX_MESSAGES_PER_ACCOUNT
 from .imap import IMAPConnection
 from .mailbox import MailboxDiscovery
@@ -289,6 +290,20 @@ def _agg_verdict(values: "Iterable[bool | None]") -> bool | None:
     return all(known)
 
 
+@dataclass
+class MailboxCoverage:
+    """Observed mailbox size and the portion examined in this scan."""
+
+    account: str
+    mailbox: str
+    role: str
+    scope: str
+    total: int | None
+    selected: int
+    fetched: int
+    complete: bool
+
+
 class ScanResult:
     """Result of scanning inbox, containing stats and cached email headers."""
 
@@ -299,12 +314,14 @@ class ScanResult:
         subscription_stats: dict[str, SenderStats] | None = None,
         subscription_emails: dict[str, list[EmailHeader]] | None = None,
         skipped_invalid_senders: int = 0,
+        coverage: list[MailboxCoverage] | None = None,
     ):
         self.sender_stats = sender_stats
         self.domain_emails = domain_emails
         self.subscription_stats = subscription_stats or sender_stats
         self.subscription_emails = subscription_emails or domain_emails
         self.skipped_invalid_senders = skipped_invalid_senders
+        self.coverage = coverage or []
 
     def get_email_for_domain(self, domain: str) -> EmailHeader | None:
         """Get the best sample email to act on for a domain.
@@ -377,7 +394,11 @@ def _stats_for_emails(
         identity_value=identity.value if identity else None,
         inbox_emails=sum(header.mailbox_role == "inbox" for header in emails),
         clean_inbox_emails=sum(
-            header.mailbox_role == "inbox" and not header.server_junk for header in emails
+            header.mailbox_role == "inbox"
+            and not header.server_junk
+            and not header.server_phishing
+            and not header.strongly_failed_authentication
+            for header in emails
         ),
         junk_emails=sum(header.mailbox_role == "junk" for header in emails),
         junk_keyword_emails=sum(header.server_junk for header in emails),
@@ -409,6 +430,8 @@ def scan_inbox(
     persist: bool = True,
     full_history: bool = False,
     rescan: bool = False,
+    inbox_only: bool = False,
+    on_mailbox_progress: "Callable[[str, str, int, int], None] | None" = None,
 ) -> ScanResult:
     """
     Scan inbox for marketing emails and aggregate by sender domain.
@@ -447,6 +470,7 @@ def scan_inbox(
     all_headers: list[EmailHeader] = []
     total_accounts = len(accounts_to_scan)
     skipped_invalid_senders = 0
+    coverage: list[MailboxCoverage] = []
 
     for idx, (account_name, account) in enumerate(accounts_to_scan, 1):
         # Notify progress callback
@@ -460,7 +484,7 @@ def scan_inbox(
             with IMAPConnection(account) as conn:
                 mailboxes: list[tuple[str, str]] = [("INBOX", "inbox")]
                 discover = getattr(conn, "discover_mailboxes", None)
-                if callable(discover) and getattr(config, "scan_junk", True):
+                if not inbox_only and callable(discover) and getattr(config, "scan_junk", True):
                     discovered = discover(junk_override=getattr(account, "junk_mailbox", None))
                     if isinstance(discovered, MailboxDiscovery):
                         if discovered.junk is not None and discovered.junk.selectable:
@@ -477,7 +501,9 @@ def scan_inbox(
                                 account.email,
                                 discovery_error,
                             )
-                for extra in getattr(account, "extra_scan_mailboxes", ()) or ():
+                for extra in (
+                    () if inbox_only else getattr(account, "extra_scan_mailboxes", ()) or ()
+                ):
                     if extra.casefold() != "inbox" and all(
                         extra.casefold() != name.casefold() for name, _ in mailboxes
                     ):
@@ -494,6 +520,7 @@ def scan_inbox(
                                 since_uid = int(state["last_uid"])
                             if state.get("uidvalidity") is not None:
                                 expected_uidvalidity = int(state["uidvalidity"])
+
                         fetched = conn.fetch_marketing_emails(
                             days=config.scan_days,
                             folder=mailbox_name,
@@ -501,6 +528,11 @@ def scan_inbox(
                             since_uid=since_uid,
                             expected_uidvalidity=expected_uidvalidity,
                             full_history=full_history,
+                            on_progress=(
+                                partial(on_mailbox_progress, account_name, mailbox_name)
+                                if on_mailbox_progress
+                                else None
+                            ),
                         )
                         fetched_headers = list(fetched)
                         headers = []
@@ -568,6 +600,31 @@ def scan_inbox(
                                 (header.uid or 0 for header in headers),
                                 default=int(state["last_uid"]) if state else 0,
                             )
+                        total_value = getattr(conn, "last_fetch_mailbox_total", None)
+                        selected_value = getattr(conn, "last_fetch_selected", len(fetched_headers))
+                        scope_value = getattr(conn, "last_fetch_scope", None)
+                        coverage.append(
+                            MailboxCoverage(
+                                account_name,
+                                mailbox_name,
+                                role,
+                                scope_value
+                                if isinstance(scope_value, str)
+                                else (
+                                    "incremental"
+                                    if since_uid is not None
+                                    else "full history"
+                                    if full_history
+                                    else "lookback"
+                                ),
+                                total_value if type(total_value) is int else None,
+                                selected_value
+                                if type(selected_value) is int
+                                else len(fetched_headers),
+                                len(fetched_headers),
+                                fetch_complete,
+                            )
+                        )
                         account_batches.append(
                             _MailboxBatch(
                                 mailbox_name,
@@ -579,6 +636,18 @@ def scan_inbox(
                             )
                         )
                     except (IMAPError, OSError) as error:
+                        coverage.append(
+                            MailboxCoverage(
+                                account_name,
+                                mailbox_name,
+                                role,
+                                "failed",
+                                None,
+                                0,
+                                0,
+                                False,
+                            )
+                        )
                         logger.warning(
                             "Failed to scan mailbox %s for %s: %s",
                             mailbox_name,
@@ -657,6 +726,7 @@ def scan_inbox(
         subscription_stats,
         dict(subscription_emails),
         skipped_invalid_senders=skipped_invalid_senders,
+        coverage=coverage,
     )
 
 
@@ -688,5 +758,10 @@ def get_emails_for_domain(
                     header.account_name = name
                     header.account_key = account.email.casefold()
                     emails.append(header)
+            if not conn.last_fetch_complete:
+                raise IMAPError(
+                    code=ErrorCode.IMAP_FETCH_ERROR,
+                    message="Mailbox scan was incomplete; no unsubscribe contact is permitted",
+                )
 
     return emails

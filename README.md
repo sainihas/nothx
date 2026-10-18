@@ -25,7 +25,8 @@ pipx install nothx
 nothx init
 ```
 
-That's it. The wizard handles everything else.
+The wizard configures accounts and AI. Outlook/Live/Hotmail also requires the
+one-time Microsoft application setup described below.
 
 > Don't have pipx? `brew install pipx` (macOS) or `sudo apt install pipx` (Linux).
 >
@@ -113,7 +114,7 @@ Email arrives in Inbox or Junk
 └─────────────────┘
 ```
 
-Provider threat evidence and explicit block rules are resolved before AI. Bulk mail is not automatically spam, and an unsubscribe link is not automatically safe.
+Provider threat evidence and explicit block rules are resolved before AI. Mixed clean/threat or pass/fail evidence requires review; one flagged message never authorizes suppressing the whole sender group. Bulk mail is not automatically spam, and an unsubscribe link is not automatically safe.
 
 ---
 
@@ -125,7 +126,9 @@ Provider threat evidence and explicit block rules are resolved before AI. Bulk m
 |---------|--------------|
 | `nothx` | Interactive menu |
 | `nothx init` | Setup wizard — accounts, API key, first scan |
-| `nothx run` | Scan and process emails |
+| `nothx run` | Recheck the recent lookback with configured AI and process eligible mail |
+| `nothx cleanup` | Preview all Inbox history with configured AI; no mail actions |
+| `nothx cleanup --apply` | Review and apply a full-Inbox cleanup |
 | `nothx status` | Stats, accounts, schedule at a glance |
 | `nothx review` | Decide on uncertain senders |
 | `nothx test --ai` | Test mailbox connections and the configured AI provider, including disabled-provider recovery |
@@ -149,8 +152,12 @@ Provider threat evidence and explicit block rules are resolved before AI. Bulk m
 | `nothx schedule --daily` | Set the recommended automatic run frequency |
 | `nothx account add/remove` | Manage email accounts |
 | `nothx config --show` | View current config |
+| `nothx config --engaged-marketing review/allow` | Review or permit automatic actions on engaged marketing |
 | `nothx consent` | Explicitly grant or revoke versioned network/mailbox automation consent |
-| `nothx run --full-history` | Explicitly scan all UIDs instead of the incremental cursor |
+| `nothx run --preview` | Preview recent mail with configured AI; no mail actions or saved decisions |
+| `nothx run --dry-run` | Preview recent mail with local rules; no cloud AI or mail actions |
+| `nothx run --new-only` | Only scan new UIDs, skipping earlier undecided messages |
+| `nothx run --full-history` | Scan all history in Inbox and configured folders |
 | `nothx run --rescan` | Repeat the configured lookback without rewinding the cursor |
 | `nothx update` | Check for and install updates |
 | `nothx completion` | Generate shell completion |
@@ -231,10 +238,18 @@ Microsoft personal accounts no longer accept basic authentication or app
 passwords for IMAP. nothx uses OAuth2 device sign-in instead; it never needs
 your Microsoft password.
 
+The operator must register a nothx application once. This release does not ship a
+shared Microsoft application ID. After setup, accounts reuse that ID and users
+only complete Microsoft sign-in. App IDs are public identifiers; no client secret
+is used.
+
 1. In [Azure App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade), create a public-client app that supports **Personal Microsoft accounts only**.
-2. Under **Authentication**, enable **Allow public client flows**. No client secret or redirect URI is needed.
-3. Copy the **Application (client) ID** and provide it when `nothx init` or `nothx account add` asks for it.
-4. Open the displayed Microsoft device-login URL, enter its short code, and approve IMAP and SMTP access.
+2. Under **Authentication**, enable **Allow public client flows**. No client secret or redirect URI is needed. If you already created an organizational single-tenant app, [change its supported account types](https://learn.microsoft.com/en-us/entra/identity-platform/howto-modify-supported-accounts) to include personal Microsoft accounts; single-tenant organizational registrations cannot sign in Live/Hotmail accounts.
+3. Set `NOTHX_MICROSOFT_CLIENT_ID` to the **Application (client) ID**, or provide it once when `nothx init` or `nothx account add` asks. nothx saves it for later accounts.
+4. Open the displayed Microsoft device-login URL, enter its short code, and approve IMAP and SMTP access using the same personal email address entered in nothx.
+5. In [Outlook web](https://outlook.live.com/mail/), open **Settings → Mail → Forwarding and IMAP**, enable **Let devices and apps use IMAP**, and save. Microsoft disables IMAP by default. If sign-in succeeds but Inbox access fails, nothx preserves the sign-in; run `nothx test` after enabling IMAP.
+
+[Microsoft connection settings](https://support.microsoft.com/en-us/outlook/pop-imap-and-smtp-settings-for-outlook-com) document the OAuth2 requirement and IMAP switch.
 
 The access and refresh tokens are stored separately in
 `~/.nothx/tokens.json` with owner-only permissions. If an older token granted
@@ -259,7 +274,10 @@ unsubscribe email.
 ### Safety and privacy defaults
 
 - Inbox and the unambiguously advertised IMAP `\Junk` mailbox are scanned. nothx does not guess localized Junk folder names; configure an override if your server advertises none or several.
-- Initial runs use the configured lookback. Later runs use `(account, mailbox, UIDVALIDITY, UID)` cursors. Full history is always explicit.
+- Ordinary runs repeat the configured lookback (30 days by default), so earlier undecided mail is reclassified after AI or policy changes. `--new-only` explicitly uses `(account, mailbox, UIDVALIDITY, UID)` cursors. Full history is explicit: `cleanup` includes only Inbox, while `run --full-history` also includes configured folders.
+- Marketing/newsletters with at least 25% of messages marked read require review by default. Engaged cold outreach also requires review. Read flags are imperfect evidence of preference, so they never force KEEP. Choose `nothx config --engaged-marketing allow` to permit automatic actions on clear promotions even when read; explicit keep/block choices still win.
+- Every scan reports mailbox size, selected headers, headers read, and scope. A small incremental result describes new mail, not a clean Inbox. Junk messages already outside Inbox are reported separately from Inbox messages to move.
+- Cleanup previews list every unsubscribe/block candidate with its account/list identity and recent subjects. Unsubscribe requests stop future deliveries when honored; existing marketing messages remain in Inbox. Block actions move matching messages to Junk. Preview uses configured AI only when enabled; `--dry-run` remains local.
 - Body fetching is disabled by default. The optional footer scanner examines at most two inline text tails (64 KiB each, 128 KiB total) for authenticated list/bulk candidates. It skips attachments, nested messages, images, scripts, and forms.
 - One-click POST requires compliant headers plus `$canunsubscribe` or a correlated passing DKIM signature that covers both unsubscribe headers. All outbound unsubscribe contact—including an explicitly opened browser page—and mailbox actions require separate, versioned consent.
 - HTTP requests are HTTPS-only, proxy/cookie/auth/referrer-free, redirect constrained, SSRF checked, and connected to an already validated public IP while preserving TLS hostname verification.
@@ -283,7 +301,7 @@ unsubscribe email.
 - Verify your App Password (not your regular password)
 - Ensure IMAP is enabled in your email settings
 - For Gmail: Check that 2FA is enabled (required for App Passwords)
-- For Outlook/Live/Hotmail: re-add the account to renew OAuth consent; app passwords do not work
+- For Outlook/Live/Hotmail: use Microsoft sign-in, enable IMAP in Outlook web, and retry `nothx test`. Re-add the account only when OAuth consent needs renewal; app passwords do not work
 - Run `nothx test` to diagnose
 </details>
 

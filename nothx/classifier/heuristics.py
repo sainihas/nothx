@@ -65,6 +65,8 @@ SAFE_SENDER_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SAFE_SENDER_PATTE
 OPERATIONAL_SUBJECT_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
+        r"\b(?:terms\s+(?:of\s+(?:service|use|sale)|(?:&|and)\s*conditions)"
+        r"|privacy\s+(?:policy|notice)|user\s+agreement)\b",
         r"\bbudget\s+(?:reached|exceeded|threshold|alert)\b",
         r"\b(?:pull request|PR|issue)\s*#\s*\d+\b",
         r"\b(?:CI|workflow|build|PR)\s+run\s+(?:failed|succeeded|cancelled)\b",

@@ -102,6 +102,8 @@ class ClassificationEngine:
         if persist and self._is_ai_candidate(sender) and self.ai.is_available():
             ai_attempted = True
             ai_result = self.ai.classify_single(sender, persist=persist)
+            if ai_result and ai_result.confidence < self.config.thresholds.unsub_confidence:
+                return self._uncertain_ai_result(ai_result)
             if ai_result and ai_result.confidence >= self.config.thresholds.unsub_confidence:
                 logger.debug(
                     "Classified %s via AI: %s (confidence: %.2f)",
@@ -122,10 +124,7 @@ class ClassificationEngine:
         if result:
             # Log fallback reason
             if ai_attempted:
-                if ai_result is None:
-                    fallback_reason = "AI returned no result"
-                else:
-                    fallback_reason = f"AI confidence too low ({ai_result.confidence:.2f} < {self.config.thresholds.unsub_confidence})"
+                fallback_reason = "AI returned no result"
                 logger.info(
                     "Falling back to heuristics for %s: %s",
                     sender.domain,
@@ -163,8 +162,29 @@ class ClassificationEngine:
             source="uncertain",
         )
 
+    def _uncertain_ai_result(self, result: Classification) -> Classification:
+        return Classification(
+            email_type=result.email_type,
+            action=Action.REVIEW,
+            confidence=result.confidence,
+            reasoning=f"{result.reasoning}; AI confidence is below "
+            f"{self.config.thresholds.unsub_confidence:.0%}; review required",
+            source="ai",
+            recommended_action=result.recommended_action or result.action,
+            original_source=result.original_source or result.source,
+        )
+
     def _threat_precheck(self, sender: SenderStats) -> Classification | None:
         """Short-circuit provider-vetted junk/phishing without contacting it."""
+        if sender.has_threat_conflict:
+            return Classification(
+                email_type=EmailType.UNKNOWN,
+                action=Action.REVIEW,
+                confidence=0.5,
+                reasoning="Threat flags affect only part of this sender group; "
+                "inspect flagged messages individually before suppressing the sender",
+                source="provider_policy",
+            )
         if sender.provider_threat or sender.phishing_emails:
             return Classification(
                 email_type=EmailType.COLD_OUTREACH,
@@ -193,18 +213,15 @@ class ClassificationEngine:
 
     def _authentication_precheck(self, sender: SenderStats) -> Classification | None:
         """Keep strong trusted authentication failures out of AI and link paths."""
-        # A spoof or broken forward must not poison an otherwise authenticated
-        # From-grouped subscription. Treat strong failures as subscription-wide
-        # block evidence only when they outnumber authenticated deliveries.
-        if sender.authentication_failed_emails > sender.authenticated_emails:
+        if sender.authentication_failed_emails >= sender.total_emails > 0:
             return Classification(
                 email_type=EmailType.UNKNOWN,
                 action=Action.BLOCK,
                 confidence=0.95,
-                reasoning="Trusted authentication failures dominate authenticated deliveries",
+                reasoning="Every observed delivery has a trusted authentication failure",
                 source="auth_policy",
             )
-        if sender.authentication_failed_emails and sender.authenticated_emails:
+        if sender.authentication_failed_emails:
             return Classification(
                 email_type=EmailType.UNKNOWN,
                 action=Action.REVIEW,
@@ -235,7 +252,7 @@ class ClassificationEngine:
             and result.action is Action.BLOCK
             and result.email_type is EmailType.COLD_OUTREACH
         ):
-            return result
+            return self._apply_action_policy(sender, result)
         return None
 
     def _operational_precheck(self, sender: SenderStats) -> Classification | None:
@@ -374,6 +391,46 @@ class ClassificationEngine:
                 recommended_action=classification.recommended_action or classification.action,
                 original_source=classification.original_source or classification.source,
             )
+        if (
+            classification.action is Action.BLOCK
+            and classification.source != "user_rule"
+            and (
+                classification.email_type in (EmailType.TRANSACTIONAL, EmailType.SECURITY)
+                or self._is_protected(sender.domain)
+                or self._always_confirm(sender.domain)
+            )
+        ):
+            return Classification(
+                email_type=classification.email_type,
+                action=Action.REVIEW,
+                confidence=classification.confidence,
+                reasoning=f"{classification.reasoning}; protected mail requires review before blocking",
+                source="safety_policy",
+                recommended_action=classification.recommended_action or classification.action,
+                original_source=classification.original_source or classification.source,
+            )
+        if (
+            classification.source != "user_rule"
+            and classification.action in (Action.UNSUB, Action.BLOCK)
+            and (
+                classification.email_type is EmailType.COLD_OUTREACH
+                or (
+                    self.config.review_engaged_marketing
+                    and classification.email_type in (EmailType.MARKETING, EmailType.NEWSLETTER)
+                )
+            )
+            and sender.open_rate >= 25
+        ):
+            return Classification(
+                email_type=classification.email_type,
+                action=Action.REVIEW,
+                confidence=classification.confidence,
+                source="engagement_policy",
+                reasoning=f"{classification.reasoning}; {sender.open_rate:.0f}% marked read; "
+                "review whether this subscription is unwanted",
+                recommended_action=classification.recommended_action or classification.action,
+                original_source=classification.original_source or classification.source,
+            )
         if classification.action != Action.UNSUB:
             return classification
         if classification.email_type in (EmailType.TRANSACTIONAL, EmailType.SECURITY):
@@ -419,7 +476,7 @@ class ClassificationEngine:
         return classification
 
     def classify_batch(
-        self, senders: list[SenderStats], persist: bool = True
+        self, senders: list[SenderStats], persist: bool = True, *, allow_ai: bool = False
     ) -> dict[str, Classification]:
         """
         Classify a batch of senders efficiently.
@@ -427,7 +484,8 @@ class ClassificationEngine:
 
         When persist is False (dry-run or a pre-consent scan), cloud AI calls
         and classification writes are both disabled; candidates fall back to
-        local heuristics.
+        local heuristics. ``allow_ai=True`` explicitly enables provider calls
+        for a read-only preview.
         """
         results: dict[str, Classification] = {}
 
@@ -512,8 +570,8 @@ class ClassificationEngine:
                 source_counts["uncertain"] += 1
 
         # Layer 3: AI batch classification
-        if needs_ai and persist and self.ai.is_available():
-            ai_results = self.ai.classify_batch(needs_ai, persist=persist)
+        if needs_ai and (persist or allow_ai) and self.ai.is_available():
+            ai_results = self.ai.classify_batch(needs_ai, persist=persist, allow_egress=allow_ai)
 
             ai_success_count = 0
             ai_low_confidence_count = 0
@@ -530,6 +588,9 @@ class ClassificationEngine:
                         continue
                     else:
                         ai_low_confidence_count += 1
+                        results[sender.classification_key] = self._uncertain_ai_result(result)
+                        source_counts["ai"] += 1
+                        continue
 
                 # Layer 4: Heuristic fallback
                 fallback_count += 1

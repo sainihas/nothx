@@ -311,3 +311,12 @@ class TestConfigMethods:
         config.ai.provider = "none"
 
         assert config.is_configured() is True
+
+
+def test_microsoft_registration_environment_works_before_first_setup(temp_config_dir, monkeypatch):
+    monkeypatch.setenv("NOTHX_MICROSOFT_CLIENT_ID", "public-application-id")
+    config = Config.load()
+    assert config.microsoft_client_id == "public-application-id"
+    config.save()
+    monkeypatch.delenv("NOTHX_MICROSOFT_CLIENT_ID")
+    assert Config.load().microsoft_client_id == "public-application-id"

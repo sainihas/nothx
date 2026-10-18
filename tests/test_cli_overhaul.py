@@ -2071,3 +2071,23 @@ def test_automatic_block_executor_cannot_move_clean_mail_because_of_one_threat_f
     subscription = db.list_subscriptions()[0]
     assert subscription["policy_action"] == "review"
     assert subscription["last_outcome"] == "needs_user"
+
+
+def test_existing_manual_boundary_is_not_counted_as_a_new_unsubscribe(configured_cli):
+    runner, _config = configured_cli
+    scan_result, classifications = _subscription_scan(Action.UNSUB)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    subscription = db.upsert_subscription(
+        sender.account_key, sender.identity_kind, sender.identity_value
+    )
+    operation = db.get_or_create_unsubscribe_operation(subscription["id"], "manual-boundary")
+    db.update_unsubscribe_operation_outcome(operation["id"], "needs_user")
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine") as engine,
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(run, ["--preview"])
+    assert result.exit_code == 0, result.output
+    assert "0 to unsubscribe now" in result.output
+    assert "1 unsubscribe requests need manual action" in result.output

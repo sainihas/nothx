@@ -859,6 +859,24 @@ def _unsubscribe_operation_plan(
     return True, attempted_fingerprints, 1, False
 
 
+def _unsubscribe_execution_state(sender: SenderStats) -> str:
+    if not (sender.account_key and sender.identity_kind and sender.identity_value):
+        return "ready"
+    subscription = db.get_subscription(
+        account=sender.account_key,
+        identity_kind=sender.identity_kind,
+        identity_value=sender.identity_value,
+    )
+    if subscription is None:
+        return "ready"
+    execute, _exclusions, _generation, escalate = _unsubscribe_operation_plan(subscription)
+    if execute:
+        return "ready"
+    if escalate:
+        return "retry_block"
+    return str(subscription.get("last_outcome") or "existing")
+
+
 def _is_unsubscribe_consent_resume(subscription: dict[str, Any], config: Config) -> bool:
     """Return whether current consent resolves the latest no-contact boundary."""
     if not config.permits_unsubscribe or subscription.get("last_outcome") != "needs_user":
@@ -2796,7 +2814,18 @@ def _run_scan(
 
     # Summary as tree
     tree = Tree("[success]✓ Classification complete[/success]")
-    tree.add(f"[unsubscribe]{len(to_unsub)} to unsubscribe[/unsubscribe]")
+    unsubscribe_states = [_unsubscribe_execution_state(sender) for _, sender, _ in to_unsub]
+    new_requests = unsubscribe_states.count("ready")
+    manual_requests = unsubscribe_states.count("needs_user")
+    retry_blocks = unsubscribe_states.count("retry_block")
+    existing_requests = len(to_unsub) - new_requests - manual_requests - retry_blocks
+    tree.add(f"[unsubscribe]{new_requests} to unsubscribe now[/unsubscribe]")
+    if existing_requests:
+        tree.add(f"[muted]{existing_requests} existing requests; no repeat planned[/muted]")
+    if manual_requests:
+        tree.add(f"[review]{manual_requests} unsubscribe requests need manual action[/review]")
+    if retry_blocks:
+        tree.add(f"[block]{retry_blocks} exhausted retries require local suppression[/block]")
     inbox_blocks = sum(sender.inbox_emails for _, sender, _ in to_block)
     existing_junk = sum(sender.junk_emails for _, sender, _ in to_block)
     tree.add(
@@ -2927,7 +2956,7 @@ def _run_scan(
                 "Run without --auto to approve interactively.[/warning]"
             )
         elif auto or _styled_confirm(
-            f"Apply {len(to_unsub)} unsubscribe and {len(to_block)} Junk/block actions?",
+            f"Apply {new_requests} unsubscribe requests and {len(to_block)} block policies?",
             default=True,
         ):
             console.print("\n[header]Step 3/3: Applying approved actions[/header]")
@@ -3211,7 +3240,7 @@ def _run_scan(
 def _show_details(to_unsub, to_keep, to_review, to_block):
     """Show detailed classification results."""
     if to_unsub:
-        console.print("\n[bold red]To Unsubscribe:[/bold red]")
+        console.print("\n[bold red]Unsubscribe candidates and existing requests:[/bold red]")
         table = Table(show_header=True)
         table.add_column("Account / List identity")
         table.add_column("Domain")
@@ -3219,6 +3248,7 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
         table.add_column("Open Rate")
         table.add_column("Reason")
         table.add_column("Recent subjects")
+        table.add_column("Request state")
         for _key, sender, classification in to_unsub:
             table.add_row(
                 _subscription_label(sender),
@@ -3227,6 +3257,7 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
                 f"{sender.open_rate:.0f}%",
                 escape(classification.reasoning),
                 escape(" / ".join(sender.sample_subjects[:3])),
+                _unsubscribe_execution_state(sender),
             )
         console.print(table)
 

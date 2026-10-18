@@ -62,6 +62,15 @@ SPAM_SUBJECT_CASE_PATTERNS = [re.compile(p) for p in _SPAM_SUBJECT_CASE_PATTERNS
 SPAM_SENDER_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SPAM_SENDER_PATTERNS_RAW]
 SAFE_SUBJECT_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SAFE_SUBJECT_PATTERNS_RAW]
 SAFE_SENDER_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SAFE_SENDER_PATTERNS_RAW]
+OPERATIONAL_SUBJECT_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bbudget\s+(?:reached|exceeded|threshold|alert)\b",
+        r"\b(?:pull request|PR|issue)\s*#\s*\d+\b",
+        r"\b(?:CI|workflow|build|PR)\s+run\s+(?:failed|succeeded|cancelled)\b",
+        r"\[action required\].*\b(?:OAuth|API|access|certificate|quota)\b",
+    )
+]
 COLD_OUTREACH_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _COLD_OUTREACH_PATTERNS_RAW]
 
 

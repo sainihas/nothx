@@ -298,11 +298,13 @@ class ScanResult:
         domain_emails: dict[str, list[EmailHeader]],
         subscription_stats: dict[str, SenderStats] | None = None,
         subscription_emails: dict[str, list[EmailHeader]] | None = None,
+        skipped_invalid_senders: int = 0,
     ):
         self.sender_stats = sender_stats
         self.domain_emails = domain_emails
         self.subscription_stats = subscription_stats or sender_stats
         self.subscription_emails = subscription_emails or domain_emails
+        self.skipped_invalid_senders = skipped_invalid_senders
 
     def get_email_for_domain(self, domain: str) -> EmailHeader | None:
         """Get the best sample email to act on for a domain.
@@ -374,6 +376,9 @@ def _stats_for_emails(
         identity_kind=identity.kind if identity else None,
         identity_value=identity.value if identity else None,
         inbox_emails=sum(header.mailbox_role == "inbox" for header in emails),
+        clean_inbox_emails=sum(
+            header.mailbox_role == "inbox" and not header.server_junk for header in emails
+        ),
         junk_emails=sum(header.mailbox_role == "junk" for header in emails),
         junk_keyword_emails=sum(header.server_junk for header in emails),
         not_junk_emails=sum(header.server_not_junk for header in emails),
@@ -441,6 +446,7 @@ def scan_inbox(
     domain_emails: dict[str, list[EmailHeader]] = defaultdict(list)
     all_headers: list[EmailHeader] = []
     total_accounts = len(accounts_to_scan)
+    skipped_invalid_senders = 0
 
     for idx, (account_name, account) in enumerate(accounts_to_scan, 1):
         # Notify progress callback
@@ -496,7 +502,18 @@ def scan_inbox(
                             expected_uidvalidity=expected_uidvalidity,
                             full_history=full_history,
                         )
-                        headers = list(fetched)
+                        fetched_headers = list(fetched)
+                        headers = []
+                        for header in fetched_headers:
+                            if not header.sender_address:
+                                skipped_invalid_senders += 1
+                                logger.warning(
+                                    "Leaving message with invalid From unchanged: %s UID %s",
+                                    mailbox_name,
+                                    header.uid,
+                                )
+                                continue
+                            headers.append(header)
                         for header in headers:
                             header.account_name = account_name
                             header.account_key = account_key
@@ -639,6 +656,7 @@ def scan_inbox(
         dict(domain_emails),
         subscription_stats,
         dict(subscription_emails),
+        skipped_invalid_senders=skipped_invalid_senders,
     )
 
 

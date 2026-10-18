@@ -128,6 +128,7 @@ Provider threat evidence and explicit block rules are resolved before AI. Bulk m
 | `nothx run` | Scan and process emails |
 | `nothx status` | Stats, accounts, schedule at a glance |
 | `nothx review` | Decide on uncertain senders |
+| `nothx test --ai` | Test mailbox connections and the configured AI provider, including disabled-provider recovery |
 
 ### Day-to-Day
 

@@ -1110,3 +1110,25 @@ class TestConsentParkedBlocks:
         assert db.count_subscriptions(outcome="needs_user") == 3
         assert db.count_subscriptions(policy_action="block") == 3
         assert len(db.list_subscriptions(outcome="needs_user", limit=2)) == 2
+
+
+def test_manual_policy_provenance_survives_automatic_reclassification(state_db):
+    row = _subscription()
+    db.set_subscription_policy(row["id"], "keep")
+    db.upsert_subscription(
+        row["account"],
+        row["identity_kind"],
+        row["identity_value"],
+        policy_action="review",
+        policy_source="automatic",
+        classification_source="provider_policy",
+    )
+    stored = db.get_subscription(row["id"])
+    assert stored["policy_action"] == "keep"
+    assert stored["policy_source"] == "manual"
+    with db.get_db() as conn:
+        conn.execute("ALTER TABLE subscriptions DROP COLUMN policy_source")
+    db.init_db()
+    assert db.get_subscription(row["id"])["policy_action"] == "keep"
+    assert db.get_subscription(row["id"])["policy_source"] is None
+    assert list(state_db.parent.glob("state.db.backup-*"))

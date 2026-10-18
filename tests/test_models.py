@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+import pytest
+
 from nothx.models import EmailHeader
 
 
@@ -16,6 +18,13 @@ def make_header(sender: str = "user@example.com", list_unsubscribe: str | None =
 
 
 class TestSenderAddress:
+    @pytest.mark.parametrize(
+        "sender", ["@example.com", '"space here"@example.com', "x" * 310 + "@example.com"]
+    )
+    def test_unpersistable_addresses_are_invalid(self, sender):
+        assert make_header(sender).sender_address == ""
+        assert make_header(sender).domain == "unknown"
+
     def test_bare_address(self):
         assert make_header("user@example.com").sender_address == "user@example.com"
 

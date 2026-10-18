@@ -710,3 +710,42 @@ def test_engaged_cold_outreach_still_needs_review_when_promotions_are_allowed(po
     )
     policy_engine.config.review_engaged_marketing = False
     assert policy_engine.classify(sender).action is Action.REVIEW
+
+
+def test_batch_progress_counts_only_cloud_eligible_groups(policy_engine):
+    marketing = SenderStats(
+        domain="letters.example",
+        total_emails=8,
+        has_unsubscribe=True,
+        sample_subjects=["Summer offers"],
+        authenticated_emails=8,
+    )
+    personal = SenderStats(
+        domain="personal.example", total_emails=1, sample_subjects=["Dinner on Friday"]
+    )
+    operational = SenderStats(
+        domain="service.example",
+        total_emails=4,
+        has_unsubscribe=True,
+        sample_subjects=["Privacy policy update"],
+    )
+    provider = Mock()
+    provider.name = "fake"
+    provider.is_available.return_value = True
+    provider.complete.return_value.text = "[]"
+    policy_engine.config.ai.enabled = True
+    policy_engine.ai._provider = provider
+    policy_engine.ai._provider_initialized = True
+    progress = []
+    results = policy_engine.classify_batch(
+        [marketing, personal, operational],
+        persist=False,
+        allow_ai=True,
+        on_ai_progress=lambda *counts: progress.append(counts),
+    )
+    assert progress == [(0, 1), (1, 1)]
+    assert len(results) == 3
+    prompt = provider.complete.call_args.args[0]
+    assert "letters.example" in prompt
+    assert "personal.example" not in prompt
+    assert "service.example" not in prompt

@@ -2,6 +2,7 @@
 
 import fnmatch
 import logging
+from collections.abc import Callable
 
 from ..config import Config
 from ..models import Action, Classification, EmailType, SenderStats
@@ -476,7 +477,12 @@ class ClassificationEngine:
         return classification
 
     def classify_batch(
-        self, senders: list[SenderStats], persist: bool = True, *, allow_ai: bool = False
+        self,
+        senders: list[SenderStats],
+        persist: bool = True,
+        *,
+        allow_ai: bool = False,
+        on_ai_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Classification]:
         """
         Classify a batch of senders efficiently.
@@ -571,7 +577,14 @@ class ClassificationEngine:
 
         # Layer 3: AI batch classification
         if needs_ai and (persist or allow_ai) and self.ai.is_available():
-            ai_results = self.ai.classify_batch(needs_ai, persist=persist, allow_egress=allow_ai)
+            if on_ai_progress is None:
+                ai_results = self.ai.classify_batch(
+                    needs_ai, persist=persist, allow_egress=allow_ai
+                )
+            else:
+                ai_results = self.ai.classify_batch(
+                    needs_ai, persist=persist, allow_egress=allow_ai, on_progress=on_ai_progress
+                )
 
             ai_success_count = 0
             ai_low_confidence_count = 0

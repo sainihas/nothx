@@ -1769,10 +1769,10 @@ def test_cleanup_preview_is_full_inbox_ai_without_actions_or_saved_decisions(con
     assert scan.call_args.kwargs["full_history"] is True
     assert scan.call_args.kwargs["inbox_only"] is True
     assert scan.call_args.kwargs["persist"] is False
-    assert engine.return_value.classify_batch.call_args.kwargs == {
-        "persist": False,
-        "allow_ai": True,
-    }
+    options = engine.return_value.classify_batch.call_args.kwargs
+    assert options["persist"] is False
+    assert options["allow_ai"] is True
+    assert callable(options["on_ai_progress"])
     for mutation in (unsub, block, reconcile, persist, log):
         mutation.assert_not_called()
     assert "Sale" in result.output

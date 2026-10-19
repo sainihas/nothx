@@ -1031,7 +1031,10 @@ def test_manual_page_open_rescans_and_never_prints_token(configured_cli):
         last_delivery_at=header.date,
     )
     with (
-        patch("nothx.cli.scan_inbox", return_value=scan_result) as scan,
+        patch(
+            "nothx.resolution.refresh_sources",
+            return_value=(sender, scan_result.subscription_emails[key]),
+        ) as scan,
         patch("nothx.cli.webbrowser.open", return_value=True) as browser,
     ):
         result = runner.invoke(
@@ -1242,13 +1245,16 @@ def test_open_unsubscribe_refuses_auth_failed_rescan(configured_cli):
         last_delivery_at=item.date,
     )
     with (
-        patch("nothx.cli.scan_inbox", return_value=scan_result) as scan,
+        patch(
+            "nothx.resolution.refresh_sources",
+            return_value=(sender, scan_result.subscription_emails[key]),
+        ) as scan,
         patch("nothx.cli.webbrowser.open") as browser,
     ):
         result = runner.invoke(open_unsubscribe, [str(subscription["id"]), "--yes"])
 
     assert result.exit_code == 0
-    assert "failed authentication" in " ".join(result.output.split())
+    assert "does not permit contacting" in " ".join(result.output.split())
     scan.assert_called_once()
     browser.assert_not_called()
 
@@ -2140,24 +2146,18 @@ def test_due_retry_cannot_move_fresh_service_notice_before_approval(
     assert db.get_subscription(subscription["id"])["policy_action"] != "block"
 
 
-def test_open_unsubscribe_refuses_an_incomplete_rescan(configured_cli):
-    from nothx.scanner import MailboxCoverage
-
-    runner, _config = configured_cli
-    scan, classes = _subscription_scan(Action.UNSUB)
-    key, sender = next(iter(scan.subscription_stats.items()))
-    subscription, _ = _persist_subscription_records(
-        sender, scan.subscription_emails[key], classes[key]
-    )
-    scan.coverage = [MailboxCoverage("default", "INBOX", "inbox", "recent", 100, 100, 1, False)]
+def test_open_unsubscribe_refuses_failed_source_refresh(configured_cli):
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
     with (
-        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.resolution.refresh_sources", side_effect=ValueError("UIDVALIDITY changed")),
+        patch("nothx.cli.scan_inbox") as scan,
         patch("nothx.cli.webbrowser.open") as browser,
     ):
         result = runner.invoke(open_unsubscribe, [str(subscription["id"]), "--yes"])
     assert result.exit_code == 0, result.output
-    assert "incomplete" in result.output
+    assert "Source refresh failed" in result.output
     browser.assert_not_called()
+    scan.assert_not_called()
 
 
 def test_domain_contact_scan_rejects_an_interrupted_prefix(configured_cli):
@@ -2923,16 +2923,14 @@ def test_browser_never_downgrades_one_click_post_to_get(configured_cli):
     headers[0].list_unsubscribe_post = "List-Unsubscribe=One-Click"
     headers[0].list_unsubscribe_count = 1
     headers[0].list_unsubscribe_post_count = 1
-    key = headers[0].subscription_identity.key
-    scan = ScanResult({stats.domain: stats}, {stats.domain: headers}, {key: stats}, {key: headers})
     with (
-        patch("nothx.cli.scan_inbox", return_value=scan) as scan_call,
+        patch("nothx.resolution.refresh_sources", return_value=(stats, headers)) as scan_call,
         patch("nothx.cli.webbrowser.open") as browser,
     ):
         result = runner.invoke(open_unsubscribe, [str(subscription["id"]), "--yes"])
     assert result.exit_code == 0, result.output
     browser.assert_not_called()
-    assert scan_call.call_args.kwargs["full_history"]
+    scan_call.assert_called_once_with(config, subscription)
 
 
 @pytest.mark.parametrize("already_attempted", [False, True])
@@ -3005,12 +3003,349 @@ def test_browser_excludes_malformed_declared_post_targets(configured_cli, duplic
     else:
         headers[0].list_unsubscribe = "<https://shop.example/a>, <https://shop.example/b>"
         headers[0].list_unsubscribe_count = 1
-    key = headers[0].subscription_identity.key
-    scan = ScanResult({stats.domain: stats}, {stats.domain: headers}, {key: stats}, {key: headers})
     with (
-        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.resolution.refresh_sources", return_value=(stats, headers)),
         patch("nothx.cli.webbrowser.open") as browser,
     ):
         result = runner.invoke(open_unsubscribe, [str(subscription["id"]), "--yes"])
     assert result.exit_code == 0, result.output
     browser.assert_not_called()
+
+
+@pytest.mark.parametrize("error_code", ["unsubscribe_consent_required", "authentication_unknown"])
+def test_resolve_no_contact_boundary_preserves_retry_budget(configured_cli, error_code):
+    from nothx.cli import resolve_subscription
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    op = db.get_or_create_unsubscribe_operation(subscription["id"], "parked")
+    db.update_unsubscribe_operation_outcome(op["id"], "needs_user", error_code=error_code)
+    db.record_unsubscribe_attempt(
+        op["id"], "policy", method="none", outcome="needs_user", endpoint_fingerprint="a" * 64
+    )
+    with (
+        patch("nothx.resolution.refresh_sources", return_value=(stats, headers)),
+        patch(
+            "nothx.cli.unsubscribe_subscription",
+            return_value=UnsubResult(success=True, method=UnsubMethod.GET),
+        ),
+    ):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Request accepted" in result.output
+    saved = db.get_subscription(subscription["id"])
+    assert saved["retry_count"] == 0
+    latest = db.list_unsubscribe_operations(subscription_id=subscription["id"])[0]
+    assert latest["retry_generation"] == 0
+    db.update_unsubscribe_operation_outcome(latest["id"], "ineffective")
+    execute, _, generation, escalate = _unsubscribe_operation_plan(
+        db.get_subscription(subscription["id"])
+    )
+    assert execute and generation == 1 and not escalate
+
+
+def test_browser_confirmation_serializes_with_live_claim(configured_cli):
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    db.get_or_create_unsubscribe_operation(subscription["id"], "manual", outcome="needs_user")
+    pending, acquired = db.claim_unsubscribe_operation(
+        subscription["id"], "retry", "worker", retry_generation=1
+    )
+    assert acquired
+    with pytest.raises(ValueError, match="unresolved"):
+        db.acknowledge_browser_confirmation(subscription["id"])
+    assert db.get_unsubscribe_operation(pending["id"])["outcome"] is None
+    assert not db.list_unsubscribe_attempts(pending["id"])
+
+
+def test_browser_first_confirmation_creates_scoped_audit(configured_cli):
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    operation = db.acknowledge_browser_confirmation(subscription["id"])
+    assert operation["outcome"] == "requested"
+    assert operation["verification_scope"] == "source"
+    assert (
+        db.list_unsubscribe_attempts(operation["id"])[0]["error_code"] == "user_confirmed_browser"
+    )
+    assert db.acknowledge_browser_confirmation(subscription["id"])["id"] == operation["id"]
+    assert len(db.list_unsubscribe_attempts(operation["id"])) == 1
+
+
+def test_acknowledged_ambiguity_allows_an_alternate_endpoint(configured_cli):
+    from nothx.cli import resolve_subscription
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    op = db.get_or_create_unsubscribe_operation(
+        subscription["id"], "ambiguous", outcome="needs_user"
+    )
+    db.record_unsubscribe_attempt(
+        op["id"],
+        "ambiguous",
+        method="get",
+        outcome="needs_user",
+        endpoint_fingerprint="b" * 64,
+        ambiguous_send=True,
+    )
+    db.acknowledge_browser_confirmation(subscription["id"])
+    db.update_unsubscribe_operation_outcome(op["id"], "ineffective")
+    with (
+        patch("nothx.resolution.refresh_sources", return_value=(stats, headers)),
+        patch(
+            "nothx.cli.unsubscribe_subscription",
+            return_value=UnsubResult(success=True, method=UnsubMethod.GET),
+        ) as send,
+    ):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--retry", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Request accepted" in result.output
+    assert "b" * 64 in send.call_args.kwargs["exclude_fingerprints"]
+
+
+def test_source_request_is_not_verified_against_service_delivery(configured_cli):
+    from dataclasses import replace
+
+    from nothx.cli import resolve_subscription
+
+    runner, config, old, stats, headers = _resolve_fixture(configured_cli)
+    header = replace(headers[0], list_id=None, uid=202)
+    identity = header.subscription_identity
+    stats = _stats_for_emails(header.domain, [header], identity)
+    subscription, _ = _persist_subscription_records(
+        stats,
+        [header],
+        Classification(EmailType.MARKETING, Action.REVIEW, 0.9, "review", "heuristics"),
+    )
+    with (
+        patch("nothx.resolution.refresh_sources", return_value=(stats, [header])),
+        patch(
+            "nothx.cli.unsubscribe_subscription",
+            return_value=UnsubResult(success=True, method=UnsubMethod.GET),
+        ),
+    ):
+        result = runner.invoke(
+            resolve_subscription, [str(subscription["id"]), "--source-uid", "202", "--yes"]
+        )
+    assert result.exit_code == 0, result.output
+    op = db.list_unsubscribe_operations(subscription_id=subscription["id"])[0]
+    assert op["verification_scope"] == "source"
+    assert not db.list_operations_due_for_verification(
+        as_of=datetime.now(UTC) + timedelta(days=5), require_complete_scan=False
+    )
+    assert db.get_subscription(subscription["id"])["policy_action"] != "unsub"
+
+
+def test_resolve_list_excludes_aliased_service_source(configured_cli):
+    from dataclasses import replace
+
+    from nothx.cli import resolve_subscription
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    service = replace(headers[0], uid=202, list_id=None, subject="Account notice")
+    with (
+        patch("nothx.resolution.refresh_sources", return_value=(stats, [service, *headers])),
+        patch(
+            "nothx.cli.unsubscribe_subscription",
+            return_value=UnsubResult(success=True, method=UnsubMethod.GET),
+        ) as send,
+    ):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert [h.uid for h in send.call_args.args[0]] == [101]
+
+
+def test_refresh_alias_without_promotion_and_missing_message_id(configured_cli):
+    from dataclasses import replace
+
+    from nothx.resolution import refresh_sources
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    alias = replace(headers[0], uid=202, list_id=None, message_id="")
+    db.upsert_message_ref(
+        subscription["id"],
+        alias.account_key,
+        alias.mailbox_name,
+        "inbox",
+        alias.uidvalidity,
+        alias.uid,
+        from_address=alias.sender_address,
+        message_id=None,
+    )
+    assert subscription["promoted_from_kind"] is None
+    with patch("nothx.resolution.IMAPConnection") as connection:
+        conn = connection.return_value.__enter__.return_value
+        conn.fetch_header.side_effect = lambda locator: alias if locator.uid == 202 else headers[0]
+        _, found = refresh_sources(config, subscription)
+    assert {h.uid for h in found} == {101, 202}
+
+
+def test_refresh_prioritizes_old_promotion_and_can_target_an_older_uid(configured_cli):
+    from dataclasses import replace
+
+    from nothx.resolution import refresh_sources
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    original = headers[0]
+    for uid in range(1, 61):
+        db.upsert_message_ref(
+            subscription["id"],
+            original.account_key,
+            original.mailbox_name,
+            "inbox",
+            original.uidvalidity,
+            uid,
+            message_id=original.message_id,
+            from_address=original.sender_address,
+            list_id=original.normalized_list_id,
+            received_at=datetime.now(UTC) - timedelta(days=61 - uid),
+            promotional=uid == 1,
+        )
+    with patch("nothx.resolution.IMAPConnection") as connection:
+        conn = connection.return_value.__enter__.return_value
+        conn.fetch_header.side_effect = lambda locator: replace(original, uid=locator.uid)
+        _, found = refresh_sources(config, subscription)
+        assert 1 in {h.uid for h in found}
+        assert len(found) == 50
+        _, found = refresh_sources(config, subscription, source_uid=2)
+        assert [h.uid for h in found] == [2]
+
+
+def test_review_continues_after_resolve_refusal(configured_cli):
+    import click
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    db.set_subscription_policy(subscription["id"], "review")
+    other = db.upsert_subscription(
+        "user@example.com", "from", "other@example.com", policy_action="review"
+    )
+    with (
+        patch(
+            "nothx.cli._pick_saved_reviews",
+            return_value=[str(subscription["id"]), str(other["id"])],
+        ),
+        patch("nothx.cli.questionary.select") as select,
+        patch(
+            "nothx.cli.resolve_subscription.callback",
+            side_effect=click.ClickException("Retry exhausted"),
+        ),
+    ):
+        select.return_value.ask.side_effect = ["resolve", "keep"]
+        result = runner.invoke(review, [])
+    assert result.exit_code == 0, result.output
+    assert "Retry exhausted" in result.output
+    assert db.get_subscription(other["id"])["policy_action"] == "keep"
+
+
+def test_resolve_exhausted_dry_run_reports_real_execution_limit(configured_cli):
+    from nothx.cli import resolve_subscription
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    op = db.get_or_create_unsubscribe_operation(
+        subscription["id"], "spent", outcome="failed", retry_generation=1
+    )
+    db.record_unsubscribe_attempt(
+        op["id"], "get", method="get", outcome="permanent_failure", endpoint_fingerprint="c" * 64
+    )
+    with patch("nothx.resolution.refresh_sources", return_value=(stats, headers)):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "Retry exhausted" in result.output
+    assert len(db.list_unsubscribe_operations(subscription_id=subscription["id"])) == 1
+
+
+def test_browser_confirmation_can_renew_an_ineffective_request(configured_cli):
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    old = datetime.now(UTC) - timedelta(days=5)
+    op = db.get_or_create_unsubscribe_operation(
+        subscription["id"], "old", outcome="requested", requested_at=old
+    )
+    db.update_unsubscribe_operation_outcome(op["id"], "ineffective")
+    acknowledged = db.acknowledge_browser_confirmation(subscription["id"])
+    assert acknowledged["outcome"] == "requested"
+    assert datetime.fromisoformat(acknowledged["grace_until"]) > datetime.now(UTC)
+
+
+def test_parked_generation_one_can_resume_its_unspent_retry(configured_cli):
+    from nothx.cli import resolve_subscription
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    first = db.get_or_create_unsubscribe_operation(subscription["id"], "first", outcome="failed")
+    db.record_unsubscribe_attempt(
+        first["id"], "get", method="get", outcome="permanent_failure", endpoint_fingerprint="a" * 64
+    )
+    parked = db.get_or_create_unsubscribe_operation(
+        subscription["id"], "parked", retry_generation=1
+    )
+    db.update_unsubscribe_operation_outcome(
+        parked["id"], "needs_user", error_code="unsubscribe_consent_required"
+    )
+    with (
+        patch("nothx.resolution.refresh_sources", return_value=(stats, headers)),
+        patch(
+            "nothx.cli.unsubscribe_subscription",
+            return_value=UnsubResult(success=True, method=UnsubMethod.GET),
+        ) as send,
+    ):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--retry", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Request accepted" in result.output
+    send.assert_called_once()
+    assert (
+        db.list_unsubscribe_operations(subscription_id=subscription["id"])[0]["retry_generation"]
+        == 1
+    )
+
+
+def test_browser_ack_keeps_existing_whole_sender_verification_scope(configured_cli):
+    runner, config = configured_cli
+    sub = db.upsert_subscription(
+        "user@example.com", "from", "offers@example.com", policy_action="unsub"
+    )
+    op = db.get_or_create_unsubscribe_operation(sub["id"], "automatic", outcome="needs_user")
+    acknowledged = db.acknowledge_browser_confirmation(sub["id"])
+    assert acknowledged["verification_scope"] == "subscription"
+    due = db.list_operations_due_for_verification(
+        as_of=datetime.now(UTC) + timedelta(days=3), require_complete_scan=False
+    )
+    assert [item["id"] for item in due] == [op["id"]]
+
+
+def test_refresh_keeps_newest_token_despite_many_old_promotions(configured_cli):
+    from dataclasses import replace
+
+    from nothx.resolution import refresh_sources
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    original = headers[0]
+    now = datetime.now(UTC)
+    for uid in range(1, 61):
+        db.upsert_message_ref(
+            subscription["id"],
+            original.account_key,
+            original.mailbox_name,
+            "inbox",
+            original.uidvalidity,
+            uid,
+            message_id=original.message_id,
+            from_address=original.sender_address,
+            list_id=original.normalized_list_id,
+            received_at=now - timedelta(days=61 - uid),
+            promotional=uid != 60,
+        )
+    with patch("nothx.resolution.IMAPConnection") as connection:
+        conn = connection.return_value.__enter__.return_value
+        conn.fetch_header.side_effect = lambda locator: replace(
+            original, uid=locator.uid, received_at=now - timedelta(days=61 - locator.uid)
+        )
+        _, found = refresh_sources(config, subscription)
+    assert 60 in [h.uid for h in found[:3]]
+    assert len(found) == 50
+
+
+def test_resolve_preview_shows_older_sources_beyond_twelve_rows(configured_cli):
+    from dataclasses import replace
+
+    from nothx.cli import resolve_subscription
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    sources = [replace(headers[0], uid=uid) for uid in range(1, 21)]
+    with patch("nothx.resolution.refresh_sources", return_value=(stats, sources)):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "UID 20" in result.output

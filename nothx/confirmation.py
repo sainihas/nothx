@@ -40,6 +40,10 @@ class ConfirmationPage(HTMLParser):
             )
         )
         if self.hidden_elements or invisible:
+            # Hidden controls still affect browser form submission. Do not
+            # silently drop them and send a different preference payload.
+            if self.current and tag in {"input", "button", "select", "textarea", "form"}:
+                self.current.unsafe = True
             if tag not in {
                 "input",
                 "br",
@@ -73,6 +77,8 @@ class ConfirmationPage(HTMLParser):
             self.forms.append(self.current)
         if self.current is None:
             return
+        if tag == "fieldset" and "disabled" in values:
+            self.current.unsafe = True
         if tag in {"textarea", "select", "iframe"}:
             self.current.unsafe = True
         if tag in {"input", "button"}:
@@ -95,8 +101,9 @@ class ConfirmationPage(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if self.hidden_elements:
-            if self.hidden_elements[-1] == tag:
-                self.hidden_elements.pop()
+            if tag in self.hidden_elements:
+                index = len(self.hidden_elements) - 1 - self.hidden_elements[::-1].index(tag)
+                del self.hidden_elements[index:]
             return
         if tag in {"script", "style", "template"} and self.hidden:
             self.hidden -= 1
@@ -120,6 +127,9 @@ def confirmation_request(body: str, page_url: str) -> tuple[str, str, bytes | No
     """Return one same-origin opt-out request, or leave interactive pages alone."""
     page = ConfirmationPage()
     page.feed(body)
+    # Relative form actions under a document base need browser semantics.
+    if re.search(r"<base\b", body, re.I):
+        return None
     visible = " ".join(page.text).casefold()
     if re.search(r"captcha|type\s*=\s*['\"]?password", body, re.I) or re.search(
         r"sign in to|log in to|login required|enable javascript", visible
@@ -155,6 +165,10 @@ def confirmation_request(body: str, page_url: str) -> tuple[str, str, bytes | No
             if not re.search(r"confirm (?:your )?unsubscribe|unsubscribe from", form_text):
                 continue
         if re.search(r"delete (?:your )?account|close (?:your )?account|resubscribe", form_text):
+            continue
+        if re.search(
+            r"\ball\b(?:\s+\w+){0,2}\s+(?:emails?|communications|messages|mail)\b", form_text
+        ):
             continue
         target = urljoin(page_url, form.action)
         dest = urlsplit(target)

@@ -402,24 +402,33 @@ remains available. Existing model environment overrides still take precedence.
 ### Finishing saved unsubscribe decisions
 
 `nothx review` includes failed requests and offers **Resolve unsubscribe in Nothx**.
-The equivalent `nothx resolve ID` refreshes up to 50 stored Inbox sources without
-being limited to the normal 30-day lookback. It checks UIDVALIDITY, UID, Message-ID,
+The equivalent `nothx resolve ID` refreshes up to 50 stored Inbox sources, prioritizing
+promotional messages and advertised unsubscribe methods across the full saved history.
+An explicit `--source-uid UID` can select an older stored source outside that shortlist. It checks UIDVALIDITY, UID, Message-ID,
 From and list identity before using a source. If the mailbox changed or the messages
 are gone, run `nothx cleanup` to refresh the full Inbox history.
 
 Use `nothx resolve ID --dry-run` to see usable source UIDs without contacting a sender
 or saving decisions. Mixed From-address groups require a source selection; scripts
 can pass `--source-uid UID --yes`. This source-level choice does not set a blanket
-unsubscribe policy for the sender. Optional `nothx config --footer-scan on` also lets
+unsubscribe policy for the sender, and unrelated service deliveries cannot mark that
+source-level request ineffective. Whole-list resolution uses matching List-ID messages;
+aliased From-only messages require an explicit source selection. Optional `nothx config --footer-scan on` also lets
 resolution inspect at most three bounded, authenticated footer sources for alternatives
 to failed header links. It stays off by default. Full scans spend their 100-message-per-account footer budget
 on the newest eligible message from distinct subscriptions, so a single prolific
 newsletter cannot consume the entire budget.
 
-An explicit `--retry` permits one additional attempt. Accepted requests, ambiguous
+An explicit `--retry` permits one additional contacting attempt. Consent or authentication
+boundaries that sent nothing do not spend this retry. Accepted requests, ambiguous
 submissions and exhausted retries are not replayed. Ordinary scans preserve these
 boundaries. For a provider requiring login or preference choices, use
-`nothx open-unsubscribe ID`, complete the provider step, then
+`nothx open-unsubscribe ID` (which refreshes only saved sources for this identity),
+complete the provider step, then
 `nothx resolve ID --completed` after seeing confirmation. The latter records **your
 reported confirmation**, not independent proof of delivery stopping. Nothx waits
-48 hours and a complete subsequent Inbox scan before reporting verified quietness.
+48 hours and a complete subsequent Inbox scan before reporting verified quietness
+for whole-list requests. A source-level opt-out stays requested: Nothx cannot distinguish
+that stream from other mail sharing the address. Browser acknowledgements are atomic
+with execution claims, and they resolve prior ambiguity without permitting a replay
+to that ambiguous endpoint.

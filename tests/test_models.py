@@ -125,3 +125,18 @@ class TestListUnsubscribeParsing:
     def test_empty_brackets(self):
         header = make_header(list_unsubscribe="<>")
         assert header.list_unsubscribe_targets == []
+
+
+@pytest.mark.parametrize("fold", ["\r\n ", "\r\n\t", "\n "])
+def test_folded_quoted_display_name_preserves_sender_address_and_identity(fold):
+    header = make_header(f'"First, Second & Third{fold}Team" <bulletin@example.com>')
+    header.account_key = "owner@example.com"
+    assert header.sender_address == "bulletin@example.com"
+    assert header.domain == "example.com"
+    assert header.subscription_identity.kind == "from"
+    assert header.subscription_identity.value == "bulletin@example.com"
+
+
+def test_unfolding_does_not_join_an_address_split_across_lines():
+    header = make_header('"Display name" <user@examp\r\n le.com>')
+    assert header.sender_address == ""

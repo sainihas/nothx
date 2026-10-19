@@ -158,3 +158,13 @@ class TestAuthenticatedCapabilities:
         assert client.method_calls[0][0] == "login"
         assert client.method_calls[1][0] == "capability"
         connection.disconnect()
+
+
+def test_raw_folded_display_name_does_not_hide_a_valid_sender():
+    message = email.message_from_bytes(
+        b'From: "First, Second & Third\r\n Team" <bulletin@example.com>\r\n'
+        b"Subject: Weekly digest\r\n\r\n"
+    )
+    header = make_connection()._parse_header(message, is_seen=False)
+    assert header is not None
+    assert header.sender_address == "bulletin@example.com"

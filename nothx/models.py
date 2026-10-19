@@ -281,12 +281,17 @@ class EmailHeader:
     def sender_address(self) -> str:
         """Extract the addr-spec from the From header, or '' if invalid."""
         try:
-            _, addr = email.utils.parseaddr(self.sender)
+            raw_sender = self.sender or ""
+            bracket = re.search(r"<([^>]*)>", raw_sender)
+            if bracket and any(char.isspace() for char in bracket.group(1).strip()):
+                return ""
+            sender = re.sub(r"\r?\n[ \t]+", " ", raw_sender)
+            _, addr = email.utils.parseaddr(sender)
             if not addr:
                 # parseaddr rejects malformed input like '<a@b.com> extra';
                 # retry on just the angle-bracket group so protected-domain
                 # checks still see the real domain.
-                match = re.search(r"<([^>]*)>", self.sender or "")
+                match = re.search(r"<([^>]*)>", sender)
                 if match:
                     _, addr = email.utils.parseaddr(match.group(1))
         except (TypeError, AttributeError):

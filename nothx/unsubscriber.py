@@ -853,6 +853,16 @@ def _execute_get(url: str) -> UnsubResult:
         )
         # A single, unambiguous opt-out confirmation can be completed by the
         # app. No preference choices, credentials, scripts or cross-site forms.
+        initial_success = response.status == 204 or (
+            200 <= response.status < 300
+            and _check_success_indicators(response.body)
+            and not _check_interaction_gate_indicators(response.body)
+        )
+        if initial_success:
+            return _mark_attempt(
+                UnsubResult(success=True, method=UnsubMethod.GET, http_status=response.status),
+                "accepted",
+            )
         confirmation = confirmation_request(response.body, response.final_url)
         if confirmation is not None:
             target, method, data = confirmation
@@ -1248,7 +1258,9 @@ def _check_success_indicators(body: str) -> bool:
     """Check if response body indicates successful unsubscribe."""
     body_lower = visible_text(body).casefold()
     success_phrases = [
-        "already unsubscribed",
+        "you are already unsubscribed",
+        "you're already unsubscribed",
+        "you’re already unsubscribed",
         "you’ve unsubscribed",
         "you've unsubscribed",
         "successfully unsubscribed",
@@ -1279,7 +1291,11 @@ def _check_success_indicators(body: str) -> bool:
         "removed from this mailing list",
         "removed from the mailing list",
     ]
-    return any(phrase in body_lower for phrase in success_phrases)
+    if re.fullmatch(r"already unsubscribed[.!]?", body_lower.strip()):
+        return True
+    # A conditional instruction is not a report of a completed request.
+    assertions = re.sub(r"\bif\b[^.!?]*(?:[.!?]|$)", "", body_lower)
+    return any(phrase in assertions for phrase in success_phrases)
 
 
 def _check_confirmation_indicators(body: str) -> bool:

@@ -117,3 +117,52 @@ def test_hidden_success_placeholder_is_not_confirmation(attribute):
     assert not unsubscriber._check_success_indicators(
         f"<div {attribute}><b>You have been unsubscribed</b></div><p>Loading</p>"
     )
+
+
+def test_success_page_does_not_submit_a_broader_followup(monkeypatch):
+    monkeypatch.setattr(unsubscriber._http_rate_limiter, "acquire", lambda timeout=None: True)
+    from unittest.mock import Mock
+
+    fetch = Mock(
+        return_value=FetchResponse(200, "<h1>You have been unsubscribed</h1>" + FORM, URL, 0)
+    )
+    monkeypatch.setattr(unsubscriber, "safe_fetch", fetch)
+    result = unsubscriber._execute_get(URL)
+    assert result.success
+    assert not result._ambiguous_send
+    fetch.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<form><fieldset disabled><button>Unsubscribe</button></fieldset></form>",
+        '<form><div hidden><input type="checkbox" name="all" checked></div><button>Unsubscribe</button></form>',
+        '<form><div hidden><input type="hidden" name="token" value="test"></div><button>Unsubscribe</button></form>',
+        "<form><p>Unsubscribe from all emails</p><button>Unsubscribe</button></form>",
+        '<base href="https://other.example/">' + FORM,
+    ],
+)
+def test_form_semantics_that_need_a_browser_are_not_submitted(body):
+    assert confirmation_request(body, URL) is None
+
+
+def test_unclosed_optional_tag_in_hidden_container_does_not_hide_success():
+    assert unsubscriber._check_success_indicators(
+        "<div hidden><p>placeholder</div><h1>You have been unsubscribed</h1>"
+    )
+
+
+def test_conditional_unsubscribe_text_is_not_confirmation():
+    assert not unsubscriber._check_success_indicators("If you've already unsubscribed, ignore this")
+    assert not unsubscriber._check_success_indicators(
+        "If you are already unsubscribed, ignore this."
+    )
+    assert unsubscriber._check_success_indicators("You are already unsubscribed.")
+    assert unsubscriber._check_success_indicators("Already unsubscribed")
+    assert (
+        confirmation_request(
+            "<form>Unsubscribe from all marketing emails<button>Unsubscribe</button></form>", URL
+        )
+        is None
+    )

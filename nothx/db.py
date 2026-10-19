@@ -7,6 +7,7 @@ be written to this database.
 """
 
 import email.utils
+import hashlib
 import json
 import os
 import re
@@ -93,6 +94,8 @@ def init_db() -> None:
             and (
                 not _column_exists(conn, "mailbox_actions", "retryable")
                 or not _column_exists(conn, "subscriptions", "policy_source")
+                or not _column_exists(conn, "message_refs", "promotional")
+                or not _column_exists(conn, "unsubscribe_operations", "verification_scope")
                 or any(
                     not _column_exists(conn, "unsubscribe_operations", column)
                     for column in ("claim_owner", "claimed_at", "claim_expires_at")
@@ -305,6 +308,17 @@ def _migrate(conn: sqlite3.Connection, version: int | None = None) -> None:
     _add_column_if_missing(conn, "unsubscribe_operations", "claim_owner", "TEXT")
     _add_column_if_missing(conn, "unsubscribe_operations", "claimed_at", "TEXT")
     _add_column_if_missing(conn, "unsubscribe_operations", "claim_expires_at", "TEXT")
+    _add_column_if_missing(conn, "message_refs", "promotional", "INTEGER NOT NULL DEFAULT 0")
+    had_verification_scope = _column_exists(conn, "unsubscribe_operations", "verification_scope")
+    _add_column_if_missing(
+        conn, "unsubscribe_operations", "verification_scope", "TEXT NOT NULL DEFAULT 'subscription'"
+    )
+    if not had_verification_scope:
+        conn.execute(
+            "UPDATE unsubscribe_operations SET verification_scope = 'source' "
+            "WHERE subscription_id IN (SELECT id FROM subscriptions WHERE identity_kind = 'from') "
+            "AND operation_key LIKE 'resolve-v1-%'"
+        )
     had_mailbox_retryability = _column_exists(conn, "mailbox_actions", "retryable")
     _add_column_if_missing(
         conn,
@@ -1204,6 +1218,7 @@ def upsert_message_ref(
     provider_verdict: str | None = None,
     endpoint_fingerprints: list[str] | tuple[str, ...] | None = None,
     has_header_method: bool = False,
+    promotional: bool = False,
     can_unsubscribe: bool = False,
     scanned_at: datetime | str | None = None,
 ) -> dict[str, Any]:
@@ -1242,8 +1257,8 @@ def upsert_message_ref(
                 message_id, from_address, list_id, received_at, flags_json,
                 auth_evidence_json, bulk_evidence_json, provider_verdict,
                 endpoint_fingerprints_json, has_header_method, can_unsubscribe,
-                scanned_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scanned_at, created_at, updated_at, promotional
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account, mailbox, uidvalidity, uid) DO UPDATE SET
                 subscription_id = excluded.subscription_id,
                 mailbox_role = excluded.mailbox_role,
@@ -1263,6 +1278,7 @@ def upsert_message_ref(
                 ),
                 endpoint_fingerprints_json = excluded.endpoint_fingerprints_json,
                 has_header_method = excluded.has_header_method,
+                promotional = excluded.promotional,
                 can_unsubscribe = excluded.can_unsubscribe,
                 scanned_at = excluded.scanned_at,
                 updated_at = excluded.updated_at
@@ -1288,6 +1304,7 @@ def upsert_message_ref(
                 now,
                 now,
                 now,
+                int(promotional),
             ),
         )
         row = conn.execute(
@@ -1346,6 +1363,8 @@ def list_message_refs(
     account: str | None = None,
     mailbox_role: str | None = None,
     limit: int = 500,
+    prioritize_methods: bool = False,
+    source_uid: int | None = None,
 ) -> list[dict[str, Any]]:
     if limit < 1:
         return []
@@ -1362,13 +1381,17 @@ def list_message_refs(
     if mailbox_role is not None:
         clauses.append("mailbox_role = ?")
         params.append(mailbox_role)
+    if source_uid is not None:
+        clauses.append("uid = ?")
+        params.append(source_uid)
+    priority = "promotional DESC, has_header_method DESC, " if prioritize_methods else ""
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     with get_db() as conn:
         rows = conn.execute(
             f"""
             SELECT * FROM message_refs{where}
-            ORDER BY COALESCE(received_at, scanned_at) DESC, id DESC LIMIT ?
+            ORDER BY {priority}COALESCE(received_at, scanned_at) DESC, id DESC LIMIT ?
             """,
             params,
         ).fetchall()
@@ -1479,6 +1502,8 @@ def claim_unsubscribe_operation(
     *,
     kind: str = "unsubscribe",
     allow_consent_resume: bool = False,
+    allow_no_contact_resume: bool = False,
+    verification_scope: str = "subscription",
     trigger_message_ref_id: int | None = None,
     retry_generation: int = 0,
     lease_seconds: int = DEFAULT_OPERATION_LEASE_SECONDS,
@@ -1492,6 +1517,8 @@ def claim_unsubscribe_operation(
     mailbox before it crashed. Returning ``acquired=False`` is therefore a
     hard no-side-effect decision for the caller.
     """
+    if verification_scope not in {"subscription", "source"}:
+        raise ValueError("Invalid verification scope")
     operation_key = _validate_nonempty(operation_key, "operation key", 255)
     if "://" in operation_key or "?" in operation_key:
         raise ValueError("operation_key must not contain a raw URL")
@@ -1660,6 +1687,18 @@ def claim_unsubscribe_operation(
                               AND outcome = 'needs_user'
                               AND error_code = 'unsubscribe_consent_required'
                           )
+                          AND NOT (
+                              ? = 1 AND outcome IN ('needs_user', 'failed')
+                              AND COALESCE(error_code, '') != 'execution_claim_expired'
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM unsubscribe_attempts a
+                                  WHERE a.operation_id = unsubscribe_operations.id
+                                    AND (a.ambiguous_send = 1 OR (
+                                        a.method != 'none' AND a.outcome != 'skipped'
+                                        AND COALESCE(a.error_code, '') != 'local_rate_limit'
+                                    ))
+                              )
+                          )
                       )
                   ))
                   OR (outcome IS NULL AND claim_owner IS NOT NULL)
@@ -1672,6 +1711,7 @@ def claim_unsubscribe_operation(
                 kind,
                 retry_generation,
                 int(allow_consent_resume),
+                int(allow_no_contact_resume),
             ),
         ).fetchone()
         if conflict is not None:
@@ -1721,8 +1761,8 @@ def claim_unsubscribe_operation(
                 subscription_id, operation_key, kind, outcome,
                 trigger_message_ref_id, retry_generation, attempt_count,
                 started_at, claim_owner, claimed_at, claim_expires_at,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, verification_scope
+            ) VALUES (?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 subscription_id,
@@ -1736,6 +1776,7 @@ def claim_unsubscribe_operation(
                 expires,
                 claimed,
                 claimed,
+                verification_scope,
             ),
         )
         row = conn.execute(
@@ -1916,7 +1957,11 @@ def list_operations_due_for_verification(
     that account occurred at or after its grace deadline.
     """
     timestamp = _iso_timestamp(as_of)
-    clauses = ["o.outcome = 'requested'", "o.grace_until <= ?"]
+    clauses = [
+        "o.outcome = 'requested'",
+        "o.grace_until <= ?",
+        "o.verification_scope = 'subscription'",
+    ]
     params: list[Any] = [timestamp]
     if account is not None:
         clauses.append("s.account = ?")
@@ -2053,6 +2098,81 @@ def record_unsubscribe_attempt(
             "SELECT * FROM unsubscribe_attempts WHERE id = ?", (cursor.lastrowid,)
         ).fetchone()
         assert row is not None
+        return dict(row)
+
+
+def acknowledge_browser_confirmation(subscription_id: int) -> dict[str, Any]:
+    """Atomically record a user report while excluding concurrent send claims."""
+    now = _iso_timestamp(None)
+    grace = _iso_timestamp(datetime.fromisoformat(now) + timedelta(hours=48))
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        subscription = conn.execute(
+            "SELECT * FROM subscriptions WHERE id = ?", (subscription_id,)
+        ).fetchone()
+        if subscription is None:
+            raise ValueError("Subscription not found")
+        if subscription["policy_action"] == "block" or subscription["last_outcome"] == "blocked":
+            raise ValueError("This subscription is blocked")
+        if conn.execute(
+            "SELECT 1 FROM unsubscribe_operations WHERE subscription_id = ? AND outcome IS NULL",
+            (subscription_id,),
+        ).fetchone():
+            raise ValueError("An operation is still unresolved; confirmation was not recorded")
+        operation = conn.execute(
+            "SELECT * FROM unsubscribe_operations WHERE subscription_id = ? "
+            "AND kind = 'unsubscribe' ORDER BY created_at DESC, id DESC LIMIT 1",
+            (subscription_id,),
+        ).fetchone()
+        if operation and operation["outcome"] in {"requested", "verified_quiet"}:
+            return dict(operation)
+        if operation and operation["outcome"] not in {"failed", "needs_user", "ineffective"}:
+            raise ValueError("There is no manual request to acknowledge")
+        if operation is None:
+            # Opening a browser first is a valid app workflow. Without a
+            # selected source, do not infer a whole-list verification scope.
+            cursor = conn.execute(
+                "INSERT INTO unsubscribe_operations "
+                "(subscription_id, operation_key, kind, started_at, created_at, updated_at, "
+                "verification_scope) VALUES (?, 'user-browser-v1', 'unsubscribe', ?, ?, ?, 'source')",
+                (subscription_id, now, now, now),
+            )
+            operation = conn.execute(
+                "SELECT * FROM unsubscribe_operations WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        assert operation is not None
+        operation_id = operation["id"]
+        number = conn.execute(
+            "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM unsubscribe_attempts WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO unsubscribe_attempts "
+            "(operation_id, attempt_key, attempt_number, method, outcome, endpoint_fingerprint, "
+            "error_code, attempted_at, created_at) "
+            "VALUES (?, ?, ?, 'none', 'accepted', ?, 'user_confirmed_browser', ?, ?)",
+            (
+                operation_id,
+                f"user-confirmed-browser-v1-{number}",
+                number,
+                hashlib.sha256(b"user-confirmed-browser").hexdigest(),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE unsubscribe_operations SET outcome = 'requested', requested_at = ?, "
+            "grace_until = ?, verified_at = NULL, completed_at = ?, updated_at = ?, "
+            "attempt_count = attempt_count + 1, error_code = 'user_confirmed_browser', "
+            "detail_redacted = 'User reports provider confirmation; delivery not yet verified' "
+            "WHERE id = ?",
+            (now, grace, now, now, operation_id),
+        )
+        row = conn.execute(
+            "SELECT * FROM unsubscribe_operations WHERE id = ?", (operation_id,)
+        ).fetchone()
+        assert row is not None
+        _sync_subscription_outcome(conn, dict(row), now)
         return dict(row)
 
 

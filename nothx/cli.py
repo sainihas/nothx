@@ -6,7 +6,6 @@ import imaplib
 import json
 import logging
 import re
-import shlex
 import uuid
 import webbrowser
 from dataclasses import replace
@@ -1611,8 +1610,8 @@ def _show_welcome_screen() -> None:
         ]
     else:
         choices = [
-            questionary.Choice("Clean up the full Inbox (preview first)", value="cleanup"),
-            questionary.Choice("Check recent mail", value="run"),
+            questionary.Choice("Full Inbox — review and clean up", value="cleanup"),
+            questionary.Choice("Recent mail — review and clean up", value="run"),
             questionary.Choice("Show current stats", value="status"),
             questionary.Choice("Review pending decisions", value="review"),
             questionary.Choice("List all tracked senders", value="senders"),
@@ -1631,7 +1630,7 @@ def _show_welcome_screen() -> None:
     if selected == "init":
         ctx.invoke(init)
     elif selected == "cleanup":
-        ctx.invoke(cleanup, apply=False, auto=False, account=())
+        ctx.invoke(cleanup, apply=False, auto=False, account=(), preview=False)
     elif selected == "run":
         ctx.invoke(run, auto=False, dry_run=False, verbose=False, account=())
     elif selected == "status":
@@ -2317,13 +2316,14 @@ def _preview_notice(config: Config) -> None:
 
 
 @main.command()
-@click.option("--apply", is_flag=True, help="Apply the full-Inbox plan after review")
-@click.option("--auto", is_flag=True, help="With --apply, use automatic mode")
+@click.option("--apply", is_flag=True, hidden=True)
+@click.option("--preview", is_flag=True, help="Only show the plan; no actions or saved decisions")
+@click.option("--auto", is_flag=True, help="Apply eligible decisions without prompts")
 @click.option("--account", "-a", multiple=True, help="Limit cleanup to an account name or email")
-def cleanup(apply: bool, auto: bool, account: tuple[str, ...]) -> None:
-    """Preview all Inbox history with configured AI; --apply performs the actions."""
-    if auto and not apply:
-        raise click.UsageError("--auto requires --apply")
+def cleanup(apply: bool, auto: bool, account: tuple[str, ...], preview: bool = False) -> None:
+    """Scan the full Inbox, review the plan, and apply approved actions in one run."""
+    if preview and (auto or apply):
+        raise click.UsageError("--preview cannot be combined with --auto or --apply")
     config = Config.load()
     if not config.is_configured():
         raise click.ClickException("Run 'nothx init' first.")
@@ -2341,24 +2341,20 @@ def cleanup(apply: bool, auto: bool, account: tuple[str, ...]) -> None:
     console.print(
         "[header]Full Inbox cleanup — all dates; Junk and other folders excluded[/header]"
     )
-    if not apply:
+    if preview:
         _preview_notice(config)
     _run_scan(
         config,
         verbose=True,
-        dry_run=not apply,
+        dry_run=preview,
         auto=auto,
         account_names=names or None,
         full_history=True,
         inbox_only=True,
-        ai_preview=not apply,
+        ai_preview=preview,
     )
-    if not apply:
-        account_flags = "".join(f" --account {shlex.quote(name)}" for name in names)
-        console.print(
-            f"\nPreview finished. Run [bold]nothx cleanup --apply{escape(account_flags)}[/bold] "
-            "to review and apply."
-        )
+    if preview:
+        console.print("\n[muted]Preview only; no actions were applied.[/muted]")
 
 
 def _show_scan_coverage(coverage: list[MailboxCoverage], scan_days: int) -> None:
@@ -2391,7 +2387,7 @@ def _show_scan_coverage(coverage: list[MailboxCoverage], scan_days: int) -> None
     if excluded:
         console.print(
             f"[warning]{excluded:,} Inbox messages were outside this scan's scope. "
-            "Use `nothx cleanup` to preview the full backlog.[/warning]"
+            "Use `nothx cleanup` to review and clean up the full backlog.[/warning]"
         )
 
 
@@ -2578,6 +2574,10 @@ def _run_scan(
             completed=len(sender_stats),
             description="Classification complete",
         )
+
+    cache_hits = engine.ai.last_cache_hits
+    if type(cache_hits) is int and cache_hits:
+        console.print(f"[muted]Reused {cache_hits:,} unchanged AI classifications.[/muted]")
 
     # Persist AI's content type and its recommended action as separate facts,
     # even when authentication/safety policy transformed the executable action

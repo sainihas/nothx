@@ -127,8 +127,8 @@ Provider threat evidence and explicit block rules are resolved before AI. Mixed 
 | `nothx` | Interactive menu |
 | `nothx init` | Setup wizard — accounts, API key, first scan |
 | `nothx run` | Recheck the recent lookback with configured AI and process eligible mail |
-| `nothx cleanup` | Preview all Inbox history with configured AI; no mail actions |
-| `nothx cleanup --apply` | Review and apply a full-Inbox cleanup |
+| `nothx cleanup` | Scan the full Inbox once, review the plan, and apply approved actions |
+| `nothx cleanup --preview` | Explicit read-only preview; no mail actions |
 | `nothx status` | Stats, accounts, schedule at a glance |
 | `nothx review` | Decide on uncertain senders |
 | `nothx test --ai` | Test mailbox connections and the configured AI provider, including disabled-provider recovery |

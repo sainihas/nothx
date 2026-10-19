@@ -731,6 +731,7 @@ def test_batch_progress_counts_only_cloud_eligible_groups(policy_engine):
     )
     provider = Mock()
     provider.name = "fake"
+    provider.model = "synthetic-model"
     provider.is_available.return_value = True
     provider.complete.return_value.text = "[]"
     policy_engine.config.ai.enabled = True

@@ -1,6 +1,8 @@
 """Anthropic Claude provider implementation."""
 
 import logging
+import threading
+import time
 from typing import Any
 
 from .base import BaseAIProvider, ProviderError, ProviderErrorType, ProviderResponse
@@ -45,6 +47,9 @@ def _sanitize_error_message(error: Exception) -> str:
 class AnthropicProvider(BaseAIProvider):
     """Anthropic Claude API provider."""
 
+    batch_size = 32
+    max_parallel_batches = 4
+
     def __init__(self, api_key: str | None, model: str | None = None):
         self.api_key = api_key
         requested_model = model or self.default_model
@@ -56,6 +61,9 @@ class AnthropicProvider(BaseAIProvider):
                 requested_model,
             )
         self._client: Any = None
+        self._client_lock = threading.Lock()
+        self._rate_lock = threading.Lock()
+        self._retry_at = 0.0
 
     @property
     def name(self) -> str:
@@ -75,15 +83,18 @@ class AnthropicProvider(BaseAIProvider):
 
     def _get_client(self):
         """Get or create Anthropic client."""
-        if self._client is None:
-            try:
-                import anthropic
+        with self._client_lock:
+            if self._client is None:
+                try:
+                    import anthropic
 
-                self._client = anthropic.Anthropic(api_key=self.api_key)
-            except ImportError as err:
-                raise ImportError(
-                    "Anthropic SDK not installed. Run: pip install anthropic"
-                ) from err
+                    self._client = anthropic.Anthropic(
+                        api_key=self.api_key, timeout=60.0, max_retries=0
+                    )
+                except ImportError as err:
+                    raise ImportError(
+                        "Anthropic SDK not installed. Run: pip install anthropic"
+                    ) from err
         return self._client
 
     def is_available(self) -> bool:
@@ -124,6 +135,17 @@ class AnthropicProvider(BaseAIProvider):
         try:
             import anthropic
 
+            with self._rate_lock:
+                delay = self._retry_at - time.monotonic()
+            if delay > 60:
+                raise ProviderError(
+                    ProviderErrorType.RATE_LIMIT_ERROR,
+                    "Anthropic rate limit requires a longer cooldown; using local classification",
+                    self.name,
+                    retryable=False,
+                )
+            if delay > 0:
+                time.sleep(delay)
             client = self._get_client()
             response = client.messages.create(
                 model=self.model,
@@ -151,6 +173,12 @@ class AnthropicProvider(BaseAIProvider):
         except ProviderError:
             raise
         except anthropic.RateLimitError as e:
+            try:
+                delay = max(1.0, float(e.response.headers.get("retry-after", "2")))
+            except (TypeError, ValueError):
+                delay = 2.0
+            with self._rate_lock:
+                self._retry_at = max(self._retry_at, time.monotonic() + delay)
             raise ProviderError(
                 error_type=ProviderErrorType.RATE_LIMIT_ERROR,
                 message=str(e),

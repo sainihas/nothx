@@ -257,3 +257,15 @@ def test_progress_callback_does_not_enable_ai_egress(temp_db):
     )
     assert progress == []
     assert provider.calls == []
+
+
+@pytest.mark.parametrize("action", ["unsub", "block"])
+def test_invalid_content_type_never_becomes_a_destructive_action(temp_db, action):
+    classifier = _classifier(_FakeProvider([]))
+    results, errors = classifier._parse_response(
+        '[{"key":"s0","domain":"example.com","type":"keep","action":"'
+        + action
+        + '","confidence":0.99}]'
+    )
+    assert errors
+    assert results["s0"].action is Action.REVIEW

@@ -1502,7 +1502,7 @@ def test_persisted_folder_conflict_is_reviewed_and_never_contacted(configured_cl
     ):
         result = runner.invoke(run, ["--auto"])
     assert result.exit_code == 0, result.output
-    assert "1 need review" in result.output
+    assert "1 marketing/spam groups need review" in result.output
     unsub.assert_not_called()
     block.assert_not_called()
 
@@ -1679,10 +1679,15 @@ def test_interactive_scan_choices_remain_manual_after_new_junk_evidence(
         patch("nothx.cli.questionary.select") as select,
         patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(1, 0)),
     ):
-        select.return_value.ask.return_value = choice
+        select.return_value.ask.side_effect = [
+            "unsub" if initial_action is Action.UNSUB else "keep",
+            f"sender:{key}",
+            choice,
+            "finish",
+        ]
         first = runner.invoke(run, [])
     assert first.exit_code == 0, first.output
-    assert select.call_count == 1
+    assert select.call_count == 4
     sub = db.get_subscription(
         account=stats.account_key,
         identity_kind=stats.identity_kind,
@@ -1739,7 +1744,7 @@ def test_interactive_unsubscribe_retry_escalation_is_automatic_not_manual_block(
         patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(1, 0)) as move,
         patch("nothx.cli.unsubscribe_subscription") as unsub,
     ):
-        select.return_value.ask.return_value = "unsub"
+        select.return_value.ask.return_value = "finish"
         result = runner.invoke(run, [])
     assert result.exit_code == 0, result.output
     move.assert_called_once()
@@ -1764,7 +1769,7 @@ def test_cleanup_preview_is_full_inbox_ai_without_actions_or_saved_decisions(con
         patch("nothx.cli.db.log_run") as log,
     ):
         engine.return_value.classify_batch.return_value = classifications
-        result = runner.invoke(cleanup, ["--preview"])
+        result = runner.invoke(cleanup, ["--preview", "--details"])
     assert result.exit_code == 0, result.output
     assert scan.call_args.kwargs["full_history"] is True
     assert scan.call_args.kwargs["inbox_only"] is True
@@ -1886,7 +1891,7 @@ def test_incomplete_scan_defers_actions_even_with_explicit_rules(configured_cli,
     unsub.assert_not_called()
     block.assert_not_called()
     assert "Incomplete scan" in result.output
-    assert "1 need review" in result.output
+    assert "1 marketing/spam groups need review" in result.output
 
 
 def test_missing_unsubscribe_method_does_not_bypass_volume_safeguard(configured_cli):
@@ -1971,7 +1976,7 @@ def test_old_automatic_block_cannot_override_a_service_notice_guard(configured_c
         engine.return_value.classify_batch.return_value = classifications
         result = runner.invoke(run, ["--preview"])
     assert result.exit_code == 0, result.output
-    assert "1 need review" in result.output
+    assert "1 marketing/spam groups need review" in result.output
     block.assert_not_called()
 
 
@@ -2356,7 +2361,8 @@ def test_full_history_old_service_notice_blocks_stored_automatic_suppression(con
     assert result.exit_code == 0, result.output
     imap.assert_not_called()
     unsubscribe.assert_not_called()
-    assert db.get_subscription(subscription["id"])["policy_action"] == "review"
+    assert db.get_subscription(subscription["id"])["policy_action"] == "keep"
+    assert "outside cleanup review" in result.output
 
 
 @pytest.mark.parametrize(
@@ -2378,6 +2384,7 @@ def test_cleanup_and_recent_review_then_act_without_rescanning(
         patch("nothx.cli._styled_confirm", return_value=approve) as confirm,
         patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
         patch("nothx.cli._reconcile_due_operations"),
+        patch("nothx.cli._review_scan_decisions"),
     ):
         outcome = runner.invoke(command, args)
     assert outcome.exit_code == 0, outcome.output
@@ -2398,3 +2405,132 @@ def test_cleanup_preview_rejects_action_flags(configured_cli, extra):
         result = runner.invoke(cleanup, ["--preview", extra])
     assert result.exit_code == 2
     scan.assert_not_called()
+
+
+@pytest.mark.parametrize("phishing", [False, True])
+def test_protected_invoice_is_not_auto_blocked_for_auth_failure_alone(configured_cli, phishing):
+    from nothx.models import AuthenticationEvidence, AuthResult
+
+    runner, config = configured_cli
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    scan, classes = _subscription_scan(Action.BLOCK)
+    key, old = next(iter(scan.subscription_stats.items()))
+    header = scan.subscription_emails[key][0]
+    header.subject = "Invoice for your recent order"
+    header.authentication = AuthenticationEvidence(
+        trusted=True, spf=AuthResult.FAIL, dkim=AuthResult.FAIL, dmarc=AuthResult.FAIL
+    )
+    header.provider_threat = "phishing" if phishing else None
+    sender = _stats_for_emails(header.domain, [header])
+    scan.subscription_stats = {key: sender}
+    classes[key] = Classification(
+        EmailType.UNKNOWN, Action.BLOCK, 0.99, "Auth failed", "auth_policy"
+    )
+    sub, _ = _persist_subscription_records(sender, [header], classes[key], policy_action="block")
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        result = runner.invoke(cleanup, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert block.call_count == int(phishing)
+    unsub.assert_not_called()
+    if not phishing:
+        assert db.get_subscription(sub["id"])["policy_action"] == "keep"
+        assert "outside cleanup review" in result.output
+
+
+def test_personal_uncertain_mail_is_outside_cleanup_review(configured_cli):
+    runner, _ = configured_cli
+    scan, classes = _subscription_scan(Action.REVIEW)
+    key, sender = next(iter(scan.subscription_stats.items()))
+    sender.sample_subjects = ["Dinner tomorrow"]
+    sender.sample_senders = ["friend@example.com"]
+    classes[key] = Classification(
+        EmailType.UNKNOWN, Action.REVIEW, 0.5, "Personal thread", "uncertain"
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._styled_confirm") as confirm,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+        patch("nothx.cli._block_subscription") as block,
+    ):
+        result = runner.invoke(cleanup, [])
+    assert result.exit_code == 0, result.output
+    confirm.assert_not_called()
+    unsub.assert_not_called()
+    block.assert_not_called()
+    assert "0 marketing/spam groups need review" in result.output
+    assert "outside cleanup review" in result.output
+
+
+@pytest.mark.parametrize("initial_action", [Action.KEEP, Action.REVIEW, Action.UNSUB])
+def test_post_review_rechecks_incomplete_account_even_after_manual_override(
+    configured_cli, initial_action
+):
+    from nothx.scanner import MailboxCoverage
+
+    runner, _ = configured_cli
+    scan, classes = _subscription_scan(initial_action)
+    scan.coverage = [MailboxCoverage("default", "INBOX", "inbox", "full history", 20, 20, 1, False)]
+
+    def bypass(unsub, keep, review, block, **kwargs):
+        assert kwargs["incomplete_accounts"] == frozenset({"user@example.com"})
+        row = next(item for group in (unsub, keep, review, block) for item in group)
+        for group in (unsub, keep, review, block):
+            group.clear()
+        key, sender, classification = row
+        from nothx.cli import _manual_classification
+
+        block.append((key, sender, _manual_classification(classification, Action.BLOCK)))
+
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._styled_confirm", return_value=True),
+        patch("nothx.cli._review_scan_decisions", side_effect=bypass),
+        patch("nothx.cli._block_subscription") as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        result = runner.invoke(cleanup, [])
+    assert result.exit_code == 0, result.output
+    block.assert_not_called()
+    unsub.assert_not_called()
+
+
+@pytest.mark.parametrize("stored_action", [Action.UNSUB, Action.BLOCK])
+def test_unknown_ai_review_cannot_revive_old_automatic_destructive_policy(
+    configured_cli, stored_action
+):
+    runner, _ = configured_cli
+    scan, classes = _subscription_scan(stored_action)
+    key, sender = next(iter(scan.subscription_stats.items()))
+    old = classes[key]
+    old.source = "ai"
+    sub, _ = _persist_subscription_records(
+        sender, scan.subscription_emails[key], old, policy_action=stored_action.value
+    )
+    classes[key] = Classification(
+        EmailType.UNKNOWN,
+        Action.REVIEW,
+        0.99,
+        "Unrecognized cached content type",
+        "ai",
+        recommended_action=stored_action,
+        original_source="ai",
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._block_subscription") as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        result = runner.invoke(cleanup, ["--auto"])
+    assert result.exit_code == 0, result.output
+    block.assert_not_called()
+    unsub.assert_not_called()
+    assert db.get_subscription(sub["id"])["policy_action"] == "review"

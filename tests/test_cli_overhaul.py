@@ -1283,7 +1283,7 @@ def test_review_lists_account_scoped_manual_subscription(configured_cli):
         policy_action="review",
     )
     with patch("nothx.cli.questionary.select") as select:
-        select.return_value.ask.return_value = "skip"
+        select.return_value.ask.side_effect = [f"row:{subscription['id']}", "skip"]
         result = runner.invoke(review, [])
     assert result.exit_code == 0
     assert "user@example.com" in result.output
@@ -1317,7 +1317,7 @@ def test_manual_review_block_applies_to_persisted_subscription(configured_cli):
             return_value=(1, 0),
         ) as move,
     ):
-        select.return_value.ask.return_value = "block"
+        select.return_value.ask.side_effect = [f"row:{subscription['id']}", "block"]
         result = runner.invoke(review, [])
 
     assert result.exit_code == 0
@@ -1531,7 +1531,7 @@ def test_manual_review_cancel_or_skip_never_falls_into_same_domain_legacy_prompt
     configured_cli, choice
 ):
     runner, _config = configured_cli
-    db.upsert_subscription(
+    subscription = db.upsert_subscription(
         "user@example.com",
         "from",
         "notice@sender.example",
@@ -1540,10 +1540,10 @@ def test_manual_review_cancel_or_skip_never_falls_into_same_domain_legacy_prompt
     )
     db.upsert_sender("sender.example", 4, 0, ["Notification"], True)
     with patch("nothx.cli.questionary.select") as select:
-        select.return_value.ask.return_value = choice
+        select.return_value.ask.side_effect = [f"row:{subscription['id']}", choice]
         result = runner.invoke(review, [])
     assert result.exit_code == 0, result.output
-    assert select.call_count == 1
+    assert select.call_count == 2
     assert select.call_args.kwargs["default"] == "skip"
 
 
@@ -2307,7 +2307,8 @@ def test_manual_mixed_evidence_block_uses_displayed_scope_snapshot(configured_cl
         patch("nothx.cli.questionary.select") as select,
         patch("nothx.cli.IMAPConnection", return_value=connection),
     ):
-        select.return_value.ask.side_effect = approve
+        answers = iter([f"row:{subscription['id']}", None])
+        select.return_value.ask.side_effect = lambda: next(answers) or approve()
         result = runner.invoke(review, [])
     assert result.exit_code == 0, result.output
     assert "Stored Inbox refs" in result.output
@@ -2534,3 +2535,61 @@ def test_unknown_ai_review_cannot_revive_old_automatic_destructive_policy(
     block.assert_not_called()
     unsub.assert_not_called()
     assert db.get_subscription(sub["id"])["policy_action"] == "review"
+
+
+def test_saved_review_finish_leaves_every_policy_and_mailbox_untouched(configured_cli):
+    runner, _ = configured_cli
+    subscriptions = [
+        db.upsert_subscription(
+            f"owner-{i}@example.com", "from", "offers@mail.example", policy_action="review"
+        )
+        for i in range(2)
+    ]
+    with (
+        patch("nothx.cli.questionary.select") as select,
+        patch("nothx.cli._apply_manual_subscription_block") as block,
+        patch("nothx.cli.open_unsubscribe") as open_page,
+    ):
+        select.return_value.ask.return_value = "finish"
+        result = runner.invoke(review, [])
+    assert result.exit_code == 0, result.output
+    assert select.call_count == 1
+    assert all(db.get_subscription(s["id"])["policy_action"] == "review" for s in subscriptions)
+    block.assert_not_called()
+    open_page.assert_not_called()
+
+
+@pytest.mark.parametrize("flag,policy", [("--keep", "keep"), ("--unsub", "unsub")])
+def test_saved_review_filters_preserve_full_identity(configured_cli, flag, policy):
+    runner, _ = configured_cli
+    selected = db.upsert_subscription(
+        "owner@example.com", "from", "one@mail.example", policy_action=policy
+    )
+    other = db.upsert_subscription(
+        "other@example.com", "from", "one@mail.example", policy_action=policy
+    )
+    with patch("nothx.cli.questionary.select") as select:
+        select.return_value.ask.side_effect = [f"row:{selected['id']}", "keep", "finish"]
+        result = runner.invoke(review, [flag])
+    assert result.exit_code == 0, result.output
+    labels = [c.title for c in select.call_args_list[0].kwargs["choices"]]
+    assert any("owner@example.com" in label and "one@mail.example" in label for label in labels)
+    assert any("other@example.com" in label and "one@mail.example" in label for label in labels)
+    assert db.get_subscription(selected["id"])["policy_action"] == "keep"
+    assert db.get_subscription(other["id"])["policy_action"] == policy
+
+
+def test_authoritative_kept_personal_domain_never_reappears_as_legacy_review(configured_cli):
+    runner, _ = configured_cli
+    db.upsert_subscription(
+        "owner@example.com",
+        "from",
+        "friend@mail.example",
+        sender_domain="mail.example",
+        policy_action="keep",
+    )
+    db.upsert_sender("mail.example", 4, 0, ["Dinner tomorrow"], False)
+    with patch("nothx.cli.questionary.select") as select:
+        result = runner.invoke(review, [])
+    assert result.exit_code == 0, result.output
+    select.assert_not_called()

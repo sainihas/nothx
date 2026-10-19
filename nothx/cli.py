@@ -8,6 +8,7 @@ import logging
 import re
 import uuid
 import webbrowser
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -3751,6 +3752,52 @@ def status(learning: bool):
     console.print()
 
 
+def _pick_saved_reviews(rows: list[tuple[str, str]]) -> Iterator[str]:
+    pending = rows[:]
+    page = 0
+    query = ""
+    while pending:
+        matches = [row for row in pending if query in row[1].casefold()]
+        last_page = max(0, (len(matches) - 1) // _REVIEW_PAGE_SIZE)
+        page = min(page, last_page)
+        shown = matches[page * _REVIEW_PAGE_SIZE : (page + 1) * _REVIEW_PAGE_SIZE]
+        choices = [
+            questionary.Choice(re.sub(r"[\x00-\x1f\x7f]", " ", label), value=f"row:{key}")
+            for key, label in shown
+        ]
+        choices.append(questionary.Choice("Search by sender, account, or list", value="search"))
+        if page < last_page:
+            choices.append(questionary.Choice("Next page", value="next"))
+        if page:
+            choices.append(questionary.Choice("Previous page", value="previous"))
+        choices.append(questionary.Choice("Finish review", value="finish"))
+        selected = questionary.select(
+            f"Saved decisions · {len(matches):,} matches · page {page + 1}/{last_page + 1}",
+            choices=choices,
+            default="finish",
+            **Q_COMMON,
+        ).ask()
+        if selected is None or selected == "finish":
+            return
+        if selected in {"next", "previous"}:
+            page = max(0, page + (1 if selected == "next" else -1))
+            continue
+        if selected == "search":
+            entered = questionary.text(
+                "Sender, account, or list (empty clears search):",
+                default=query,
+                style=Q_INPUT_STYLE,
+            ).ask()
+            if entered is not None:
+                query = entered.strip().casefold()
+                page = 0
+            continue
+        row = next((row for row in shown if selected == f"row:{row[0]}"), None)
+        if row is not None:
+            yield row[0]
+            pending.remove(row)
+
+
 @main.command()
 @click.option("--all", "show_all", is_flag=True, help="Show all pending senders")
 @click.option("--keep", "show_keep", is_flag=True, help="Review senders marked to keep")
@@ -3796,10 +3843,12 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
     manual_subscriptions: list[dict[str, Any]] = []
     handled_manual_domains: set[str] = set()
     truncated = False
-    if not show_keep and not show_unsub:
-        # Blocks parked behind a missing consent are finished decisions waiting
-        # on work, not open questions -- prompting for them again buries the
-        # rows that genuinely need a human.
+    if show_keep or show_unsub:
+        manual_subscriptions = db.list_subscriptions(
+            policy_action="keep" if show_keep else "unsub", limit=_MANUAL_QUEUE_LIMIT
+        )
+        truncated = len(manual_subscriptions) == _MANUAL_QUEUE_LIMIT
+    else:
         parked_ids = {row["id"] for row in db.list_consent_parked_blocks()}
         pages = [
             db.list_subscriptions(outcome="needs_user", limit=_MANUAL_QUEUE_LIMIT),
@@ -3812,51 +3861,42 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 continue
             by_id[subscription["id"]] = subscription
         manual_subscriptions = list(by_id.values())
-        handled_manual_domains = {
-            subscription["sender_domain"].casefold()
-            for subscription in manual_subscriptions
-            if subscription.get("sender_domain")
-        }
 
     if manual_subscriptions:
         console.print(
-            f"\n[header]{len(manual_subscriptions)} subscription(s) need manual action[/header]"
+            f"\n[header]{len(manual_subscriptions)} saved account/list decisions to review[/header]"
         )
         if truncated:
             console.print(
                 f"[muted]Showing the newest {_MANUAL_QUEUE_LIMIT} of each queue; "
                 "run this again to reach the rest.[/muted]"
             )
-        scopes = {
-            row["id"]: {
+        saved_by_id = {str(row["id"]): row for row in manual_subscriptions}
+        labels = [
+            (
+                str(row["id"]),
+                f"#{row['id']} · {row['account']} · {row['identity_kind']}:{row['identity_value']}"
+                f" · {row.get('policy_action') or 'review'} · {row.get('last_outcome') or 'no request'}",
+            )
+            for row in manual_subscriptions
+        ]
+        for selected_id in _pick_saved_reviews(labels):
+            subscription = saved_by_id[selected_id]
+            scope = {
                 int(message["id"])
                 for message in db.list_message_refs(
-                    subscription_id=row["id"], mailbox_role="inbox", limit=100_000
+                    subscription_id=subscription["id"], mailbox_role="inbox", limit=100_000
                 )
             }
-            for row in manual_subscriptions
-        }
-        table = Table(show_header=True)
-        table.add_column("ID")
-        table.add_column("Account")
-        table.add_column("List identity", overflow="fold")
-        table.add_column("Outcome")
-        table.add_column("Inbox refs")
-        for subscription in manual_subscriptions:
-            table.add_row(
-                str(subscription["id"]),
-                subscription["account"],
-                f"{subscription['identity_kind']}:{subscription['identity_value']}",
-                subscription.get("last_outcome") or "review",
-                str(len(scopes[subscription["id"]])),
+            console.print(
+                Panel(
+                    f"{escape(subscription['account'])} · "
+                    f"{escape(subscription['identity_kind'] + ':' + subscription['identity_value'])}\n"
+                    f"Stored Inbox refs: {len(scope):,} across recorded history. "
+                    "These locators may no longer be present.",
+                    title="Saved sender/list decision",
+                )
             )
-        console.print(table)
-        console.print(
-            "[muted]Stored Inbox refs: BLOCK moves the displayed count across recorded history, "
-            "then blocks future matching mail. These locators may no longer be present.[/muted]"
-        )
-
-        for subscription in manual_subscriptions:
             identity = f"{subscription['identity_kind']}:{subscription['identity_value']}"
             choices = []
             if (
@@ -3871,10 +3911,11 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 [
                     questionary.Choice("Keep future mail", value="keep"),
                     questionary.Choice(
-                        f"Block future mail and move {len(scopes[subscription['id']])} stored Inbox refs",
+                        f"Block future mail and move {len(scope)} stored Inbox refs",
                         value="block",
                     ),
-                    questionary.Choice("Skip", value="skip"),
+                    questionary.Choice("Leave for later", value="skip"),
+                    questionary.Choice("Finish review", value="finish"),
                 ]
             )
             choice = questionary.select(
@@ -3883,8 +3924,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 default="skip",
                 **Q_COMMON,
             ).ask()
-            if choice is None:
-                console.print(f"{_L} [muted]Cancelled[/muted]")
+            if choice is None or choice == "finish":
                 return
             if choice == "open":
                 click.get_current_context().invoke(
@@ -3894,7 +3934,7 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 )
             elif choice == "block":
                 moved, failed = _apply_manual_subscription_block(
-                    config, subscription, message_ids=scopes[subscription["id"]]
+                    config, subscription, message_ids=scope
                 )
                 _learn_subscription_policy(subscription, choice)
                 if domain := subscription.get("sender_domain"):
@@ -3909,6 +3949,8 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 if domain := subscription.get("sender_domain"):
                     handled_manual_domains.add(domain.casefold())
                 console.print(f"{_L} Future policy set to {choice}")
+        _report_consent_parked_blocks(config)
+        return
 
     # Determine which senders to show
     if show_keep:
@@ -3928,6 +3970,11 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
     # A manual account/list decision may create/update its compatibility
     # sender row for learning. Do not immediately ask for (and execute) the
     # same domain-level decision a second time in this review invocation.
+    handled_manual_domains.update(
+        row["sender_domain"].casefold()
+        for row in db.list_subscriptions(limit=None)
+        if row.get("sender_domain")
+    )
     senders = [
         sender for sender in senders if sender["domain"].casefold() not in handled_manual_domains
     ]
@@ -3942,8 +3989,9 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
 
     _select_header(f"{len(senders)} senders {filter_label}")
 
-    for sender in senders:
-        domain = sender["domain"]
+    legacy_by_domain = {sender["domain"]: sender for sender in senders}
+    for domain in _pick_saved_reviews([(sender["domain"], sender["domain"]) for sender in senders]):
+        sender = legacy_by_domain[domain]
         total = sender["total_emails"]
         subjects = sender.get("sample_subjects", "").split("|")[:3]
 
@@ -3964,14 +4012,13 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 questionary.Choice("Keep - Continue receiving", value="keep"),
                 questionary.Choice("Block - Block sender entirely", value="block"),
                 questionary.Choice("Skip - Decide later", value="skip"),
+                questionary.Choice("Finish review", value="finish"),
             ],
             default="skip",
             **Q_COMMON,
         ).ask()
 
-        if choice is None:
-            # User cancelled (Ctrl+C or ESC)
-            console.print(f"{_L} [muted]Cancelled[/muted]")
+        if choice is None or choice == "finish":
             break
 
         if choice in ("unsub", "keep", "block"):

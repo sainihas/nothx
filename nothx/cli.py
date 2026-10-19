@@ -495,13 +495,19 @@ def _learn_subscription_policy(subscription: dict[str, Any], action_value: str) 
 
 
 def _persisted_threat_action(
-    subscription_id: int, *, folder_evidence: bool = True, sender: SenderStats | None = None
+    subscription_id: int,
+    *,
+    folder_evidence: bool = True,
+    sender: SenderStats | None = None,
+    include_auth: bool = True,
 ) -> Action | None:
     """Distinguish hard threats from conflicting Inbox/Junk folder evidence."""
     hard_threat = bool(
         sender
         and (
-            sender.provider_threat or sender.phishing_emails or sender.authentication_failed_emails
+            sender.provider_threat
+            or sender.phishing_emails
+            or (include_auth and sender.authentication_failed_emails)
         )
     )
     junk = bool(sender and (sender.junk_emails or sender.junk_keyword_emails))
@@ -528,7 +534,9 @@ def _persisted_threat_action(
             )
         )
         is_hard_threat = bool(
-            (verdict and verdict != "junk") or "$phishing" in normalized or failed_auth
+            (verdict and verdict != "junk")
+            or "$phishing" in normalized
+            or (include_auth and failed_auth)
         )
         hard_threat |= is_hard_threat
         is_junk = (
@@ -613,63 +621,66 @@ def _persist_subscription_records(
     )
 
     persisted: list[tuple[EmailHeader, dict[str, Any]]] = []
-    for header in headers:
-        locator = header.message_ref
-        if locator is None:
-            continue
-        fingerprints = [
-            _target_fingerprint(target)
-            for target in (
-                *header.list_unsubscribe_targets,
-                *(candidate.uri for candidate in header.footer_unsubscribe_candidates),
-            )
-        ]
-        auth = header.authentication
-        message = db.upsert_message_ref(
-            subscription["id"],
-            locator.account_key,
-            locator.mailbox,
-            header.mailbox_role,
-            locator.uidvalidity,
-            locator.uid,
-            message_id=header.message_id,
-            from_address=header.sender_address or None,
-            list_id=header.normalized_list_id,
-            received_at=header.received_at or header.date,
-            flags=[*header.system_flags, *header.keywords, *header.gmail_labels],
-            auth_evidence={
-                "spf": auth.spf.value,
-                "dkim": auth.dkim.value,
-                "dmarc": auth.dmarc.value,
-                "arc": auth.arc.value,
-                "dkim_domains": list(auth.dkim_domains),
-                "dkim_selectors": list(auth.dkim_selectors),
-                "results": [
-                    {
-                        "method": evidence.method,
-                        "result": evidence.result.value,
-                        "identifier": evidence.identifier,
-                        "domain": evidence.domain,
-                        "selector": evidence.selector,
-                    }
-                    for evidence in auth.results
-                ],
-                "dkim_covers_unsubscribe": header.dkim_covers_unsubscribe,
-                "trusted": auth.trusted,
-            },
-            bulk_evidence={
-                "list_id": header.normalized_list_id,
-                "precedence": header.precedence,
-                "feedback_id": bool(header.feedback_id),
-                "esp": header.esp,
-                "provider_bulk": header.provider_bulk,
-            },
-            provider_verdict=header.provider_threat,
-            endpoint_fingerprints=fingerprints,
-            has_header_method=bool(header.list_unsubscribe_targets),
-            can_unsubscribe=header.server_can_unsubscribe,
-        )
-        persisted.append((header, message))
+    for start in range(0, len(headers), 500):
+        batch = headers[start : start + 500]
+        with db.metadata_batch():
+            for header in batch:
+                locator = header.message_ref
+                if locator is None:
+                    continue
+                fingerprints = [
+                    _target_fingerprint(target)
+                    for target in (
+                        *header.list_unsubscribe_targets,
+                        *(candidate.uri for candidate in header.footer_unsubscribe_candidates),
+                    )
+                ]
+                auth = header.authentication
+                message = db.upsert_message_ref(
+                    subscription["id"],
+                    locator.account_key,
+                    locator.mailbox,
+                    header.mailbox_role,
+                    locator.uidvalidity,
+                    locator.uid,
+                    message_id=header.message_id,
+                    from_address=header.sender_address or None,
+                    list_id=header.normalized_list_id,
+                    received_at=header.received_at or header.date,
+                    flags=[*header.system_flags, *header.keywords, *header.gmail_labels],
+                    auth_evidence={
+                        "spf": auth.spf.value,
+                        "dkim": auth.dkim.value,
+                        "dmarc": auth.dmarc.value,
+                        "arc": auth.arc.value,
+                        "dkim_domains": list(auth.dkim_domains),
+                        "dkim_selectors": list(auth.dkim_selectors),
+                        "results": [
+                            {
+                                "method": evidence.method,
+                                "result": evidence.result.value,
+                                "identifier": evidence.identifier,
+                                "domain": evidence.domain,
+                                "selector": evidence.selector,
+                            }
+                            for evidence in auth.results
+                        ],
+                        "dkim_covers_unsubscribe": header.dkim_covers_unsubscribe,
+                        "trusted": auth.trusted,
+                    },
+                    bulk_evidence={
+                        "list_id": header.normalized_list_id,
+                        "precedence": header.precedence,
+                        "feedback_id": bool(header.feedback_id),
+                        "esp": header.esp,
+                        "provider_bulk": header.provider_bulk,
+                    },
+                    provider_verdict=header.provider_threat,
+                    endpoint_fingerprints=fingerprints,
+                    has_header_method=bool(header.list_unsubscribe_targets),
+                    can_unsubscribe=header.server_can_unsubscribe,
+                )
+                persisted.append((header, message))
     return subscription, persisted
 
 
@@ -2318,9 +2329,12 @@ def _preview_notice(config: Config) -> None:
 @main.command()
 @click.option("--apply", is_flag=True, hidden=True)
 @click.option("--preview", is_flag=True, help="Only show the plan; no actions or saved decisions")
+@click.option("--details", is_flag=True, help="Show candidate details before review")
 @click.option("--auto", is_flag=True, help="Apply eligible decisions without prompts")
 @click.option("--account", "-a", multiple=True, help="Limit cleanup to an account name or email")
-def cleanup(apply: bool, auto: bool, account: tuple[str, ...], preview: bool = False) -> None:
+def cleanup(
+    apply: bool, auto: bool, account: tuple[str, ...], preview: bool = False, details: bool = False
+) -> None:
     """Scan the full Inbox, review the plan, and apply approved actions in one run."""
     if preview and (auto or apply):
         raise click.UsageError("--preview cannot be combined with --auto or --apply")
@@ -2345,7 +2359,7 @@ def cleanup(apply: bool, auto: bool, account: tuple[str, ...], preview: bool = F
         _preview_notice(config)
     _run_scan(
         config,
-        verbose=True,
+        verbose=details,
         dry_run=preview,
         auto=auto,
         account_names=names or None,
@@ -2704,6 +2718,14 @@ def _run_scan(
                 and (subscription is None or subscription.get("policy_source") != "manual")
             ):
                 continue
+            if (
+                current is not None
+                and current.action is Action.REVIEW
+                and current.email_type is EmailType.UNKNOWN
+                and (current.source == "ai" or current.original_source == "ai")
+                and (subscription is None or subscription.get("policy_source") != "manual")
+            ):
+                continue
             policy = subscription.get("policy_action") if subscription else None
             if policy in {"block", "unsub"} or (
                 policy == "keep"
@@ -2777,6 +2799,7 @@ def _run_scan(
     to_keep = []
     to_review = []
     to_block = []
+    outside_cleanup_review = []
 
     min_emails = config.thresholds.min_emails_before_action
     deterministic_block_sources = {
@@ -2795,6 +2818,24 @@ def _run_scan(
         if classification is None:
             logger.warning("No classification returned for %s", sender.classification_key)
             continue
+
+        if (
+            classification.action is Action.BLOCK
+            and classification.source != "user_rule"
+            and (
+                sender.protected_subject_emails
+                or classification.email_type in {EmailType.TRANSACTIONAL, EmailType.SECURITY}
+            )
+            and not _confirmed_provider_threat(sender)
+        ):
+            classification = replace(
+                classification,
+                action=Action.REVIEW,
+                source="safety_policy",
+                reasoning="Protected non-marketing mail is outside automatic cleanup; authentication failure alone does not establish phishing",
+                recommended_action=classification.recommended_action or classification.action,
+                original_source=classification.original_source or classification.source,
+            )
 
         if sender.account_key in incomplete_accounts and classification.action in (
             Action.UNSUB,
@@ -2841,7 +2882,10 @@ def _run_scan(
                 recommended_action=classification.recommended_action or classification.action,
                 original_source=classification.original_source or classification.source,
             )
-            to_review.append((key, sender, classification))
+            if _is_marketing_candidate(sender, classification):
+                to_review.append((key, sender, classification))
+            else:
+                outside_cleanup_review.append((key, sender, classification))
             continue
 
         if classification.action == Action.UNSUB:
@@ -2850,8 +2894,10 @@ def _run_scan(
             to_keep.append((key, sender, classification))
         elif classification.action == Action.BLOCK:
             to_block.append((key, sender, classification))
-        else:
+        elif _is_marketing_candidate(sender, classification):
             to_review.append((key, sender, classification))
+        else:
+            outside_cleanup_review.append((key, sender, classification))
 
     # Summary as tree
     tree = Tree("[success]✓ Classification complete[/success]")
@@ -2875,118 +2921,61 @@ def _run_scan(
     if existing_junk:
         tree.add(f"[muted]{existing_junk} matching messages already in Junk[/muted]")
     tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
-    tree.add(f"[review]{len(to_review)} need review[/review]")
+    tree.add(f"[review]{len(to_review)} marketing/spam groups need review[/review]")
+    if outside_cleanup_review:
+        tree.add(
+            f"[muted]{len(outside_cleanup_review)} other groups left unchanged, outside cleanup review[/muted]"
+        )
     console.print(tree)
 
     if verbose:
         _show_details(to_unsub, to_keep, to_review, to_block)
 
-    # Optional manual review of decisions (not in auto mode)
-    if not auto and not dry_run and (to_unsub or to_keep):
-        if _styled_confirm("Review decisions before proceeding?", default=False):
-            _select_header("Manual Review")
-            console.print("[muted]Change any decisions you disagree with:[/muted]\n")
-
-            # Review items marked for unsubscribe
-            review_cancelled = False
-            reviewed_keys: set[str] = set()
-            for key, sender, classification in to_unsub[:]:  # Slice to allow modification
-                action = questionary.select(
-                    f"[{sender.total_emails} emails] {sender.domain}",
-                    choices=[
-                        questionary.Choice("Unsubscribe (AI recommendation)", value="unsub"),
-                        questionary.Choice("Keep instead", value="keep"),
-                        questionary.Choice("Skip for now", value="skip"),
-                    ],
-                    default="unsub",
-                    **Q_COMMON,
-                ).ask()
-
-                if action is None:
-                    console.print("[muted]Review cancelled[/muted]")
-                    review_cancelled = True
-                    break
-
-                if action == "keep":
-                    to_unsub.remove((key, sender, classification))
-                    to_keep.append(
-                        (key, sender, _manual_classification(classification, Action.KEEP))
-                    )
-                    reviewed_keys.add(key)
-                    console.print(f"{_L} [keep]→ Changed to keep[/keep]")
-                elif action == "skip":
-                    to_unsub.remove((key, sender, classification))
-                    to_review.append((key, sender, classification))
-                    console.print(f"{_L} [review]→ Moved to review[/review]")
-                elif action == "unsub":
-                    to_unsub.remove((key, sender, classification))
-                    to_unsub.append(
-                        (key, sender, _manual_classification(classification, Action.UNSUB))
-                    )
-
-            # Review items marked to keep (only if not cancelled)
-            if not review_cancelled:
-                for key, sender, classification in to_keep[:]:  # Slice to allow modification
-                    if key in reviewed_keys:
-                        continue
-                    # Offering "unsubscribe" for a sender with no discovered
-                    # endpoint guarantees a failure the user cannot act on;
-                    # blocking is the only thing that actually stops the mail.
-                    can_unsubscribe = sender.has_unsubscribe or sender.can_unsubscribe_emails > 0
-                    alternative = (
-                        questionary.Choice("Unsubscribe instead", value="unsub")
-                        if can_unsubscribe
-                        else questionary.Choice(
-                            "Block instead (no unsubscribe link in these emails)",
-                            value="block",
-                        )
-                    )
-                    action = questionary.select(
-                        f"[{sender.total_emails} emails] {sender.domain}",
-                        choices=[
-                            questionary.Choice("Keep (AI recommendation)", value="keep"),
-                            alternative,
-                            questionary.Choice("Skip for now", value="skip"),
-                        ],
-                        default="keep",
-                        **Q_COMMON,
-                    ).ask()
-
-                    if action is None:
-                        console.print("[muted]Review cancelled[/muted]")
-                        break
-
-                    if action == "unsub":
-                        to_keep.remove((key, sender, classification))
-                        to_unsub.append(
-                            (key, sender, _manual_classification(classification, Action.UNSUB))
-                        )
-                        console.print(f"{_L} [unsubscribe]→ Changed to unsubscribe[/unsubscribe]")
-                    elif action == "block":
-                        to_keep.remove((key, sender, classification))
-                        to_block.append(
-                            (key, sender, _manual_classification(classification, Action.BLOCK))
-                        )
-                        console.print(f"{_L} [block]→ Changed to block[/block]")
-                    elif action == "skip":
-                        to_keep.remove((key, sender, classification))
-                        to_review.append((key, sender, classification))
-                        console.print(f"{_L} [review]→ Moved to review[/review]")
-                    elif action == "keep":
-                        to_keep.remove((key, sender, classification))
-                        to_keep.append(
-                            (key, sender, _manual_classification(classification, Action.KEEP))
-                        )
-
-            # Updated summary
-            # Updated summary as tree
+    if (
+        not auto
+        and not dry_run
+        and (
+            to_unsub
+            or to_review
+            or to_block
+            or any(
+                _is_marketing_candidate(sender, classification)
+                for _, sender, classification in to_keep
+            )
+        )
+    ):
+        if _styled_confirm("Review or change sender decisions?", default=False):
+            _review_scan_decisions(
+                to_unsub,
+                to_keep,
+                to_review,
+                to_block,
+                incomplete_accounts=frozenset(incomplete_accounts),
+            )
             updated_tree = Tree("[header]Updated decisions[/header]")
-            updated_tree.add(f"[unsubscribe]{len(to_unsub)} to unsubscribe[/unsubscribe]")
+            updated_tree.add(f"[unsubscribe]{len(to_unsub)} unsubscribe candidates[/unsubscribe]")
             updated_tree.add(f"[block]{len(to_block)} to block[/block]")
             updated_tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
             updated_tree.add(f"[review]{len(to_review)} need review[/review]")
-            console.print()
             console.print(updated_tree)
+
+    for pending in (to_unsub, to_block):
+        for row in pending[:]:
+            key, sender, classification = row
+            if sender.account_key in incomplete_accounts:
+                pending.remove(row)
+                deferred = replace(
+                    classification,
+                    action=Action.REVIEW,
+                    source="scan_policy",
+                    reasoning="Incomplete mailbox scan; no destructive actions are permitted",
+                )
+                if _is_marketing_candidate(sender, deferred):
+                    to_review.append((key, sender, deferred))
+                else:
+                    outside_cleanup_review.append((key, sender, deferred))
+
+    new_requests = sum(_unsubscribe_execution_state(sender) == "ready" for _, sender, _ in to_unsub)
 
     # Phase 3: execute two strictly separate paths. BLOCK is a mailbox action
     # and must never fall through to the network unsubscribe executor.
@@ -3237,7 +3226,7 @@ def _run_scan(
             )
 
     # Update stats
-    stats.kept = len(to_keep)
+    stats.kept = len(to_keep) + len(outside_cleanup_review)
     stats.review_queued += len(to_review)
 
     # REVIEW is authoritative per account/list. Without this row, the legacy
@@ -3252,6 +3241,24 @@ def _run_scan(
                     headers,
                     classification,
                     policy_action="review",
+                )
+
+    if not dry_run and authoritative:
+        for key, sender, classification in outside_cleanup_review:
+            headers = scan_result.get_emails_for_subscription(key)
+            if headers:
+                _persist_subscription_records(
+                    sender,
+                    headers,
+                    replace(
+                        classification,
+                        action=Action.KEEP,
+                        source="cleanup_scope",
+                        recommended_action=classification.recommended_action
+                        or classification.action,
+                        original_source=classification.original_source or classification.source,
+                    ),
+                    policy_action="keep",
                 )
 
     # Mark keep senders (dry-run must not mutate the database)
@@ -3278,6 +3285,229 @@ def _run_scan(
         console.print("Run [bold]nothx review[/bold] to process them.")
 
 
+_DecisionRow = tuple[str, SenderStats, Classification]
+_REVIEW_PAGE_SIZE = 20
+
+
+def _confirmed_provider_threat(sender: SenderStats) -> bool:
+    if sender.provider_threat or sender.phishing_emails:
+        return True
+    if not (sender.account_key and sender.identity_kind and sender.identity_value):
+        return False
+    subscription = db.get_subscription(
+        account=sender.account_key,
+        identity_kind=sender.identity_kind,
+        identity_value=sender.identity_value,
+    )
+    return (
+        subscription is not None
+        and _persisted_threat_action(subscription["id"], folder_evidence=False, include_auth=False)
+        is Action.BLOCK
+    )
+
+
+def _is_marketing_candidate(sender: SenderStats, classification: Classification) -> bool:
+    if classification.email_type in {
+        EmailType.MARKETING,
+        EmailType.NEWSLETTER,
+        EmailType.COLD_OUTREACH,
+    }:
+        return True
+    if classification.email_type in {EmailType.TRANSACTIONAL, EmailType.SECURITY}:
+        return False
+    bulk = bool(
+        sender.has_unsubscribe
+        or sender.list_id
+        or sender.bulk_precedence
+        or sender.has_feedback_id
+        or sender.esp_name
+        or sender.provider_bulk_emails
+    )
+    promotional = any(
+        re.search(
+            r"\b(?:sale|discount|newsletter|promotions?|exclusive offer|weekly digest|weekly roundup)\b|\d+%\s*off",
+            subject,
+            re.IGNORECASE,
+        )
+        for subject in sender.sample_subjects
+    )
+    return bulk and promotional
+
+
+def _review_sender_label(sender: SenderStats) -> str:
+    identity = _subscription_label(sender)
+    if sender.identity_kind != "from" and sender.sample_senders:
+        identity += f" · From: {sender.sample_senders[0]}"
+    identity = re.sub(r"[\x00-\x1f\x7f]", " ", identity)
+    return f"{identity} · {sender.total_emails:,} messages"
+
+
+def _review_scan_decisions(
+    to_unsub: list[_DecisionRow],
+    to_keep: list[_DecisionRow],
+    to_review: list[_DecisionRow],
+    to_block: list[_DecisionRow],
+    *,
+    incomplete_accounts: frozenset[str] = frozenset(),
+) -> None:
+    groups = {
+        "review": ("Needs review", to_review),
+        "block": ("Block candidates", to_block),
+        "unsub": ("Unsubscribe candidates and existing requests", to_unsub),
+        "keep": ("Kept marketing senders", to_keep),
+    }
+
+    def visible(group: str, row: _DecisionRow) -> bool:
+        return group != "keep" or _is_marketing_candidate(row[1], row[2])
+
+    _select_header("Review marketing and spam by sender")
+    console.print(
+        "[muted]Choose a group, then search or select a sender. "
+        "Accounts and mailing lists stay separate. Finish when ready.[/muted]"
+    )
+    while True:
+        group = questionary.select(
+            "Which decisions would you like to inspect?",
+            choices=[
+                questionary.Choice(
+                    f"{title} ({sum(visible(key, row) for row in rows):,})", value=key
+                )
+                for key, (title, rows) in groups.items()
+                if any(visible(key, row) for row in rows)
+            ]
+            + [questionary.Choice("Finish review", value="finish")],
+            default="finish",
+            **Q_COMMON,
+        ).ask()
+        if group is None or group == "finish":
+            return
+        if group not in groups:
+            continue
+        title, rows = groups[group]
+        page = 0
+        query = ""
+        while True:
+            filtered = [
+                row
+                for row in rows
+                if visible(group, row)
+                and query
+                in " ".join(
+                    [
+                        _review_sender_label(row[1]),
+                        row[1].domain,
+                        *row[1].sample_subjects,
+                        *row[1].sample_senders,
+                    ]
+                ).casefold()
+            ]
+            last_page = max(0, (len(filtered) - 1) // _REVIEW_PAGE_SIZE)
+            page = min(page, last_page)
+            shown = filtered[page * _REVIEW_PAGE_SIZE : (page + 1) * _REVIEW_PAGE_SIZE]
+            choices = [
+                questionary.Choice(_review_sender_label(sender), value=f"sender:{key}")
+                for key, sender, _ in shown
+            ]
+            choices.append(
+                questionary.Choice("Search by sender, account, list, or subject", value="search")
+            )
+            if page < last_page:
+                choices.append(questionary.Choice("Next page", value="next"))
+            if page:
+                choices.append(questionary.Choice("Previous page", value="previous"))
+            choices.extend(
+                [
+                    questionary.Choice("Back to groups", value="back"),
+                    questionary.Choice("Finish review", value="finish"),
+                ]
+            )
+            selected = questionary.select(
+                f"{title} · {len(filtered):,} matches · page {page + 1}/{last_page + 1}",
+                choices=choices,
+                default="back",
+                **Q_COMMON,
+            ).ask()
+            if selected is None or selected == "finish":
+                return
+            if selected == "back":
+                break
+            if selected in {"next", "previous"}:
+                page += 1 if selected == "next" else -1
+                page = max(0, page)
+                continue
+            if selected == "search":
+                entered = questionary.text(
+                    "Sender, account, list, or subject (empty clears search):",
+                    default=query,
+                    style=Q_INPUT_STYLE,
+                ).ask()
+                if entered is not None:
+                    query = entered.strip().casefold()
+                    page = 0
+                continue
+            row = next((row for row in shown if selected == f"sender:{row[0]}"), None)
+            if row is None:
+                continue
+            key, sender, classification = row
+            console.print(
+                Panel(
+                    f"{escape(_review_sender_label(sender))}\n"
+                    f"Decision: {classification.action.value} · {classification.email_type.value}\n"
+                    f"Reason: {escape(classification.reasoning)}\n"
+                    f"Marked read: {sender.open_rate:.0f}%\n"
+                    f"Recent subjects: {escape(' / '.join(sender.sample_subjects[:3]))}",
+                    title="Sender details",
+                )
+            )
+            allowed = {"keep", "skip", "unchanged"}
+            action_choices = [questionary.Choice("Keep future mail", value="keep")]
+            if (
+                sender.account_key not in incomplete_accounts
+                and classification.source != "scan_policy"
+                and (not sender.protected_subject_emails or _confirmed_provider_threat(sender))
+            ):
+                allowed.add("block")
+                action_choices.append(
+                    questionary.Choice(
+                        "Block this sender/list and move its Inbox mail to Junk", value="block"
+                    )
+                )
+                if sender.has_unsubscribe or sender.can_unsubscribe_emails > 0:
+                    allowed.add("unsub")
+                    action_choices.append(
+                        questionary.Choice(
+                            "Request unsubscribe (safety checks still apply)", value="unsub"
+                        )
+                    )
+            action_choices.extend(
+                [
+                    questionary.Choice("Leave for later review", value="skip"),
+                    questionary.Choice("Leave unchanged", value="unchanged"),
+                ]
+            )
+            action = questionary.select(
+                f"Action for {_subscription_label(sender)}?",
+                choices=action_choices,
+                default="unchanged",
+                **Q_COMMON,
+            ).ask()
+            if action is None:
+                return
+            if action not in allowed or action == "unchanged":
+                continue
+            rows.remove(row)
+            destination = "review" if action == "skip" else action
+            result = (
+                classification
+                if action == "skip"
+                else _manual_classification(classification, Action(action))
+            )
+            groups[destination][1].append((key, sender, result))
+            console.print(
+                f"[muted]Decision updated for {escape(_subscription_label(sender))}: {destination}[/muted]"
+            )
+
+
 def _show_details(to_unsub, to_keep, to_review, to_block):
     """Show detailed classification results."""
     if to_unsub:
@@ -3286,7 +3516,7 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
         table.add_column("Account / List identity")
         table.add_column("Domain")
         table.add_column("Emails")
-        table.add_column("Open Rate")
+        table.add_column("Marked read")
         table.add_column("Reason")
         table.add_column("Recent subjects")
         table.add_column("Request state")
@@ -3302,15 +3532,16 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
             )
         console.print(table)
 
-    if to_keep:
-        console.print("\n[bold green]To Keep:[/bold green]")
+    marketing_kept = [row for row in to_keep if _is_marketing_candidate(row[1], row[2])]
+    if marketing_kept:
+        console.print("\n[bold green]Marketing left unchanged:[/bold green]")
         table = Table(show_header=True)
         table.add_column("Account / List identity")
         table.add_column("Domain")
         table.add_column("Emails")
-        table.add_column("Open Rate")
+        table.add_column("Marked read")
         table.add_column("Reason")
-        for _key, sender, classification in to_keep[:10]:
+        for _key, sender, classification in marketing_kept[:10]:
             table.add_row(
                 _subscription_label(sender),
                 sender.domain,

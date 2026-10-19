@@ -380,3 +380,14 @@ def test_cancel_interrupts_anthropic_cooldown_before_provider_call():
     timer.join()
     assert time.monotonic() - start < 1
     provider._client.messages.create.assert_not_called()
+
+
+@pytest.mark.parametrize("action", [Action.UNSUB, Action.BLOCK])
+def test_unknown_cached_content_cannot_supply_destructive_action(database, action):
+    from nothx.models import Classification, EmailType
+
+    key = "a" * 64
+    ai_cache.save({key: Classification(EmailType.UNKNOWN, action, 0.99, "Unknown category", "ai")})
+    result = ai_cache.load([key])[key]
+    assert result.action is Action.REVIEW
+    assert result.recommended_action is action

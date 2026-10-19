@@ -133,6 +133,13 @@ Provider threat evidence and explicit block rules are resolved before AI. Mixed 
 | `nothx review` | Decide on uncertain senders |
 | `nothx test --ai` | Test mailbox connections and the configured AI provider, including disabled-provider recovery |
 
+Cleanup review focuses on marketing/newsletters and spam. Personal conversations, receipts,
+and security notices stay outside the cleanup picker. Search by full sender address,
+account, mailing list, or subject; pages contain at most 20 sender groups and you can
+finish review at any time. Accounts and separate mailing lists are never merged by domain.
+Use `nothx cleanup --details` for candidate tables before review.
+
+
 ### Day-to-Day
 
 | Command | What it does |
@@ -277,7 +284,7 @@ unsubscribe email.
 - Ordinary runs repeat the configured lookback (30 days by default), so earlier undecided mail is reclassified after AI or policy changes. `--new-only` explicitly uses `(account, mailbox, UIDVALIDITY, UID)` cursors. Full history is explicit: `cleanup` includes only Inbox, while `run --full-history` also includes configured folders.
 - Marketing/newsletters with at least 25% of messages marked read require review by default. Engaged cold outreach also requires review. Read flags are imperfect evidence of preference, so they never force KEEP. Choose `nothx config --engaged-marketing allow` to permit automatic actions on clear promotions even when read; explicit keep/block choices still win.
 - Every scan reports mailbox size, selected headers, headers read, and scope. A small incremental result describes new mail, not a clean Inbox. Junk messages already outside Inbox are reported separately from Inbox messages to move.
-- Cleanup previews list every unsubscribe/block candidate with its account/list identity and recent subjects. Unsubscribe requests stop future deliveries when honored; existing marketing messages remain in Inbox. Block actions move matching messages to Junk. Preview uses configured AI only when enabled; `--dry-run` remains local.
+- Cleanup previews show summary counts; add `--details` for each unsubscribe/block candidate’s account/list identity and recent subjects. Unsubscribe requests stop future deliveries when honored; existing marketing messages remain in Inbox. Block actions move matching messages to Junk. Preview uses configured AI only when enabled; `--dry-run` remains local.
 - Body fetching is disabled by default. The optional footer scanner examines at most two inline text tails (64 KiB each, 128 KiB total) for authenticated list/bulk candidates. It skips attachments, nested messages, images, scripts, and forms.
 - One-click POST requires compliant headers plus `$canunsubscribe` or a correlated passing DKIM signature that covers both unsubscribe headers. All outbound unsubscribe contact—including an explicitly opened browser page—and mailbox actions require separate, versioned consent.
 - HTTP requests are HTTPS-only, proxy/cookie/auth/referrer-free, redirect constrained, SSRF checked, and connected to an already validated public IP while preserving TLS hostname verification.

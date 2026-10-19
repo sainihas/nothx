@@ -257,7 +257,8 @@ class ClassificationEngine:
         return None
 
     def _operational_precheck(self, sender: SenderStats) -> Classification | None:
-        if any(
+        mixed_protected_history = 0 < sender.protected_subject_emails < sender.total_emails
+        if mixed_protected_history or any(
             pattern.search(subject)
             for subject in sender.sample_subjects
             for pattern in OPERATIONAL_SUBJECT_PATTERNS
@@ -266,7 +267,12 @@ class ClassificationEngine:
                 email_type=EmailType.TRANSACTIONAL,
                 action=Action.REVIEW,
                 confidence=0.9,
-                reasoning="Operational notifications require review before suppression",
+                reasoning=(
+                    "Protected notices share this identity with other mail; "
+                    "review the full group before suppression"
+                    if mixed_protected_history
+                    else "Operational notifications require review before suppression"
+                ),
                 source="transactional_policy",
             )
         return None
@@ -278,7 +284,8 @@ class ClassificationEngine:
         transactional subjects to AI. Mixed promotional or outreach evidence
         remains eligible for normal classification; otherwise a matching safe
         sender plus consistently transactional subjects can be kept, and the
-        less-certain cases remain review-only.
+        less-certain cases remain review-only. Full scanner results preserve
+        protected subjects across the complete group before this sample check.
         """
         subjects = [subject for subject in sender.sample_subjects if subject.strip()]
         if not subjects:

@@ -446,6 +446,7 @@ class SenderStats:
     authentication_unknown_emails: int = 0
     provider_bulk_emails: int = 0
     provider_threat: bool = False
+    protected_subject_emails: int = 0
 
     @property
     def has_threat_conflict(self) -> bool:

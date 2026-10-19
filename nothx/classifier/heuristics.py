@@ -86,6 +86,17 @@ def has_strong_cold_outreach_evidence(subject: str) -> bool:
     return matched[0] or sum(matched) >= 2
 
 
+def has_protected_subject(subject: str) -> bool:
+    """Recognize service or transactional evidence without promotional signals."""
+    if any(pattern.search(subject) for pattern in OPERATIONAL_SUBJECT_PATTERNS):
+        return True
+    return (
+        any(pattern.search(subject) for pattern in SAFE_SUBJECT_PATTERNS)
+        and not any(pattern.search(subject) for pattern in SPAM_SUBJECT_PATTERNS)
+        and not has_strong_cold_outreach_evidence(subject)
+    )
+
+
 class HeuristicScorer:
     """Scores senders using rule-based heuristics with learned preferences."""
 

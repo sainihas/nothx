@@ -749,3 +749,66 @@ def test_batch_progress_counts_only_cloud_eligible_groups(policy_engine):
     assert "letters.example" in prompt
     assert "personal.example" not in prompt
     assert "service.example" not in prompt
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("list_id", [None, "<shared.sender.example>"])
+@pytest.mark.parametrize(
+    "notice",
+    [
+        "Privacy policy update",
+        "Your password was changed",
+        "SECURITY ALERT: new login",
+        "Receipt for your payment",
+        "Your order confirmation",
+    ],
+)
+def test_old_protected_notice_outside_latest_subject_sample_prevents_group_block(
+    policy_engine, batch, list_id, notice
+):
+    headers = [
+        EmailHeader(
+            sender="alerts@sender.example",
+            subject=notice if index == 1 else "Quick question about your company",
+            date=datetime(2026, 1, index, tzinfo=UTC),
+            message_id=f"<{index}@sender.example>",
+            list_id=list_id,
+            account_key="owner@example.com",
+            mailbox_role="inbox",
+            uidvalidity=1,
+            uid=index,
+        )
+        for index in range(1, 9)
+    ]
+    from nothx.models import AuthenticationEvidence
+
+    for header in headers:
+        header.authentication = AuthenticationEvidence(
+            trusted=True,
+            dkim=AuthResult.PASS,
+            dmarc=AuthResult.PASS,
+            dkim_domains=("sender.example",),
+        )
+    sender = _stats_for_emails("sender.example", headers)
+    assert notice not in sender.sample_subjects
+    assert sender.protected_subject_emails == 1
+    policy_engine.ai.is_available = Mock(return_value=True)
+    policy_engine.ai.classify_batch = Mock()
+    policy_engine.ai.classify_single = Mock()
+    result = (
+        policy_engine.classify_batch([sender], persist=False)[sender.classification_key]
+        if batch
+        else policy_engine.classify(sender, persist=False)
+    )
+    assert result.action is Action.REVIEW
+    assert result.source == "transactional_policy"
+    policy_engine.ai.classify_batch.assert_not_called()
+    policy_engine.ai.classify_single.assert_not_called()
+
+
+def test_promotional_subject_with_transactional_word_does_not_create_protected_history():
+    from nothx.classifier.heuristics import has_protected_subject
+
+    assert has_protected_subject("Your order confirmation")
+    assert not has_protected_subject("SALE: order now for 50% off")
+    assert not has_protected_subject("Quick question about your account")

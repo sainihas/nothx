@@ -2500,3 +2500,37 @@ def test_post_review_rechecks_incomplete_account_even_after_manual_override(
     assert result.exit_code == 0, result.output
     block.assert_not_called()
     unsub.assert_not_called()
+
+
+@pytest.mark.parametrize("stored_action", [Action.UNSUB, Action.BLOCK])
+def test_unknown_ai_review_cannot_revive_old_automatic_destructive_policy(
+    configured_cli, stored_action
+):
+    runner, _ = configured_cli
+    scan, classes = _subscription_scan(stored_action)
+    key, sender = next(iter(scan.subscription_stats.items()))
+    old = classes[key]
+    old.source = "ai"
+    sub, _ = _persist_subscription_records(
+        sender, scan.subscription_emails[key], old, policy_action=stored_action.value
+    )
+    classes[key] = Classification(
+        EmailType.UNKNOWN,
+        Action.REVIEW,
+        0.99,
+        "Unrecognized cached content type",
+        "ai",
+        recommended_action=stored_action,
+        original_source="ai",
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._block_subscription") as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        result = runner.invoke(cleanup, ["--auto"])
+    assert result.exit_code == 0, result.output
+    block.assert_not_called()
+    unsub.assert_not_called()
+    assert db.get_subscription(sub["id"])["policy_action"] == "review"

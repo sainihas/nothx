@@ -2718,6 +2718,14 @@ def _run_scan(
                 and (subscription is None or subscription.get("policy_source") != "manual")
             ):
                 continue
+            if (
+                current is not None
+                and current.action is Action.REVIEW
+                and current.email_type is EmailType.UNKNOWN
+                and (current.source == "ai" or current.original_source == "ai")
+                and (subscription is None or subscription.get("policy_source") != "manual")
+            ):
+                continue
             policy = subscription.get("policy_action") if subscription else None
             if policy in {"block", "unsub"} or (
                 policy == "keep"

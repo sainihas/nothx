@@ -203,6 +203,16 @@ class AnthropicProvider(BaseAIProvider):
                 retryable=False,
                 cause=e,
             ) from e
+        except anthropic.APIStatusError as e:
+            raise ProviderError(
+                error_type=ProviderErrorType.CONNECTION_ERROR
+                if e.status_code >= 500
+                else ProviderErrorType.INVALID_REQUEST,
+                message=_sanitize_error_message(e),
+                provider=self.name,
+                retryable=e.status_code >= 500,
+                cause=e,
+            ) from e
         except anthropic.APITimeoutError as e:
             raise ProviderError(
                 error_type=ProviderErrorType.TIMEOUT_ERROR,

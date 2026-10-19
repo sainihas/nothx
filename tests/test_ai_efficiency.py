@@ -248,3 +248,20 @@ def test_anthropic_rate_limit_cooldown_is_shared(database):
             provider.complete("synthetic")
         assert error.value.retryable is False
         assert client.messages.create.call_count == 2
+
+
+@pytest.mark.parametrize("status", [400, 500, 529])
+def test_anthropic_status_retry_policy_replaces_disabled_sdk_retries(status):
+    from types import SimpleNamespace
+
+    import anthropic
+
+    provider = AnthropicProvider("synthetic-key")
+    provider._client = Mock()
+    response = SimpleNamespace(status_code=status, headers={}, request=object())
+    provider._client.messages.create.side_effect = anthropic.APIStatusError(
+        "API failure", response=response, body={}
+    )
+    with pytest.raises(ProviderError) as error:
+        provider.complete("synthetic")
+    assert error.value.retryable is (status >= 500)

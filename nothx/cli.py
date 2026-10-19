@@ -3516,7 +3516,7 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
         table.add_column("Account / List identity")
         table.add_column("Domain")
         table.add_column("Emails")
-        table.add_column("Open Rate")
+        table.add_column("Marked read")
         table.add_column("Reason")
         table.add_column("Recent subjects")
         table.add_column("Request state")
@@ -3539,7 +3539,7 @@ def _show_details(to_unsub, to_keep, to_review, to_block):
         table.add_column("Account / List identity")
         table.add_column("Domain")
         table.add_column("Emails")
-        table.add_column("Open Rate")
+        table.add_column("Marked read")
         table.add_column("Reason")
         for _key, sender, classification in marketing_kept[:10]:
             table.add_row(

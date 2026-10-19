@@ -275,6 +275,7 @@ def _persist_headers(
                     endpoint_fingerprints=_endpoint_fingerprints(header),
                     has_header_method=_has_usable_header_method(header),
                     can_unsubscribe=header.server_can_unsubscribe,
+                    promotional=has_promotional_subject(header.subject),
                 )
 
 

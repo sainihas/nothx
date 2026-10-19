@@ -432,3 +432,19 @@ class TestResetDatabase:
 
         rules = db.get_rules()
         assert len(rules) == 0
+
+
+def test_resolution_metadata_upgrade_preserves_and_scopes_old_requests(temp_db):
+    subscription = db.upsert_subscription("owner@example.com", "from", "news@example.com")
+    op = db.get_or_create_unsubscribe_operation(
+        subscription["id"], "resolve-v1-old", outcome="requested"
+    )
+    with db.get_db() as conn:
+        conn.execute("ALTER TABLE unsubscribe_operations DROP COLUMN verification_scope")
+        conn.execute("ALTER TABLE message_refs DROP COLUMN promotional")
+    db.init_db()
+    assert db.get_unsubscribe_operation(op["id"])["verification_scope"] == "source"
+    assert db.get_subscription(subscription["id"])["last_outcome"] == "requested"
+    assert list(temp_db.parent.glob("test.db.backup-*"))
+    db.init_db()
+    assert len(db.list_unsubscribe_operations(subscription_id=subscription["id"])) == 1

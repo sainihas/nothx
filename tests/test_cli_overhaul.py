@@ -2593,3 +2593,65 @@ def test_authoritative_kept_personal_domain_never_reappears_as_legacy_review(con
         result = runner.invoke(review, [])
     assert result.exit_code == 0, result.output
     select.assert_not_called()
+
+
+def test_saved_review_can_search_beyond_former_queue_cap(configured_cli):
+    runner, _ = configured_cli
+    rows = [
+        {
+            "id": i,
+            "account": "owner@example.com",
+            "identity_kind": "from",
+            "identity_value": f"sender-{i}@mail.example",
+            "policy_action": "review",
+        }
+        for i in reversed(range(10_001))
+    ]
+
+    def subscriptions(*, policy_action=None, limit=500, **kwargs):
+        if policy_action != "review":
+            return []
+        return rows if limit is None else rows[:limit]
+
+    with (
+        patch("nothx.cli.db.list_subscriptions", side_effect=subscriptions),
+        patch("nothx.cli.questionary.select") as select,
+        patch("nothx.cli.questionary.text") as search,
+    ):
+        select.return_value.ask.side_effect = ["search", "row:0", "skip", "finish"]
+        search.return_value.ask.return_value = "sender-0@"
+        result = runner.invoke(review, [])
+    assert result.exit_code == 0, result.output
+    assert "10,001" in result.output
+    assert "sender-0@mail.example" in result.output
+    assert select.call_count == 4
+
+
+def test_mixed_saved_and_legacy_store_exposes_both_without_domain_fallthrough(configured_cli):
+    runner, _ = configured_cli
+    modern = db.upsert_subscription(
+        "owner@example.com",
+        "from",
+        "offer@modern.example",
+        sender_domain="modern.example",
+        policy_action="review",
+    )
+    db.upsert_sender("modern.example", 4, 0, ["Offer"], True)
+    db.upsert_sender("legacy.example", 4, 0, ["Sale"], True)
+    with patch("nothx.cli.questionary.select") as select:
+        select.return_value.ask.side_effect = ["legacy", "row:legacy.example", "keep"]
+        result = runner.invoke(review, [])
+    assert result.exit_code == 0, result.output
+    groups = {c.value for c in select.call_args_list[0].kwargs["choices"]}
+    assert groups == {"subscriptions", "legacy", "finish"}
+    legacy_values = {c.value for c in select.call_args_list[1].kwargs["choices"]}
+    assert "row:legacy.example" in legacy_values
+    assert "row:modern.example" not in legacy_values
+    assert db.get_subscription(modern["id"])["policy_action"] == "review"
+    assert db.get_sender("legacy.example")["status"] == "keep"
+    with patch("nothx.cli.questionary.select") as select:
+        select.return_value.ask.return_value = "finish"
+        result = runner.invoke(review, ["--all"])
+    assert result.exit_code == 0, result.output
+    assert select.call_count == 1
+    assert db.get_subscription(modern["id"])["policy_action"] == "review"

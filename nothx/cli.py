@@ -105,7 +105,6 @@ _L = "[muted]│[/muted]"
 
 # Upper bound on one manual-review page. High enough that a real queue fits in
 # one pass; a queue that hits it is reported as truncated rather than as a total.
-_MANUAL_QUEUE_LIMIT = 10_000
 
 
 def _key(k: str) -> str:
@@ -3842,19 +3841,16 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
 
     manual_subscriptions: list[dict[str, Any]] = []
     handled_manual_domains: set[str] = set()
-    truncated = False
     if show_keep or show_unsub:
         manual_subscriptions = db.list_subscriptions(
-            policy_action="keep" if show_keep else "unsub", limit=_MANUAL_QUEUE_LIMIT
+            policy_action="keep" if show_keep else "unsub", limit=None
         )
-        truncated = len(manual_subscriptions) == _MANUAL_QUEUE_LIMIT
     else:
         parked_ids = {row["id"] for row in db.list_consent_parked_blocks()}
         pages = [
-            db.list_subscriptions(outcome="needs_user", limit=_MANUAL_QUEUE_LIMIT),
-            db.list_subscriptions(policy_action="review", limit=_MANUAL_QUEUE_LIMIT),
+            db.list_subscriptions(outcome="needs_user", limit=None),
+            db.list_subscriptions(policy_action="review", limit=None),
         ]
-        truncated = any(len(page) == _MANUAL_QUEUE_LIMIT for page in pages)
         by_id: dict[int, dict[str, Any]] = {}
         for subscription in (*pages[0], *pages[1]):
             if subscription.get("policy_action") == "keep" or subscription["id"] in parked_ids:
@@ -3862,15 +3858,54 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
             by_id[subscription["id"]] = subscription
         manual_subscriptions = list(by_id.values())
 
+    # Determine which senders to show
+    if show_keep:
+        senders = db.get_senders_by_status(SenderStatus.KEEP)
+        filter_label = "marked to keep"
+    elif show_unsub:
+        senders = db.get_senders_by_status(SenderStatus.UNSUBSCRIBED)
+        filter_label = "marked to unsubscribe"
+    elif show_all:
+        senders = db.get_senders_by_status(SenderStatus.UNKNOWN)
+        filter_label = "pending"
+    else:
+        # Default: only senders that need review (uncertain)
+        senders = db.get_senders_for_review()
+        filter_label = "needing review"
+
+    handled_manual_domains.update(
+        row["sender_domain"].casefold()
+        for row in db.list_subscriptions(limit=None)
+        if row.get("sender_domain")
+    )
+    senders = [
+        sender for sender in senders if sender["domain"].casefold() not in handled_manual_domains
+    ]
+
+    if manual_subscriptions and senders:
+        group = questionary.select(
+            "Which saved decisions would you like to review?",
+            choices=[
+                questionary.Choice(
+                    f"Account/list decisions ({len(manual_subscriptions):,})", value="subscriptions"
+                ),
+                questionary.Choice(
+                    f"Legacy-only pending domains ({len(senders):,})", value="legacy"
+                ),
+                questionary.Choice("Finish review", value="finish"),
+            ],
+            default="finish",
+            **Q_COMMON,
+        ).ask()
+        if group == "legacy":
+            manual_subscriptions = []
+        elif group != "subscriptions":
+            return
+
     if manual_subscriptions:
         console.print(
-            f"\n[header]{len(manual_subscriptions)} saved account/list decisions to review[/header]"
+            f"\n[header]{len(manual_subscriptions):,} saved account/list decisions to review[/header]"
         )
-        if truncated:
-            console.print(
-                f"[muted]Showing the newest {_MANUAL_QUEUE_LIMIT} of each queue; "
-                "run this again to reach the rest.[/muted]"
-            )
         saved_by_id = {str(row["id"]): row for row in manual_subscriptions}
         labels = [
             (
@@ -3951,33 +3986,6 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 console.print(f"{_L} Future policy set to {choice}")
         _report_consent_parked_blocks(config)
         return
-
-    # Determine which senders to show
-    if show_keep:
-        senders = db.get_senders_by_status(SenderStatus.KEEP)
-        filter_label = "marked to keep"
-    elif show_unsub:
-        senders = db.get_senders_by_status(SenderStatus.UNSUBSCRIBED)
-        filter_label = "marked to unsubscribe"
-    elif show_all:
-        senders = db.get_senders_by_status(SenderStatus.UNKNOWN)
-        filter_label = "pending"
-    else:
-        # Default: only senders that need review (uncertain)
-        senders = db.get_senders_for_review()
-        filter_label = "needing review"
-
-    # A manual account/list decision may create/update its compatibility
-    # sender row for learning. Do not immediately ask for (and execute) the
-    # same domain-level decision a second time in this review invocation.
-    handled_manual_domains.update(
-        row["sender_domain"].casefold()
-        for row in db.list_subscriptions(limit=None)
-        if row.get("sender_domain")
-    )
-    senders = [
-        sender for sender in senders if sender["domain"].casefold() not in handled_manual_domains
-    ]
 
     if not senders and not manual_subscriptions:
         console.print(f"[success]No senders {filter_label}![/success]")

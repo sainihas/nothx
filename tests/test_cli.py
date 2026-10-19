@@ -435,7 +435,7 @@ class TestReviewCommand:
         db.upsert_sender("marketing.com", 5, 1, ["Buy now!"], True)
 
         # User selects to keep
-        mock_select.return_value.ask.return_value = "keep"
+        mock_select.return_value.ask.side_effect = ["row:marketing.com", "keep"]
 
         # Use the --keep filter since sender is unknown by default
         result = runner.invoke(review, ["--all"])

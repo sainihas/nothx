@@ -169,3 +169,24 @@ def test_incomplete_scan_stays_immutable_after_keep_and_reopen():
         not {c.value for c in opts["choices"]} & {"block", "unsub"} for opts in action_prompts
     )
     assert kept[0][2].source == "user_rule"
+
+
+def test_saved_review_search_pages_and_finish_do_not_visit_every_sender():
+    from nothx.cli import _pick_saved_reviews
+
+    rows = [(str(i), f"owner@example.com · sender-{i}@mail.example") for i in range(1400)]
+    with (
+        patch("nothx.cli.questionary.select") as select,
+        patch("nothx.cli.questionary.text") as search,
+    ):
+        select.return_value.ask.side_effect = ["next", "search", "row:731", "finish"]
+        search.return_value.ask.return_value = "sender-731@"
+        assert list(_pick_saved_reviews(rows)) == ["731"]
+    prompts = select.call_args_list
+    assert len([c for c in prompts[0].kwargs["choices"] if c.value.startswith("row:")]) == 20
+    assert len([c for c in prompts[1].kwargs["choices"] if c.value.startswith("row:")]) == 20
+    assert [c.value for c in prompts[2].kwargs["choices"] if c.value.startswith("row:")] == [
+        "row:731"
+    ]
+    assert all(p.kwargs["default"] == "finish" for p in prompts)
+    assert len(rows) == 1400

@@ -1764,7 +1764,7 @@ def test_cleanup_preview_is_full_inbox_ai_without_actions_or_saved_decisions(con
         patch("nothx.cli.db.log_run") as log,
     ):
         engine.return_value.classify_batch.return_value = classifications
-        result = runner.invoke(cleanup, [])
+        result = runner.invoke(cleanup, ["--preview"])
     assert result.exit_code == 0, result.output
     assert scan.call_args.kwargs["full_history"] is True
     assert scan.call_args.kwargs["inbox_only"] is True
@@ -1776,7 +1776,7 @@ def test_cleanup_preview_is_full_inbox_ai_without_actions_or_saved_decisions(con
     for mutation in (unsub, block, reconcile, persist, log):
         mutation.assert_not_called()
     assert "Sale" in result.output
-    assert "cleanup --apply" in result.output
+    assert "Preview only" in result.output
 
 
 def test_normal_run_rechecks_recent_headers_unless_new_only(configured_cli):
@@ -2357,3 +2357,44 @@ def test_full_history_old_service_notice_blocks_stored_automatic_suppression(con
     imap.assert_not_called()
     unsubscribe.assert_not_called()
     assert db.get_subscription(subscription["id"])["policy_action"] == "review"
+
+
+@pytest.mark.parametrize(
+    "command,args,full_history",
+    [(cleanup, [], True), (cleanup, ["--apply"], True), (run, [], False)],
+)
+@pytest.mark.parametrize("approve", [False, True])
+def test_cleanup_and_recent_review_then_act_without_rescanning(
+    configured_cli, command, args, full_history, approve
+):
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    result, classes = _subscription_scan(Action.BLOCK)
+    with (
+        patch("nothx.cli.scan_inbox", return_value=result) as scan,
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes) as classify,
+        patch("nothx.cli._styled_confirm", return_value=approve) as confirm,
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+        patch("nothx.cli._reconcile_due_operations"),
+    ):
+        outcome = runner.invoke(command, args)
+    assert outcome.exit_code == 0, outcome.output
+    scan.assert_called_once()
+    classify.assert_called_once()
+    assert scan.call_args.kwargs["full_history"] is full_history
+    assert scan.call_args.kwargs["persist"] is True
+    assert classify.call_args.kwargs["persist"] is True
+    assert "Apply 0 unsubscribe requests and 1 block policies?" in confirm.call_args.args[0]
+    assert block.call_count == int(approve)
+    assert "run nothx cleanup --apply" not in outcome.output.lower()
+
+
+@pytest.mark.parametrize("extra", ["--apply", "--auto"])
+def test_cleanup_preview_rejects_action_flags(configured_cli, extra):
+    runner, _ = configured_cli
+    with patch("nothx.cli.scan_inbox") as scan:
+        result = runner.invoke(cleanup, ["--preview", extra])
+    assert result.exit_code == 2
+    scan.assert_not_called()

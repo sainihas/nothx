@@ -11,7 +11,6 @@ from .heuristics import (
     OPERATIONAL_SUBJECT_PATTERNS,
     SAFE_SENDER_PATTERNS,
     SAFE_SUBJECT_PATTERNS,
-    SPAM_SUBJECT_CASE_PATTERNS,
     SPAM_SUBJECT_PATTERNS,
     HeuristicScorer,
     has_strong_cold_outreach_evidence,
@@ -298,7 +297,6 @@ class ClassificationEngine:
             return None
         has_risk_signal = any(
             any(pattern.search(subject) for pattern in SPAM_SUBJECT_PATTERNS)
-            or any(pattern.search(subject) for pattern in SPAM_SUBJECT_CASE_PATTERNS)
             or has_strong_cold_outreach_evidence(subject)
             for subject in subjects
         )

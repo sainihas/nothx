@@ -812,3 +812,52 @@ def test_promotional_subject_with_transactional_word_does_not_create_protected_h
     assert has_protected_subject("Your order confirmation")
     assert not has_protected_subject("SALE: order now for 50% off")
     assert not has_protected_subject("Quick question about your account")
+
+
+@pytest.mark.parametrize("notice", ["SECURITY ALERT: new login", "PAYMENT RECEIPT #123456"])
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("aggregated", [False, True])
+@pytest.mark.parametrize("sender_address", ["alerts@sender.example", "news@sender.example"])
+def test_uppercase_protected_notices_stay_local_even_when_every_subject_is_protected(
+    policy_engine, batch, aggregated, sender_address, notice
+):
+    from nothx.models import AuthenticationEvidence
+
+    headers = [
+        EmailHeader(
+            sender=sender_address,
+            subject=notice,
+            date=datetime(2026, 1, index, tzinfo=UTC),
+            message_id=f"<{index}@sender.example>",
+            list_id="<alerts.sender.example>",
+            list_unsubscribe="<https://sender.example/unsub>",
+            account_key="owner@example.com",
+            mailbox_role="inbox",
+            uidvalidity=1,
+            uid=index,
+            authentication=AuthenticationEvidence(
+                trusted=True,
+                dkim=AuthResult.PASS,
+                dmarc=AuthResult.PASS,
+                dkim_domains=("sender.example",),
+            ),
+        )
+        for index in range(1, 9)
+    ]
+    sender = _stats_for_emails("sender.example", headers)
+    assert sender.protected_subject_emails == 8
+    if not aggregated:
+        sender.protected_subject_emails = 0
+    policy_engine.ai.is_available = Mock(return_value=True)
+    policy_engine.ai.classify_batch = Mock()
+    policy_engine.ai.classify_single = Mock()
+    result = (
+        policy_engine.classify_batch([sender], persist=False, allow_ai=True)[
+            sender.classification_key
+        ]
+        if batch
+        else policy_engine.classify(sender)
+    )
+    assert result.action is (Action.KEEP if sender_address.startswith("alerts@") else Action.REVIEW)
+    policy_engine.ai.classify_batch.assert_not_called()
+    policy_engine.ai.classify_single.assert_not_called()

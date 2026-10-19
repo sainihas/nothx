@@ -389,6 +389,8 @@ class _FooterHTMLParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.casefold()
+        if lowered in ("p", "div", "br", "li", "td", "tr"):
+            self.text += "\n"
         if lowered in ("script", "style"):
             self._suppressed_depth += 1
             return
@@ -405,6 +407,8 @@ class _FooterHTMLParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.casefold()
+        if lowered in ("p", "div", "li", "td", "tr"):
+            self.text += "\n"
         if lowered in ("script", "style") and self._suppressed_depth:
             self._suppressed_depth -= 1
             return
@@ -550,9 +554,13 @@ def _candidate(uri: str, context: str, source: str) -> FooterUnsubscribeCandidat
 
 
 def _plain_targets(text: str) -> Iterable[tuple[str, str]]:
+    previous_end = 0
     for match in _TARGET_RE.finditer(text):
-        context = text[max(0, match.start() - 160) : min(len(text), match.end() + 160)]
+        # Evidence after a URL may describe the next link, not this one.
+        start = max(previous_end, text.rfind("\n", 0, match.start()) + 1, match.start() - 160)
+        context = text[start : match.start()]
         yield match.group(0), context
+        previous_end = match.end()
 
 
 def _html_targets(text: str) -> tuple[list[tuple[str, str]], bool]:
@@ -563,9 +571,21 @@ def _html_targets(text: str) -> tuple[list[tuple[str, str]], bool]:
     except (ValueError, AssertionError):
         return [], parser.forms_seen
     targets = []
+    previous_end = 0
     for anchor in parser.anchors:
-        context = parser.text[max(0, anchor.start - 160) : min(len(parser.text), anchor.end + 160)]
+        context = parser.text[anchor.start : anchor.end]
+        # Only generic call-to-action anchors borrow preceding text, within
+        # their block and after the previous link. Neighboring article titles,
+        # social links and recipient addresses must not inherit opt-out text.
+        if re.fullmatch(r"\s*(?:(?:click|tap)\s+)?here[.!]?\s*", context, re.IGNORECASE):
+            start = max(
+                previous_end,
+                parser.text.rfind("\n", 0, anchor.start) + 1,
+                anchor.start - 160,
+            )
+            context = parser.text[start : anchor.end]
         targets.append((anchor.href, context))
+        previous_end = anchor.end
     return targets, parser.forms_seen
 
 

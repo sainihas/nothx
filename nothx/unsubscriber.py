@@ -214,7 +214,7 @@ def unsubscribe(
     # that endpoint is defined for POST, and a GET typically lands on a
     # tracking or confirmation page.
     for url in http_targets:
-        if url == one_click_url:
+        if url == one_click_url or url in declared_one_click_targets(email_header):
             continue
         result = _execute_get(url)
         attempts.append(result)
@@ -302,7 +302,11 @@ def unsubscribe_subscription(
     one_click: list[tuple[UnsubMethod, str, MessageRef | None]] = []
     header_methods: list[tuple[UnsubMethod, str, MessageRef | None]] = []
     footer_methods: list[tuple[UnsubMethod, str, MessageRef | None]] = []
-    declared_one_click: set[bytes] = set()
+    declared_one_click = {
+        _endpoint_fingerprint(target)
+        for header in plans
+        for target in declared_one_click_targets(header)
+    }
     deferred_for_auth = False
     footer_requires_user = automatic and any(item.footer_requires_user for item in plans)
 
@@ -354,6 +358,8 @@ def unsubscribe_subscription(
             continue
         authenticated = _trusted_unsubscribe_auth(header)
         for footer in header.footer_unsubscribe_candidates:
+            if _endpoint_fingerprint(footer.uri) in declared_one_click:
+                continue
             method = _safe_legacy_method(footer.uri)
             if method is None:
                 continue
@@ -488,6 +494,19 @@ def _header_matches_patterns(header: EmailHeader, patterns: list[str]) -> bool:
     if header.normalized_list_id:
         values.append(header.normalized_list_id)
     return any(_matches_domain_patterns(value, patterns) for value in values)
+
+
+def declared_one_click_targets(header: EmailHeader) -> tuple[str, ...]:
+    """Never reinterpret declared POST destinations as GET, even if malformed."""
+    if not re.search(
+        r"list-unsubscribe\s*=\s*one-click\b", header.list_unsubscribe_post or "", re.I
+    ):
+        return ()
+    return tuple(
+        target
+        for target in header.list_unsubscribe_targets
+        if target.casefold().startswith(("https://", "http://"))
+    )
 
 
 def _strict_one_click_target(header: EmailHeader) -> str | None:

@@ -4087,7 +4087,12 @@ def resolve_subscription(
     This records a request, not proof that future deliveries have stopped.
     """
     from .resolution import refresh_sources
-    from .unsubscriber import _endpoint_fingerprint, _safe_legacy_method
+    from .unsubscriber import (
+        _endpoint_fingerprint,
+        _safe_legacy_method,
+        _strict_one_click_target,
+        declared_one_click_targets,
+    )
 
     if completed and (retry or dry_run or source_uid is not None):
         raise click.UsageError(
@@ -4193,6 +4198,10 @@ def resolve_subscription(
         for header in headers
         if any(
             _safe_legacy_method(target) is not None
+            and (
+                target not in declared_one_click_targets(header)
+                or target == _strict_one_click_target(header)
+            )
             and _endpoint_fingerprint(target).hex() not in exclusions
             for target in (
                 *header.list_unsubscribe_targets,
@@ -4216,7 +4225,7 @@ def resolve_subscription(
         sources = [header for header in sources if header.uid == source_uid]
         if len(sources) != 1:
             raise click.ClickException("Choose one unique source UID shown by --dry-run")
-    elif subscription["identity_kind"] == "from" and len(sources) > 1:
+    elif subscription["identity_kind"] == "from" and len(headers) > 1:
         # A From address can mix newsletters with service notifications. Never
         # infer a whole-sender policy from a chosen promotional message.
         if yes:
@@ -4393,9 +4402,11 @@ def open_unsubscribe(subscription_id: int, yes: bool):
                         "[warning]Footer refresh failed; only current header destinations are available.[/warning]"
                     )
 
-        from .unsubscriber import _strict_one_click_target
+        from .unsubscriber import declared_one_click_targets
 
-        post_only = {_strict_one_click_target(header) for header in matching_headers}
+        post_only = {
+            target for header in matching_headers for target in declared_one_click_targets(header)
+        }
         for header in sorted(
             matching_headers,
             key=lambda item: item.received_at or item.date,

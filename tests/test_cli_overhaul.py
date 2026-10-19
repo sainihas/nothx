@@ -2964,3 +2964,53 @@ def test_resolve_no_eligible_method_does_not_consume_retry(configured_cli, alrea
     send.assert_not_called()
     assert len(db.list_unsubscribe_operations(subscription_id=subscription["id"])) == 1
     assert db.get_subscription(subscription["id"])["retry_count"] == 0
+
+
+def test_mixed_sender_requires_choice_even_with_only_one_candidate(configured_cli):
+    from dataclasses import replace
+
+    from nothx.cli import resolve_subscription
+
+    runner, config, subscription, old_stats, headers = _resolve_fixture(configured_cli)
+    first = replace(
+        headers[0], list_id=None, list_unsubscribe=None, uid=201, message_id="<newsletter@example>"
+    )
+    service = replace(
+        first,
+        uid=102,
+        message_id="<service@example>",
+        subject="Service notice",
+        list_unsubscribe="<https://shop.example/service-settings>",
+    )
+    stats = _stats_for_emails(first.domain, [first, service])
+    classification = Classification(EmailType.MARKETING, Action.REVIEW, 1.0, "Mixed", "heuristic")
+    mixed, _ = _persist_subscription_records(stats, [first, service], classification)
+    with (
+        patch("nothx.resolution.refresh_sources", return_value=(stats, [first, service])),
+        patch("nothx.cli.unsubscribe_subscription") as send,
+    ):
+        result = runner.invoke(resolve_subscription, [str(mixed["id"]), "--yes"])
+    assert result.exit_code == 1
+    assert "--source-uid" in result.output
+    send.assert_not_called()
+
+
+@pytest.mark.parametrize("duplicate", [True, False])
+def test_browser_excludes_malformed_declared_post_targets(configured_cli, duplicate):
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    headers[0].list_unsubscribe_post = "List-Unsubscribe=One-Click"
+    headers[0].list_unsubscribe_post_count = 1
+    if duplicate:
+        headers[0].list_unsubscribe_count = 2
+    else:
+        headers[0].list_unsubscribe = "<https://shop.example/a>, <https://shop.example/b>"
+        headers[0].list_unsubscribe_count = 1
+    key = headers[0].subscription_identity.key
+    scan = ScanResult({stats.domain: stats}, {stats.domain: headers}, {key: stats}, {key: headers})
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.webbrowser.open") as browser,
+    ):
+        result = runner.invoke(open_unsubscribe, [str(subscription["id"]), "--yes"])
+    assert result.exit_code == 0, result.output
+    browser.assert_not_called()

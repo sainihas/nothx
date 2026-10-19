@@ -3335,3 +3335,16 @@ def test_refresh_keeps_newest_token_despite_many_old_promotions(configured_cli):
         _, found = refresh_sources(config, subscription)
     assert 60 in [h.uid for h in found[:3]]
     assert len(found) == 50
+
+
+def test_resolve_preview_shows_older_sources_beyond_twelve_rows(configured_cli):
+    from dataclasses import replace
+
+    from nothx.cli import resolve_subscription
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    sources = [replace(headers[0], uid=uid) for uid in range(1, 21)]
+    with patch("nothx.resolution.refresh_sources", return_value=(stats, sources)):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "UID 20" in result.output

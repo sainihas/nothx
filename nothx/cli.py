@@ -4246,7 +4246,7 @@ def resolve_subscription(
     ]
     if subscription["identity_kind"] == "list_id" and source_uid is None:
         sources = [h for h in sources if h.normalized_list_id == subscription["identity_value"]]
-    for header in sources[:12]:
+    for header in sources:
         console.print(f"  UID {header.uid} · {escape(header.subject)}")
     if not sources:
         console.print(

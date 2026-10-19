@@ -233,9 +233,16 @@ def test_anthropic_rate_limit_cooldown_is_shared(database):
     response = SimpleNamespace(status_code=429, headers={"retry-after": "30"}, request=object())
     limited = anthropic.RateLimitError("Rate limit", response=response, body={})
     client.messages.create.side_effect = limited
+    clock = [100.0]
     with (
-        patch("nothx.classifier.providers.anthropic_provider.time.monotonic", return_value=100),
-        patch("nothx.classifier.providers.anthropic_provider.time.sleep") as sleep,
+        patch(
+            "nothx.classifier.providers.anthropic_provider.time.monotonic",
+            side_effect=lambda: clock[0],
+        ),
+        patch(
+            "nothx.classifier.providers.anthropic_provider.time.sleep",
+            side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay),
+        ) as sleep,
     ):
         with pytest.raises(ProviderError) as error:
             provider.complete("synthetic")
@@ -265,3 +272,111 @@ def test_anthropic_status_retry_policy_replaces_disabled_sdk_retries(status):
     with pytest.raises(ProviderError) as error:
         provider.complete("synthetic")
     assert error.value.retryable is (status >= 500)
+
+
+def test_extended_cooldown_is_rechecked_before_request():
+    from types import SimpleNamespace
+
+    provider = AnthropicProvider("synthetic-key")
+    provider._client = Mock()
+    provider._client.messages.create.return_value = SimpleNamespace(
+        content=[dict(type="text", text="[]")],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    provider._retry_at = 110
+    clock = [100.0]
+    sleeps = []
+
+    def wait(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+        if len(sleeps) == 1:
+            provider._retry_at = 150
+
+    with (
+        patch(
+            "nothx.classifier.providers.anthropic_provider.time.monotonic",
+            side_effect=lambda: clock[0],
+        ),
+        patch("nothx.classifier.providers.anthropic_provider.time.sleep", side_effect=wait),
+    ):
+        provider.complete("synthetic")
+    assert sleeps == [10, 40]
+    assert clock[0] == 150
+    provider._client.messages.create.assert_called_once()
+
+
+def test_cancelled_workers_do_not_retry_or_start_queued_requests(database):
+    from concurrent.futures import CancelledError
+
+    from nothx.classifier.ai import AI_RETRY_CONFIG
+    from nothx.classifier.providers.base import ProviderErrorType
+
+    provider = Provider()
+    provider.batch_size = 1
+    provider.max_parallel_batches = 2
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(threading.get_ident())
+        entered.set()
+        assert release.wait(2)
+        raise ProviderError(
+            ProviderErrorType.CONNECTION_ERROR, "synthetic failure", "fake", retryable=True
+        )
+
+    instance = classifier(provider)
+    futures = []
+
+    def interrupt(pending):
+        futures.extend(pending)
+        assert entered.wait(2)
+        raise KeyboardInterrupt
+
+    with (
+        patch.object(provider, "complete", side_effect=fail),
+        patch("nothx.classifier.ai.as_completed", side_effect=interrupt),
+    ):
+        with pytest.raises(KeyboardInterrupt):
+            instance.classify_batch(senders(20))
+        assert entered.wait(2)
+        count = len(calls)
+        release.set()
+    for future in futures:
+        if not future.cancelled():
+            with pytest.raises(CancelledError):
+                future.result(timeout=2)
+    assert len(calls) == count
+    event = threading.Event()
+
+    def cancel_after_failure(*args, **kwargs):
+        threading.Timer(0.02, event.set).start()
+        return fail()
+
+    with (
+        patch.object(provider, "complete", side_effect=cancel_after_failure),
+        patch.object(AI_RETRY_CONFIG, "base_delay", 10),
+    ):
+        start = time.monotonic()
+        with pytest.raises(CancelledError):
+            instance._call_provider_with_retry(provider, "synthetic", cancel_event=event)
+        assert time.monotonic() - start < 1
+
+
+def test_cancel_interrupts_anthropic_cooldown_before_provider_call():
+    from concurrent.futures import CancelledError
+
+    provider = AnthropicProvider("synthetic-key")
+    provider._client = Mock()
+    provider._retry_at = time.monotonic() + 30
+    event = threading.Event()
+    timer = threading.Timer(0.02, event.set)
+    timer.start()
+    start = time.monotonic()
+    with pytest.raises(CancelledError):
+        provider.complete_cancellable("synthetic", cancel_event=event)
+    timer.join()
+    assert time.monotonic() - start < 1
+    provider._client.messages.create.assert_not_called()

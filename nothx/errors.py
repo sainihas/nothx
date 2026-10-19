@@ -6,6 +6,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, ParamSpec, TypeVar
@@ -161,6 +162,7 @@ class RetryConfig:
 def retry_with_backoff(
     config: RetryConfig | None = None,
     on_retry: Callable[[Exception, int, float], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
     """
     Decorator for retrying functions with exponential backoff.
@@ -181,6 +183,8 @@ def retry_with_backoff(
             last_exception: Exception | None = None
 
             for attempt in range(1, config.max_attempts + 1):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError()
                 try:
                     return func(*args, **kwargs)
                 except config.retryable_exceptions as e:
@@ -232,7 +236,10 @@ def retry_with_backoff(
                     if on_retry:
                         on_retry(e, attempt, delay)
 
-                    time.sleep(delay)
+                    if cancel_event is None:
+                        time.sleep(delay)
+                    elif cancel_event.wait(delay):
+                        raise CancelledError() from None
 
             # Should not reach here, but satisfy type checker
             assert last_exception is not None

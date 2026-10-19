@@ -5,6 +5,7 @@ import json
 import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Event
 from typing import Any
 
 from .. import ai_cache, db
@@ -231,9 +232,15 @@ class AIClassifier:
         workers = min(4, max(1, workers)) if type(workers) is int else 1
         chunks = [pending[start : start + size] for start in range(0, len(pending), size)]
 
+        cancelled = Event()
+
         def process(chunk: list[SenderStats]) -> dict[str, Classification]:
             return self._classify_chunk(
-                chunk, persist=False, correction_context=context, descriptions=descriptions
+                chunk,
+                persist=False,
+                correction_context=context,
+                descriptions=descriptions,
+                cancel_event=cancelled,
             )
 
         def collect(chunk_results: dict[str, Classification], count: int) -> None:
@@ -252,8 +259,12 @@ class AIClassifier:
                 on_progress(completed, len(senders))
 
         if workers == 1 or len(chunks) <= 1:
-            for chunk in chunks:
-                collect(process(chunk), len(chunk))
+            try:
+                for chunk in chunks:
+                    collect(process(chunk), len(chunk))
+            except BaseException:
+                cancelled.set()
+                raise
         else:
             executor = ThreadPoolExecutor(max_workers=workers)
             futures = {executor.submit(process, chunk): len(chunk) for chunk in chunks}
@@ -261,6 +272,7 @@ class AIClassifier:
                 for future in as_completed(futures):
                     collect(future.result(), futures[future])
             except BaseException:
+                cancelled.set()
                 executor.shutdown(wait=False, cancel_futures=True)
                 raise
             else:
@@ -274,6 +286,7 @@ class AIClassifier:
         *,
         correction_context: str | None = None,
         descriptions: dict[str, dict[str, Any]] | None = None,
+        cancel_event: Event | None = None,
     ) -> dict[str, Classification]:
         """Classify one chunk of senders with a single AI request."""
         provider = self._get_provider()
@@ -300,7 +313,9 @@ class AIClassifier:
         # Call provider with retry logic
         try:
             budget = 8192 if len(senders) > AI_BATCH_CHUNK_SIZE else 4096
-            response = self._call_provider_with_retry(provider, prompt, max_tokens=budget)
+            response = self._call_provider_with_retry(
+                provider, prompt, max_tokens=budget, cancel_event=cancel_event
+            )
 
             # Parse response
             classifications, parse_errors = self._parse_response(response.text)
@@ -451,12 +466,18 @@ class AIClassifier:
         }
 
     def _call_provider_with_retry(
-        self, provider: BaseAIProvider, prompt: str, max_tokens: int = 4096
+        self,
+        provider: BaseAIProvider,
+        prompt: str,
+        max_tokens: int = 4096,
+        *,
+        cancel_event: Event | None = None,
     ):
         """Call AI provider with retry logic for transient errors."""
 
         @retry_with_backoff(
             config=AI_RETRY_CONFIG,
+            cancel_event=cancel_event,
             on_retry=lambda e, attempt, delay: logger.info(
                 "Retrying AI call (attempt %d) after %.1fs due to: %s",
                 attempt,
@@ -466,6 +487,11 @@ class AIClassifier:
         )
         def _call():
             try:
+                cancellable = getattr(type(provider), "complete_cancellable", None)
+                if callable(cancellable):
+                    return cancellable(
+                        provider, prompt, max_tokens=max_tokens, cancel_event=cancel_event
+                    )
                 return provider.complete(prompt, max_tokens=max_tokens)
             except ProviderError as e:
                 if e.retryable:

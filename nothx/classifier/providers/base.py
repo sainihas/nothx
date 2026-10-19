@@ -1,8 +1,10 @@
 """Base class for AI providers."""
 
 from abc import ABC, abstractmethod
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from enum import Enum
+from threading import Event
 from typing import Any
 
 
@@ -88,6 +90,13 @@ class BaseAIProvider(ABC):
             Exception if the request fails
         """
         pass
+
+    def complete_cancellable(
+        self, prompt: str, max_tokens: int = 4096, *, cancel_event: Event | None = None
+    ) -> ProviderResponse:
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError()
+        return self.complete(prompt, max_tokens=max_tokens)
 
     @abstractmethod
     def test_connection(self) -> tuple[bool, str]:

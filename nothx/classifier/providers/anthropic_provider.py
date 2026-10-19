@@ -3,6 +3,7 @@
 import logging
 import threading
 import time
+from concurrent.futures import CancelledError
 from typing import Any
 
 from .base import BaseAIProvider, ProviderError, ProviderErrorType, ProviderResponse
@@ -132,20 +133,37 @@ class AnthropicProvider(BaseAIProvider):
 
     def complete(self, prompt: str, max_tokens: int = 4096) -> ProviderResponse:
         """Send prompt to Claude and get response."""
+        return self.complete_cancellable(prompt, max_tokens=max_tokens)
+
+    def complete_cancellable(
+        self,
+        prompt: str,
+        max_tokens: int = 4096,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> ProviderResponse:
         try:
             import anthropic
 
-            with self._rate_lock:
-                delay = self._retry_at - time.monotonic()
-            if delay > 60:
-                raise ProviderError(
-                    ProviderErrorType.RATE_LIMIT_ERROR,
-                    "Anthropic rate limit requires a longer cooldown; using local classification",
-                    self.name,
-                    retryable=False,
-                )
-            if delay > 0:
-                time.sleep(delay)
+            wait_started = time.monotonic()
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError()
+                with self._rate_lock:
+                    delay = self._retry_at - time.monotonic()
+                if delay <= 0:
+                    break
+                if time.monotonic() - wait_started + delay > 60:
+                    raise ProviderError(
+                        ProviderErrorType.RATE_LIMIT_ERROR,
+                        "Anthropic rate limit requires a longer cooldown; using local classification",
+                        self.name,
+                        retryable=False,
+                    )
+                if cancel_event is None:
+                    time.sleep(delay)
+                elif cancel_event.wait(delay):
+                    raise CancelledError()
             client = self._get_client()
             response = client.messages.create(
                 model=self.model,
@@ -170,7 +188,7 @@ class AnthropicProvider(BaseAIProvider):
             )
         except ImportError:
             raise
-        except ProviderError:
+        except (ProviderError, CancelledError):
             raise
         except anthropic.RateLimitError as e:
             try:

@@ -3326,8 +3326,6 @@ def _is_marketing_candidate(sender: SenderStats, classification: Classification)
     promotional = sender.promotional_subject_emails > 0 or any(
         has_promotional_subject(subject) for subject in sender.sample_subjects
     )
-    # Mixed service/promotional identities remain protected from suppression,
-    # but their marketing must still be discoverable in the review screen.
     return bulk and promotional
 
 
@@ -4263,8 +4261,6 @@ def resolve_subscription(
         if len(sources) != 1:
             raise click.ClickException("Choose one unique source UID shown by --dry-run")
     elif subscription["identity_kind"] == "from" and len(headers) > 1:
-        # A From address can mix newsletters with service notifications. Never
-        # infer a whole-sender policy from a chosen promotional message.
         if yes:
             raise click.ClickException(
                 "This sender has multiple sources; select a newsletter with --source-uid"
@@ -4326,7 +4322,6 @@ def resolve_subscription(
         claim_owner=owner,
     )
     if result.success:
-        # A source-level opt-out does not authorize suppressing a mixed sender.
         if not source_scoped:
             db.set_subscription_policy(subscription_id, "unsub")
         console.print(

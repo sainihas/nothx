@@ -3160,7 +3160,7 @@ def test_refresh_alias_without_promotion_and_missing_message_id(configured_cli):
     db.upsert_message_ref(
         subscription["id"],
         alias.account_key,
-        alias.mailbox,
+        alias.mailbox_name,
         "inbox",
         alias.uidvalidity,
         alias.uid,
@@ -3186,7 +3186,7 @@ def test_refresh_prioritizes_old_promotion_and_can_target_an_older_uid(configure
         db.upsert_message_ref(
             subscription["id"],
             original.account_key,
-            original.mailbox,
+            original.mailbox_name,
             "inbox",
             original.uidvalidity,
             uid,
@@ -3210,6 +3210,7 @@ def test_review_continues_after_resolve_refusal(configured_cli):
     import click
 
     runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    db.set_subscription_policy(subscription["id"], "review")
     other = db.upsert_subscription(
         "user@example.com", "from", "other@example.com", policy_action="review"
     )
@@ -3317,7 +3318,7 @@ def test_refresh_keeps_newest_token_despite_many_old_promotions(configured_cli):
         db.upsert_message_ref(
             subscription["id"],
             original.account_key,
-            original.mailbox,
+            original.mailbox_name,
             "inbox",
             original.uidvalidity,
             uid,

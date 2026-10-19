@@ -16,6 +16,7 @@ from email.mime.text import MIMEText
 from . import __version__, db, msauth
 from .authres import has_aligned_dkim_pass
 from .config import CURRENT_UNSUBSCRIBE_CONSENT_VERSION, AccountConfig, Config
+from .confirmation import confirmation_request, visible_text
 from .errors import RateLimiter
 from .models import (
     AuthResult,
@@ -820,6 +821,7 @@ def _execute_get(url: str) -> UnsubResult:
     if limited:
         return limited
 
+    submitted = False
     try:
         response = _fetch_with_retry(
             url,
@@ -830,6 +832,41 @@ def _execute_get(url: str) -> UnsubResult:
             follow_redirects=True,
             max_body=GET_RESPONSE_MAX_BODY,
         )
+        # A single, unambiguous opt-out confirmation can be completed by the
+        # app. No preference choices, credentials, scripts or cross-site forms.
+        confirmation = confirmation_request(response.body, response.final_url)
+        if confirmation is not None:
+            target, method, data = confirmation
+            limited = _rate_limited(UnsubMethod.GET)
+            if limited:
+                return limited
+            submitted = True
+            try:
+                # Never retry a form submission: acceptance may precede a
+                # transport failure. Keep that ambiguity at the manual boundary.
+                response = safe_fetch(
+                    target,
+                    method=method,
+                    data=data,
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    timeout=REQUEST_TIMEOUT,
+                    allow_http=False,
+                    follow_redirects=True,
+                    max_body=GET_RESPONSE_MAX_BODY,
+                )
+            except Exception:
+                result = UnsubResult(
+                    success=False,
+                    method=UnsubMethod.GET,
+                    error="Confirmation submission outcome is uncertain; review before retrying",
+                    needs_confirmation=True,
+                )
+                return _mark_attempt(
+                    result, "needs_user", "ambiguous_confirmation", ambiguous_send=True
+                )
         # A 200 alone proves nothing: many unsubscribe pages require another
         # click. Success needs a positive phrase and no interaction gate.
         # Structural markers like <script> or a footer <form> are normal on a
@@ -837,7 +874,10 @@ def _execute_get(url: str) -> UnsubResult:
         # user action when no success phrase is present. A 204 No Content is
         # unconditional success by definition (there is no body to check).
         gated = _check_interaction_gate_indicators(response.body)
-        confirmed = _check_success_indicators(response.body) and not gated
+        confirmed = (
+            _check_success_indicators(response.body)
+            or (submitted and "request completed" in visible_text(response.body).casefold())
+        ) and not gated
         needs_confirmation = not confirmed and (
             gated or _check_structural_interaction_markers(response.body)
         )
@@ -853,6 +893,12 @@ def _execute_get(url: str) -> UnsubResult:
         )
         if success:
             return _mark_attempt(result, "accepted")
+        if submitted:
+            result.needs_confirmation = True
+            result.error = "Confirmation submission outcome is uncertain; review before retrying"
+            return _mark_attempt(
+                result, "needs_user", "ambiguous_confirmation", ambiguous_send=True
+            )
         if needs_confirmation:
             return _mark_attempt(result, "needs_user", "interactive_response")
         retryable = _retryable_http_status(response.status)
@@ -888,6 +934,18 @@ def _execute_get(url: str) -> UnsubResult:
             "http_retryable" if retryable else "http_permanent",
         )
     except Exception as exc:
+        if submitted:
+            return _mark_attempt(
+                UnsubResult(
+                    success=False,
+                    method=UnsubMethod.GET,
+                    needs_confirmation=True,
+                    error="Confirmation submission outcome is uncertain; review before retrying",
+                ),
+                "needs_user",
+                "ambiguous_confirmation",
+                ambiguous_send=True,
+            )
         return _mark_attempt(
             UnsubResult(
                 success=False,
@@ -1169,8 +1227,11 @@ def _get_smtp_config(provider: str) -> tuple[str, int, bool]:
 
 def _check_success_indicators(body: str) -> bool:
     """Check if response body indicates successful unsubscribe."""
-    body_lower = body.lower()
+    body_lower = visible_text(body).casefold()
     success_phrases = [
+        "already unsubscribed",
+        "you’ve unsubscribed",
+        "you've unsubscribed",
         "successfully unsubscribed",
         "unsubscribed successfully",
         "you have been unsubscribed",
@@ -1204,7 +1265,7 @@ def _check_success_indicators(body: str) -> bool:
 
 def _check_confirmation_indicators(body: str) -> bool:
     """Check if the response is asking for further interaction."""
-    body_lower = body.lower()
+    body_lower = visible_text(body).casefold()
     confirmation_phrases = [
         "confirm your unsubscribe",
         "confirm unsubscribe",
@@ -1230,16 +1291,25 @@ def _check_interaction_gate_indicators(body: str) -> bool:
     gate_markers = (
         "captcha",
         "recaptcha",
-        "sign in",
-        "log in",
+        "sign in to",
+        "log in to",
         "login required",
         "javascript required",
         "enable javascript",
         "cookies required",
         "enable cookies",
     )
-    return _check_confirmation_indicators(body) or any(
-        marker in body_lower for marker in gate_markers
+    # A navigation Log In link does not invalidate an explicit success page.
+    # A credential form or an explicit login instruction still does.
+    credential_form = bool(re.search(r"type\s*=\s*['\"]?password", body_lower))
+    bare_login_wall = not _check_success_indicators(body) and any(
+        text in visible_text(body).casefold() for text in ("sign in", "log in")
+    )
+    return (
+        credential_form
+        or bare_login_wall
+        or _check_confirmation_indicators(body)
+        or any(marker in body_lower for marker in gate_markers)
     )
 
 

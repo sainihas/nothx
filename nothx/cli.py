@@ -3848,11 +3848,16 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
         parked_ids = {row["id"] for row in db.list_consent_parked_blocks()}
         pages = [
             db.list_subscriptions(outcome="needs_user", limit=None),
+            db.list_subscriptions(outcome="failed", limit=None),
             db.list_subscriptions(policy_action="review", limit=None),
         ]
         by_id: dict[int, dict[str, Any]] = {}
-        for subscription in (*pages[0], *pages[1]):
-            if subscription.get("policy_action") == "keep" or subscription["id"] in parked_ids:
+        for subscription in (row for page in pages for row in page):
+            if (
+                subscription.get("policy_action") == "keep"
+                or subscription.get("last_outcome") in {"requested", "verified_quiet"}
+                or subscription["id"] in parked_ids
+            ):
                 continue
             by_id[subscription["id"]] = subscription
         manual_subscriptions = list(by_id.values())
@@ -3938,8 +3943,14 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
                 and subscription.get("last_outcome") != "blocked"
                 and not _subscription_has_persisted_threat(subscription["id"])
             ):
-                choices.append(
-                    questionary.Choice("Rescan and open an unsubscribe page", value="open")
+                choices.extend(
+                    [
+                        questionary.Choice("Resolve unsubscribe in Nothx", value="resolve"),
+                        questionary.Choice("Rescan and open an unsubscribe page", value="open"),
+                        questionary.Choice(
+                            "Record provider confirmation from browser", value="completed"
+                        ),
+                    ]
                 )
             choices.extend(
                 [
@@ -3960,7 +3971,17 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
             ).ask()
             if choice is None or choice == "finish":
                 return
-            if choice == "open":
+            if choice in {"resolve", "completed"}:
+                click.get_current_context().invoke(
+                    resolve_subscription,
+                    subscription_id=subscription["id"],
+                    retry=bool(subscription.get("last_outcome")) if choice == "resolve" else False,
+                    dry_run=False,
+                    source_uid=None,
+                    completed=choice == "completed",
+                    yes=False,
+                )
+            elif choice == "open":
                 click.get_current_context().invoke(
                     open_unsubscribe,
                     subscription_id=subscription["id"],
@@ -4036,6 +4057,224 @@ def review(show_all: bool, show_keep: bool, show_unsub: bool, apply_pending: boo
         console.print()
 
 
+@main.command("resolve")
+@click.argument("subscription_id", type=int)
+@click.option(
+    "--retry", is_flag=True, help="Explicitly allow one bounded retry of a failed/manual case"
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Refresh and show sources; send no requests or database writes"
+)
+@click.option("--source-uid", type=int, help="Choose the displayed source UID for a mixed sender")
+@click.option(
+    "--completed", is_flag=True, help="Record that you saw provider confirmation in the browser"
+)
+@click.option(
+    "--yes", is_flag=True, help="Confirm the selected account/list action without a prompt"
+)
+def resolve_subscription(
+    subscription_id: int,
+    retry: bool,
+    dry_run: bool,
+    source_uid: int | None,
+    completed: bool,
+    yes: bool,
+) -> None:
+    """Finish a saved account/list decision using fresh, revalidated sources.
+
+    Login, CAPTCHA and preference choices remain explicit browser steps. After
+    seeing provider confirmation, use --completed to record your acknowledgement.
+    This records a request, not proof that future deliveries have stopped.
+    """
+    from .resolution import refresh_sources
+
+    if completed and (retry or dry_run or source_uid is not None):
+        raise click.UsageError(
+            "--completed cannot be combined with source, retry or dry-run options"
+        )
+    config = Config.load()
+    db.init_db()
+    subscription = db.get_subscription(subscription_id)
+    if subscription is None:
+        raise click.ClickException("Subscription not found")
+    if (
+        subscription.get("policy_action") == "block"
+        or subscription.get("last_outcome") == "blocked"
+        or _subscription_has_persisted_threat(subscription_id)
+    ):
+        raise click.ClickException("This identity is blocked or has persisted threat evidence")
+    if not config.permits_unsubscribe:
+        raise click.ClickException(
+            "Run `nothx consent --unsubscribe --yes` before contacting senders"
+        )
+    operations = [
+        op
+        for op in db.list_unsubscribe_operations(subscription_id=subscription_id)
+        if op["kind"] == "unsubscribe"
+    ]
+    if subscription.get("last_outcome") in {"requested", "verified_quiet"}:
+        console.print("Already accepted or verified quiet; no duplicate request sent.")
+        return
+    if any(op["outcome"] is None for op in operations):
+        raise click.ClickException("An operation is still unresolved; no request will be replayed")
+    if completed:
+        if not operations or operations[0]["outcome"] not in {"failed", "needs_user"}:
+            raise click.ClickException("There is no failed/manual request to acknowledge")
+        if not yes and not _styled_confirm(
+            "Did the provider explicitly confirm your unsubscribe?", False
+        ):
+            return
+        operation = operations[0]
+        db.record_unsubscribe_attempt(
+            operation["id"],
+            "user-confirmed-browser-v1",
+            method="none",
+            outcome="accepted",
+            endpoint_fingerprint=_target_fingerprint("user-confirmed-browser"),
+            error_code="user_confirmed_browser",
+        )
+        db.update_unsubscribe_operation_outcome(
+            operation["id"],
+            "requested",
+            error_code="user_confirmed_browser",
+            detail_redacted="User reports provider confirmation in browser; delivery not yet verified",
+        )
+        console.print(
+            "Recorded your browser confirmation. A complete scan after 48 hours verifies delivery."
+        )
+        return
+    attempts = [
+        attempt
+        for operation in operations
+        for attempt in db.list_unsubscribe_attempts(operation["id"])
+    ]
+    if any(attempt["ambiguous_send"] for attempt in attempts) or any(
+        op.get("error_code") == "execution_claim_expired" for op in operations
+    ):
+        raise click.ClickException(
+            "A previous request may have succeeded; check it in the browser before retrying"
+        )
+    generation = max((op["retry_generation"] for op in operations), default=0)
+    if operations and not dry_run:
+        if not retry:
+            raise click.ClickException(
+                "Use --retry for one explicit retry, or open-unsubscribe for browser help"
+            )
+        if generation >= 1:
+            raise click.ClickException(
+                "The bounded retry is exhausted; use open-unsubscribe and record confirmation with --completed"
+            )
+        generation += 1
+    console.print(
+        f"Refreshing saved Inbox sources for #{subscription_id} · {escape(subscription['account'])}…"
+    )
+    try:
+        stats, headers = refresh_sources(config, subscription)
+    except (IMAPError, imaplib.IMAP4.error, OSError, ValueError) as error:
+        raise click.ClickException(
+            _redact_failure_detail(str(error)) or "Source refresh failed"
+        ) from None
+    if any(not is_contact_permitted(header, config) for header in headers):
+        raise click.ClickException("Fresh source evidence does not permit contacting this sender")
+    sources = [
+        header
+        for header in headers
+        if header.list_unsubscribe_targets or header.footer_unsubscribe_candidates
+    ]
+    for header in sources[:12]:
+        console.print(f"  UID {header.uid} · {escape(header.subject)}")
+    if not sources:
+        console.print(
+            "No usable method found in 50 saved sources. Enable bounded footer scanning with `nothx config --footer-scan on`, or run `nothx cleanup` to refresh history."
+        )
+        return
+    if dry_run:
+        console.print(f"{len(sources)} usable source(s); no request sent and no decisions changed.")
+        return
+    if source_uid is not None:
+        sources = [header for header in sources if header.uid == source_uid]
+        if len(sources) != 1:
+            raise click.ClickException("Choose one unique source UID shown by --dry-run")
+    elif subscription["identity_kind"] == "from" and len(sources) > 1:
+        # A From address can mix newsletters with service notifications. Never
+        # infer a whole-sender policy from a chosen promotional message.
+        if yes:
+            raise click.ClickException(
+                "This sender has multiple sources; select a newsletter with --source-uid"
+            )
+        chosen = _styled_select(
+            [
+                questionary.Choice(f"UID {header.uid} · {header.subject}", value=str(index))
+                for index, header in enumerate(sources)
+            ]
+            + [questionary.Choice("Cancel", value=None)]
+        )
+        if chosen is None:
+            return
+        sources = [sources[int(chosen)]]
+    else:
+        sources = sources[:3]
+    if not yes and not _styled_confirm(
+        f"Unsubscribe #{subscription_id} using these refreshed sources?", False
+    ):
+        return
+    classification = Classification(
+        email_type=EmailType.MARKETING,
+        action=Action.UNSUB,
+        confidence=1.0,
+        reasoning="Explicit account/list resolution",
+        source="user_rule",
+    )
+    _, messages = _persist_subscription_records(stats, sources, classification)
+    owner = uuid.uuid4().hex
+    operation, acquired = db.claim_unsubscribe_operation(
+        subscription_id,
+        f"resolve-v1-{generation}-{_operation_key('unsubscribe', stats, sources)}",
+        owner,
+        retry_generation=generation,
+        trigger_message_ref_id=messages[0][1]["id"] if messages else None,
+    )
+    if not acquired:
+        console.print("Another process already claimed or completed this request; nothing sent.")
+        return
+    # Only interactive GETs are safe to revisit after an explicit retry. Failed
+    # SMTP/POSTs and every accepted endpoint remain excluded.
+    exclusions = {
+        attempt["endpoint_fingerprint"]
+        for attempt in attempts
+        if not (
+            attempt["method"] == "get"
+            and attempt["outcome"] == "needs_user"
+            and attempt.get("error_code") == "interactive_response"
+        )
+    }
+    result = unsubscribe_subscription(
+        sources,
+        config,
+        _matching_account(config, sources),
+        automatic=False,
+        exclude_fingerprints=exclusions,
+    )
+    _record_unsubscribe_result(
+        stats,
+        sources,
+        classification,
+        result,
+        retry_generation=generation,
+        operation_id=operation["id"],
+        claim_owner=owner,
+    )
+    if result.success:
+        # A source-level opt-out does not authorize suppressing a mixed sender.
+        if subscription["identity_kind"] == "list_id":
+            db.set_subscription_policy(subscription_id, "unsub")
+        console.print("Request accepted. Delivery is verified by a complete scan after 48 hours.")
+    else:
+        console.print(
+            f"{escape(result.error or 'This provider needs a browser step')}\nRun `nothx open-unsubscribe {subscription_id}`. After provider confirmation, run `nothx resolve {subscription_id} --completed`."
+        )
+
+
 @main.command("open-unsubscribe")
 @click.argument("subscription_id", type=int)
 @click.option(
@@ -4089,7 +4328,8 @@ def open_unsubscribe(subscription_id: int, yes: bool):
             config,
             account_names=[account_name],
             persist=False,
-            rescan=True,
+            full_history=True,
+            inbox_only=True,
         )
     except (IMAPError, OSError) as error:
         console.print(f"[error]Mailbox rescan failed: {_redact_failure_detail(str(error))}[/error]")
@@ -4119,16 +4359,51 @@ def open_unsubscribe(subscription_id: int, yes: bool):
             reason = contact_suppression_reason(denied_header) or "Contact is not permitted"
             console.print(f"[warning]{reason}; no destination was opened.[/warning]")
             return
+        if config.footer_scan_enabled:
+            from .scanner import _footer_eligible
+
+            eligible = sorted(
+                (
+                    header
+                    for header in matching_headers
+                    if _footer_eligible(header, allow_header_method=True)
+                ),
+                key=lambda item: item.received_at or item.date,
+                reverse=True,
+            )[:3]
+            if eligible:
+                try:
+                    with IMAPConnection(_account) as connection:
+                        for header in eligible:
+                            header.footer_unsubscribe_candidates = (
+                                connection.fetch_footer_candidates(header)
+                            )
+                except (IMAPError, imaplib.IMAP4.error, OSError, ValueError):
+                    console.print(
+                        "[warning]Footer refresh failed; only current header destinations are available.[/warning]"
+                    )
+
+        from .unsubscriber import _strict_one_click_target
+
+        post_only = {_strict_one_click_target(header) for header in matching_headers}
         for header in sorted(
             matching_headers,
             key=lambda item: item.received_at or item.date,
             reverse=True,
         ):
             for target in header.list_unsubscribe_targets:
-                if target.casefold().startswith("https://") and target not in candidates:
+                if (
+                    target.casefold().startswith("https://")
+                    and target not in candidates
+                    and target not in post_only
+                ):
                     candidates.append(target)
             for footer in header.footer_unsubscribe_candidates:
-                if footer.uri.casefold().startswith("https://") and footer.uri not in candidates:
+                if (
+                    footer.uri.casefold().startswith("https://")
+                    and footer.uri not in candidates
+                    and footer.uri not in post_only
+                ):
                     candidates.append(footer.uri)
             if len(candidates) >= 5:
                 break

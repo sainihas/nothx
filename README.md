@@ -168,6 +168,10 @@ Use `nothx cleanup --details` for candidate tables before review.
 | `nothx run --preview` | Preview recent mail with configured AI; no mail actions or saved decisions |
 | `nothx run --dry-run` | Preview recent mail with local rules; no cloud AI or mail actions |
 | `nothx run --new-only` | Only scan new UIDs, skipping earlier undecided messages |
+| `nothx resolve ID --dry-run` | Refresh a saved subscription and preview usable sources |
+| `nothx resolve ID` | Finish a selected subscription; supports simple confirmation forms |
+| `nothx resolve ID --retry` | Explicitly allow one bounded retry of a failed/manual case |
+| `nothx resolve ID --completed` | Record provider confirmation you saw in the browser |
 | `nothx run --full-history` | Scan all history in Inbox and configured folders |
 | `nothx run --rescan` | Repeat the configured lookback without rewinding the cursor |
 | `nothx update` | Check for and install updates |
@@ -297,7 +301,7 @@ unsubscribe email.
 ### What an outcome means
 
 - `requested`: the endpoint accepted a one-click/GET request, or SMTP accepted the mail for delivery. It does **not** guarantee mail will stop.
-- `needs_user`: safe automation reached a login, form, JavaScript flow, preference center, CAPTCHA, or another manual boundary.
+- `needs_user`: automation reached a login, JavaScript flow, preference center, CAPTCHA, or an ambiguous submission. Nothx can submit one same-origin, unambiguous unsubscribe confirmation form; it does not choose preferences or enter credentials.
 - `verified_quiet`: a complete post-grace scan found no later matching delivery.
 - `ineffective`: matching mail arrived after the 48-hour grace period. One fresh-token or alternate-method retry is allowed; another post-grace delivery is blocked.
 - `blocked`: nothx sent no unsubscribe traffic and applied its local spam path. Portable IMAP Junk movement is best effort; provider-side spam training is not guaranteed.
@@ -394,3 +398,28 @@ MIT — see [LICENSE](LICENSE)
 The optional Sonnet choice uses `claude-sonnet-5-5`; the Haiku default is unchanged. Short Sonnet completion paths request
 `between_tools` to preserve the output budget; explicit adaptive reasoning
 remains available. Existing model environment overrides still take precedence.
+
+### Finishing saved unsubscribe decisions
+
+`nothx review` includes failed requests and offers **Resolve unsubscribe in Nothx**.
+The equivalent `nothx resolve ID` refreshes up to 50 stored Inbox sources without
+being limited to the normal 30-day lookback. It checks UIDVALIDITY, UID, Message-ID,
+From and list identity before using a source. If the mailbox changed or the messages
+are gone, run `nothx cleanup` to refresh the full Inbox history.
+
+Use `nothx resolve ID --dry-run` to see usable source UIDs without contacting a sender
+or saving decisions. Mixed From-address groups require a source selection; scripts
+can pass `--source-uid UID --yes`. This source-level choice does not set a blanket
+unsubscribe policy for the sender. Optional `nothx config --footer-scan on` also lets
+resolution inspect at most three bounded, authenticated footer sources for alternatives
+to failed header links. It stays off by default. Full scans spend their 100-message-per-account footer budget
+on the newest eligible message from distinct subscriptions, so a single prolific
+newsletter cannot consume the entire budget.
+
+An explicit `--retry` permits one additional attempt. Accepted requests, ambiguous
+submissions and exhausted retries are not replayed. Ordinary scans preserve these
+boundaries. For a provider requiring login or preference choices, use
+`nothx open-unsubscribe ID`, complete the provider step, then
+`nothx resolve ID --completed` after seeing confirmation. The latter records **your
+reported confirmation**, not independent proof of delivery stopping. Nothx waits
+48 hours and a complete subsequent Inbox scan before reporting verified quietness.

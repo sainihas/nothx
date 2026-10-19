@@ -532,3 +532,24 @@ def test_stored_promotion_conflicts_are_checked_past_first_500(database: Path) -
     item = header(1, sender="shared@example.com", list_id="<different.example>")
     item.account_key = "me@example.com"
     assert ("me@example.com", "shared@example.com") not in _aliases_with_stored_promotions([item])
+
+
+def test_footer_budget_prioritizes_newest_distinct_subscriptions(database: Path) -> None:
+    del database
+    old, middle, newest = header(1), header(2), header(3)
+    other = header(4, list_id="<other.letters.example>")
+    for message in (old, middle, newest, other):
+        message.authentication = AuthenticationEvidence(trusted=True, dmarc=AuthResult.PASS)
+    conn = fake_connection({"INBOX": [old, middle, newest, other]})
+    conn.fetch_footer_candidates.return_value = ()
+    config = Config(
+        scan_junk=False,
+        footer_scan_enabled=True,
+        accounts={"main": AccountConfig("gmail", "me@example.com", "pw")},
+    )
+    with (
+        patch("nothx.scanner.IMAPConnection", return_value=conn),
+        patch("nothx.scanner.MAX_MESSAGES_PER_ACCOUNT", 2),
+    ):
+        scan_inbox(config, full_history=True, persist=False)
+    assert [call.args[0].uid for call in conn.fetch_footer_candidates.call_args_list] == [4, 3]

@@ -95,7 +95,7 @@ def _aliases_with_stored_promotions(
     return result
 
 
-def _footer_eligible(header: EmailHeader) -> bool:
+def _footer_eligible(header: EmailHeader, *, allow_header_method: bool = False) -> bool:
     """Apply the default-off footer scanner's strict local admission policy."""
     authenticated = header.authentication.trusted and (
         header.authentication.dmarc is AuthResult.PASS
@@ -112,7 +112,7 @@ def _footer_eligible(header: EmailHeader) -> bool:
         header.mailbox_role == "inbox"
         and authenticated
         and bulk_or_list
-        and not _has_usable_header_method(header)
+        and (allow_header_method or not _has_usable_header_method(header))
         and not header.server_junk
         and not header.server_phishing
     )
@@ -489,6 +489,7 @@ def scan_inbox(
         account_key = account.email.casefold()
         account_batches: list[_MailboxBatch] = []
         footer_scanned = 0
+        footer_identities: set[str] = set()
         try:
             with IMAPConnection(account) as conn:
                 mailboxes: list[tuple[str, str]] = [("INBOX", "inbox")]
@@ -558,12 +559,21 @@ def scan_inbox(
                         for header in headers:
                             header.account_name = account_name
                             header.account_key = account_key
+                        # Spend the bounded footer budget across distinct lists,
+                        # newest first, rather than on the first 100 old messages.
+                        for header in (
+                            sorted(headers, key=_delivery_time, reverse=True)
+                            if getattr(config, "footer_scan_enabled", False)
+                            else ()
+                        ):
                             if (
                                 getattr(config, "footer_scan_enabled", False)
                                 and footer_scanned < MAX_MESSAGES_PER_ACCOUNT
                                 and _footer_eligible(header)
+                                and header.subscription_identity.key not in footer_identities
                             ):
                                 footer_scanned += 1
+                                footer_identities.add(header.subscription_identity.key)
                                 try:
                                     header.footer_unsubscribe_candidates = (
                                         conn.fetch_footer_candidates(header)
@@ -576,6 +586,7 @@ def scan_inbox(
                                         header.uid,
                                         footer_error,
                                     )
+                        for header in headers:
                             domain_emails[header.domain].append(header)
                             all_headers.append(header)
 

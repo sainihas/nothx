@@ -719,6 +719,59 @@ class IMAPConnection:
                         return raw[start : index + 1]
         return None
 
+    def fetch_header(self, locator: MessageRef) -> EmailHeader | None:
+        """Refresh one stored source without a lookback limit or reading its body."""
+        if not self.conn:
+            raise RuntimeError("Not connected")
+        status, _ = self.conn.select(_imap_mailbox_arg(locator.mailbox), readonly=True)
+        if status not in ("OK", b"OK"):
+            raise ValueError("Stored mailbox could not be selected; run a full scan")
+        if self._selected_uidvalidity(locator.mailbox) != locator.uidvalidity:
+            raise ValueError("Stored mailbox UIDVALIDITY changed; run a full scan")
+        items = [
+            "UID",
+            "INTERNALDATE",
+            "FLAGS",
+            f"BODY.PEEK[HEADER.FIELDS ({' '.join(_FETCH_HEADER_FIELDS)})]",
+        ]
+        if self._has_capability("X-GM-EXT-1"):
+            items.append("X-GM-LABELS")
+        status, parts = self.conn.uid("FETCH", str(locator.uid), f"({' '.join(items)})")
+        if status not in ("OK", b"OK"):
+            raise ValueError("Stored source could not be refreshed; run a full scan")
+        for part in parts or []:
+            if not isinstance(part, tuple) or len(part) < 2:
+                continue
+            if not isinstance(part[0], bytes) or not isinstance(part[1], bytes):
+                continue
+            metadata = part[0].decode("utf-8", errors="replace")
+            match = _UID_RE.search(metadata)
+            if not match or int(match.group(1)) != locator.uid:
+                raise ValueError("Server returned a different source UID")
+            received = self._parse_internaldate(part[0])
+            if received is None:
+                raise ValueError("Stored source has no valid delivery timestamp")
+            flags = tuple(
+                flag.decode("utf-8", errors="replace") for flag in imaplib.ParseFlags(part[0])
+            )
+            header = self._parse_header(
+                email.message_from_bytes(part[1]),
+                any(flag.casefold() == "\\seen" for flag in flags),
+            )
+            if header is None:
+                raise ValueError("Stored source identity could not be parsed")
+            header.account_key = locator.account_key
+            header.mailbox_name = locator.mailbox
+            header.mailbox_role = "inbox"
+            header.uidvalidity = locator.uidvalidity
+            header.uid = locator.uid
+            header.received_at = received
+            header.system_flags = tuple(flag for flag in flags if flag.startswith("\\"))
+            header.keywords = tuple(flag for flag in flags if not flag.startswith("\\"))
+            header.gmail_labels = self._parse_gmail_labels(metadata)
+            return header
+        return None
+
     def fetch_footer_candidates(
         self, header: EmailHeader
     ) -> tuple[FooterUnsubscribeCandidate, ...]:

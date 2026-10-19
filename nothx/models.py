@@ -5,6 +5,8 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.errors import HeaderParseError
+from email.headerregistry import AddressHeader, HeaderRegistry
 from enum import Enum
 
 # RFC 2369: List-Unsubscribe contains one or more angle-bracket-enclosed URIs.
@@ -281,20 +283,26 @@ class EmailHeader:
     def sender_address(self) -> str:
         """Extract the addr-spec from the From header, or '' if invalid."""
         try:
-            raw_sender = self.sender or ""
-            bracket = re.search(r"<([^>]*)>", raw_sender)
-            if bracket and any(char.isspace() for char in bracket.group(1).strip()):
-                return ""
-            sender = re.sub(r"\r?\n[ \t]+", " ", raw_sender)
-            _, addr = email.utils.parseaddr(sender)
-            if not addr:
-                # parseaddr rejects malformed input like '<a@b.com> extra';
-                # retry on just the angle-bracket group so protected-domain
-                # checks still see the real domain.
-                match = re.search(r"<([^>]*)>", sender)
-                if match:
-                    _, addr = email.utils.parseaddr(match.group(1))
-        except (TypeError, AttributeError):
+            sender = self.sender or ""
+            if "\r" in sender or "\n" in sender:
+                if re.search(r"\r(?!\n)|\n(?![ \t])", sender):
+                    return ""
+                unfolded = re.sub(r"\r?\n[ \t]+", " ", sender)
+                parsed = HeaderRegistry()("From", unfolded)
+                if (
+                    not isinstance(parsed, AddressHeader)
+                    or parsed.defects
+                    or len(parsed.addresses) != 1
+                ):
+                    return ""
+                addr = parsed.addresses[0].addr_spec
+            else:
+                _, addr = email.utils.parseaddr(sender)
+                if not addr:
+                    match = re.search(r"<([^>]*)>", sender)
+                    if match:
+                        _, addr = email.utils.parseaddr(match.group(1))
+        except (TypeError, AttributeError, ValueError, HeaderParseError, IndexError):
             return ""
         addr = addr.lower().strip()
         if (

@@ -541,7 +541,7 @@ def scan_inbox(
                         for header in fetched_headers:
                             if not header.sender_address:
                                 skipped_invalid_senders += 1
-                                logger.warning(
+                                logger.debug(
                                     "Leaving message with invalid From unchanged: %s UID %s",
                                     mailbox_name,
                                     header.uid,

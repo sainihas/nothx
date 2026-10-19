@@ -2365,7 +2365,7 @@ def _show_scan_coverage(coverage: list[MailboxCoverage], scan_days: int) -> None
     if not coverage:
         return
     table = Table(title="Scan coverage", show_header=True)
-    for label in ("Account", "Folder", "Scope", "In mailbox", "Selected", "Read"):
+    for label in ("Account", "Folder", "Scope", "In mailbox", "Selected", "Fetched"):
         table.add_column(label)
     for row in coverage:
         scope = f"last {scan_days} days" if row.scope == "lookback" else row.scope

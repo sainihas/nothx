@@ -2,6 +2,7 @@
 
 import fnmatch
 import logging
+from collections.abc import Callable
 
 from ..config import Config
 from ..models import Action, Classification, EmailType, SenderStats
@@ -10,7 +11,6 @@ from .heuristics import (
     OPERATIONAL_SUBJECT_PATTERNS,
     SAFE_SENDER_PATTERNS,
     SAFE_SUBJECT_PATTERNS,
-    SPAM_SUBJECT_CASE_PATTERNS,
     SPAM_SUBJECT_PATTERNS,
     HeuristicScorer,
     has_strong_cold_outreach_evidence,
@@ -256,7 +256,8 @@ class ClassificationEngine:
         return None
 
     def _operational_precheck(self, sender: SenderStats) -> Classification | None:
-        if any(
+        mixed_protected_history = 0 < sender.protected_subject_emails < sender.total_emails
+        if mixed_protected_history or any(
             pattern.search(subject)
             for subject in sender.sample_subjects
             for pattern in OPERATIONAL_SUBJECT_PATTERNS
@@ -265,7 +266,12 @@ class ClassificationEngine:
                 email_type=EmailType.TRANSACTIONAL,
                 action=Action.REVIEW,
                 confidence=0.9,
-                reasoning="Operational notifications require review before suppression",
+                reasoning=(
+                    "Protected notices share this identity with other mail; "
+                    "review the full group before suppression"
+                    if mixed_protected_history
+                    else "Operational notifications require review before suppression"
+                ),
                 source="transactional_policy",
             )
         return None
@@ -277,7 +283,8 @@ class ClassificationEngine:
         transactional subjects to AI. Mixed promotional or outreach evidence
         remains eligible for normal classification; otherwise a matching safe
         sender plus consistently transactional subjects can be kept, and the
-        less-certain cases remain review-only.
+        less-certain cases remain review-only. Full scanner results preserve
+        protected subjects across the complete group before this sample check.
         """
         subjects = [subject for subject in sender.sample_subjects if subject.strip()]
         if not subjects:
@@ -290,7 +297,6 @@ class ClassificationEngine:
             return None
         has_risk_signal = any(
             any(pattern.search(subject) for pattern in SPAM_SUBJECT_PATTERNS)
-            or any(pattern.search(subject) for pattern in SPAM_SUBJECT_CASE_PATTERNS)
             or has_strong_cold_outreach_evidence(subject)
             for subject in subjects
         )
@@ -476,7 +482,12 @@ class ClassificationEngine:
         return classification
 
     def classify_batch(
-        self, senders: list[SenderStats], persist: bool = True, *, allow_ai: bool = False
+        self,
+        senders: list[SenderStats],
+        persist: bool = True,
+        *,
+        allow_ai: bool = False,
+        on_ai_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Classification]:
         """
         Classify a batch of senders efficiently.
@@ -571,7 +582,14 @@ class ClassificationEngine:
 
         # Layer 3: AI batch classification
         if needs_ai and (persist or allow_ai) and self.ai.is_available():
-            ai_results = self.ai.classify_batch(needs_ai, persist=persist, allow_egress=allow_ai)
+            if on_ai_progress is None:
+                ai_results = self.ai.classify_batch(
+                    needs_ai, persist=persist, allow_egress=allow_ai
+                )
+            else:
+                ai_results = self.ai.classify_batch(
+                    needs_ai, persist=persist, allow_egress=allow_ai, on_progress=on_ai_progress
+                )
 
             ai_success_count = 0
             ai_low_confidence_count = 0

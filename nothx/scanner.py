@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 from . import db
 from .authres import has_aligned_dkim_pass
+from .classifier.heuristics import has_protected_subject
 from .config import Config
 from .errors import ErrorCode, IMAPError
 from .footer import MAX_MESSAGES_PER_ACCOUNT
@@ -419,6 +420,7 @@ def _stats_for_emails(
         authentication_unknown_emails=sum(header.authentication_unknown for header in emails),
         provider_bulk_emails=sum(header.provider_bulk for header in emails),
         provider_threat=any(header.provider_threat for header in emails),
+        protected_subject_emails=sum(has_protected_subject(header.subject) for header in emails),
     )
 
 
@@ -539,7 +541,7 @@ def scan_inbox(
                         for header in fetched_headers:
                             if not header.sender_address:
                                 skipped_invalid_senders += 1
-                                logger.warning(
+                                logger.debug(
                                     "Leaving message with invalid From unchanged: %s UID %s",
                                     mailbox_name,
                                     header.uid,

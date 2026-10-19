@@ -20,7 +20,14 @@ from questionary import Style as QStyle
 from rich.columns import Columns
 from rich.markup import escape
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.rule import Rule
 from rich.table import Table
 from rich.tree import Tree
@@ -2358,7 +2365,7 @@ def _show_scan_coverage(coverage: list[MailboxCoverage], scan_days: int) -> None
     if not coverage:
         return
     table = Table(title="Scan coverage", show_header=True)
-    for label in ("Account", "Folder", "Scope", "In mailbox", "Selected", "Read"):
+    for label in ("Account", "Folder", "Scope", "In mailbox", "Selected", "Fetched"):
         table.add_column(label)
     for row in coverage:
         scope = f"last {scan_days} days" if row.scope == "lookback" else row.scope
@@ -2541,17 +2548,36 @@ def _run_scan(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(complete_style="orange1", finished_style="orange1", pulse_style="orange1"),
         TaskProgressColumn(),
+        TimeElapsedColumn(),
         console=console,
         transient=True,
     ) as progress:
         task = progress.add_task("Analyzing senders...", total=len(sender_stats))
-        classification_options = {"persist": not dry_run}
+
+        def on_ai_progress(completed: int, total: int) -> None:
+            progress.update(
+                task,
+                description=f"AI processing: {completed:,}/{total:,} eligible groups",
+                total=total,
+                completed=completed,
+                refresh=True,
+            )
+
+        classification_options: dict[str, Any] = {
+            "persist": not dry_run,
+            "on_ai_progress": on_ai_progress,
+        }
         if ai_preview:
             classification_options["allow_ai"] = True
         classifications = engine.classify_batch(
             list(sender_stats.values()), **classification_options
         )
-        progress.update(task, completed=len(sender_stats))
+        progress.update(
+            task,
+            total=len(sender_stats),
+            completed=len(sender_stats),
+            description="Classification complete",
+        )
 
     # Persist AI's content type and its recommended action as separate facts,
     # even when authentication/safety policy transformed the executable action

@@ -168,3 +168,48 @@ def test_raw_folded_display_name_does_not_hide_a_valid_sender():
     header = make_connection()._parse_header(message, is_seen=False)
     assert header is not None
     assert header.sender_address == "bulletin@example.com"
+
+
+def test_refresh_header_checks_uidvalidity_and_only_peeks_headers():
+    import pytest
+
+    connection = make_connection()
+    locator = MessageRef("me@example.com", "INBOX", 44, 9)
+    connection.conn.select.return_value = ("OK", [b"10"])
+    connection.conn.uid.return_value = (
+        "OK",
+        [
+            (
+                b'1 (UID 9 FLAGS (\\Seen) INTERNALDATE "01-Jul-2026 10:00:00 +0000")',
+                b"From: news@example.com\r\nMessage-ID: <old@example.com>\r\nSubject: Offers\r\n\r\n",
+            )
+        ],
+    )
+    with patch.object(connection, "_selected_uidvalidity", return_value=44):
+        header = connection.fetch_header(locator)
+    assert header is not None
+    assert header.uid == 9 and header.uidvalidity == 44
+    assert header.is_seen
+    command = connection.conn.uid.call_args.args
+    assert command[0:2] == ("FETCH", "9")
+    assert "BODY.PEEK[HEADER.FIELDS" in command[2]
+    assert "BODY[]" not in command[2]
+    connection.conn.uid.reset_mock()
+    with patch.object(connection, "_selected_uidvalidity", return_value=45):
+        with pytest.raises(ValueError, match="UIDVALIDITY"):
+            connection.fetch_header(locator)
+    connection.conn.uid.assert_not_called()
+
+
+def test_refresh_header_rejects_other_uid():
+    import pytest
+
+    connection = make_connection()
+    connection.conn.select.return_value = ("OK", [b"10"])
+    connection.conn.uid.return_value = (
+        "OK",
+        [(b"1 (UID 10 FLAGS ())", b"From: news@example.com\r\n")],
+    )
+    with patch.object(connection, "_selected_uidvalidity", return_value=44):
+        with pytest.raises(ValueError, match="different source UID"):
+            connection.fetch_header(MessageRef("me@example.com", "INBOX", 44, 9))

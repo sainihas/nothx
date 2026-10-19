@@ -131,13 +131,13 @@ class TestAutomaticGates:
     @pytest.mark.parametrize(
         ("changes", "expected_method"),
         [
-            ({"list_unsubscribe_count": 2}, "GET"),
-            ({"list_unsubscribe_post_count": 2}, "GET"),
+            ({"list_unsubscribe_count": 2}, None),
+            ({"list_unsubscribe_post_count": 2}, None),
             ({"list_unsubscribe_post": "List-Unsubscribe=No"}, "GET"),
             ({"list_unsubscribe": "<http://mailer.example/unsubscribe/token>"}, None),
             (
                 {"list_unsubscribe": ("<https://mailer.example/a>, <https://mailer.example/b>")},
-                "GET",
+                None,
             ),
         ],
     )

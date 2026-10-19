@@ -132,6 +132,29 @@ class TestBodyStructureSelection:
 
 
 class TestCandidateExtraction:
+    def test_neighboring_links_do_not_exhaust_candidate_budget(self) -> None:
+        html = "".join(f'<a href="https://example.com/photo/{i}">Photo {i}</a>' for i in range(8))
+        html += '<a href="https://example.com/u">Unsubscribe</a>'
+        html += '<a href="mailto:reader@example.com">reader@example.com</a>'
+        result = extract_footer_candidates([InlineTextPart("1", "text/html", html)])
+        assert [item.uri for item in result.candidates] == ["https://example.com/u"]
+
+    def test_plain_evidence_does_not_leak_to_previous_or_next_link(self) -> None:
+        text = (
+            "Photos https://example.com/photo\n"
+            "Unsubscribe: https://example.com/u\n"
+            "Contact mailto:reader@example.com"
+        )
+        result = extract_footer_candidates([InlineTextPart("1", "text/plain", text)])
+        assert [item.uri for item in result.candidates] == ["https://example.com/u"]
+
+    def test_generic_anchor_does_not_borrow_evidence_from_another_block(self) -> None:
+        html = (
+            '<p>Unsubscribe below</p><p>Read the story <a href="https://example.com/a">here</a></p>'
+        )
+        result = extract_footer_candidates([InlineTextPart("1", "text/html", html)])
+        assert result.candidates == ()
+
     def test_plain_https_and_mailto_with_evidence_are_returned_in_order(self) -> None:
         text = (
             "To unsubscribe visit https://letters.example/unsub?opaque=secret. "

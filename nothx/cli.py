@@ -4087,6 +4087,7 @@ def resolve_subscription(
     This records a request, not proof that future deliveries have stopped.
     """
     from .resolution import refresh_sources
+    from .unsubscriber import _endpoint_fingerprint, _safe_legacy_method
 
     if completed and (retry or dry_run or source_uid is not None):
         raise click.UsageError(
@@ -4176,20 +4177,40 @@ def resolve_subscription(
         ) from None
     if any(not is_contact_permitted(header, config) for header in headers):
         raise click.ClickException("Fresh source evidence does not permit contacting this sender")
+    # Only interactive GETs are safe to revisit after an explicit retry. Failed
+    # SMTP/POSTs and every accepted endpoint remain excluded.
+    exclusions = {
+        attempt["endpoint_fingerprint"]
+        for attempt in attempts
+        if not (
+            attempt["method"] == "get"
+            and attempt["outcome"] == "needs_user"
+            and attempt.get("error_code") == "interactive_response"
+        )
+    }
     sources = [
         header
         for header in headers
-        if header.list_unsubscribe_targets or header.footer_unsubscribe_candidates
+        if any(
+            _safe_legacy_method(target) is not None
+            and _endpoint_fingerprint(target).hex() not in exclusions
+            for target in (
+                *header.list_unsubscribe_targets,
+                *(candidate.uri for candidate in header.footer_unsubscribe_candidates),
+            )
+        )
     ]
     for header in sources[:12]:
         console.print(f"  UID {header.uid} · {escape(header.subject)}")
     if not sources:
         console.print(
-            "No usable method found in 50 saved sources. Enable bounded footer scanning with `nothx config --footer-scan on`, or run `nothx cleanup` to refresh history."
+            "No eligible untried method found in the refreshed sources. Enable bounded footer scanning with `nothx config --footer-scan on`, or run `nothx cleanup` to refresh history."
         )
         return
     if dry_run:
-        console.print(f"{len(sources)} usable source(s); no request sent and no decisions changed.")
+        console.print(
+            f"{len(sources)} candidate source(s); no request sent and no decisions changed."
+        )
         return
     if source_uid is not None:
         sources = [header for header in sources if header.uid == source_uid]
@@ -4237,17 +4258,6 @@ def resolve_subscription(
     if not acquired:
         console.print("Another process already claimed or completed this request; nothing sent.")
         return
-    # Only interactive GETs are safe to revisit after an explicit retry. Failed
-    # SMTP/POSTs and every accepted endpoint remain excluded.
-    exclusions = {
-        attempt["endpoint_fingerprint"]
-        for attempt in attempts
-        if not (
-            attempt["method"] == "get"
-            and attempt["outcome"] == "needs_user"
-            and attempt.get("error_code") == "interactive_response"
-        )
-    }
     result = unsubscribe_subscription(
         sources,
         config,

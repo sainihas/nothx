@@ -2933,3 +2933,34 @@ def test_browser_never_downgrades_one_click_post_to_get(configured_cli):
     assert result.exit_code == 0, result.output
     browser.assert_not_called()
     assert scan_call.call_args.kwargs["full_history"]
+
+
+@pytest.mark.parametrize("already_attempted", [False, True])
+def test_resolve_no_eligible_method_does_not_consume_retry(configured_cli, already_attempted):
+    from nothx.cli import resolve_subscription
+
+    runner, config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    operation = db.get_or_create_unsubscribe_operation(
+        subscription["id"], "old-failure", outcome="failed"
+    )
+    if already_attempted:
+        target = headers[0].list_unsubscribe_targets[0]
+        db.record_unsubscribe_attempt(
+            operation["id"],
+            "old-target",
+            method="get",
+            outcome="permanent_failure",
+            endpoint_fingerprint=hashlib.sha256(target.encode()).hexdigest(),
+        )
+    else:
+        headers[0].list_unsubscribe = "<http://shop.example/insecure>"
+    with (
+        patch("nothx.resolution.refresh_sources", return_value=(stats, headers)),
+        patch("nothx.cli.unsubscribe_subscription") as send,
+    ):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--retry", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "No eligible untried method" in result.output
+    send.assert_not_called()
+    assert len(db.list_unsubscribe_operations(subscription_id=subscription["id"])) == 1
+    assert db.get_subscription(subscription["id"])["retry_count"] == 0

@@ -2466,3 +2466,37 @@ def test_personal_uncertain_mail_is_outside_cleanup_review(configured_cli):
     block.assert_not_called()
     assert "0 marketing/spam groups need review" in result.output
     assert "outside cleanup review" in result.output
+
+
+@pytest.mark.parametrize("initial_action", [Action.KEEP, Action.REVIEW, Action.UNSUB])
+def test_post_review_rechecks_incomplete_account_even_after_manual_override(
+    configured_cli, initial_action
+):
+    from nothx.scanner import MailboxCoverage
+
+    runner, _ = configured_cli
+    scan, classes = _subscription_scan(initial_action)
+    scan.coverage = [MailboxCoverage("default", "INBOX", "inbox", "full history", 20, 20, 1, False)]
+
+    def bypass(unsub, keep, review, block, **kwargs):
+        assert kwargs["incomplete_accounts"] == frozenset({"user@example.com"})
+        row = next(item for group in (unsub, keep, review, block) for item in group)
+        for group in (unsub, keep, review, block):
+            group.clear()
+        key, sender, classification = row
+        from nothx.cli import _manual_classification
+
+        block.append((key, sender, _manual_classification(classification, Action.BLOCK)))
+
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._styled_confirm", return_value=True),
+        patch("nothx.cli._review_scan_decisions", side_effect=bypass),
+        patch("nothx.cli._block_subscription") as block,
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+    ):
+        result = runner.invoke(cleanup, [])
+    assert result.exit_code == 0, result.output
+    block.assert_not_called()
+    unsub.assert_not_called()

@@ -2937,13 +2937,35 @@ def _run_scan(
         )
     ):
         if _styled_confirm("Review or change sender decisions?", default=False):
-            _review_scan_decisions(to_unsub, to_keep, to_review, to_block)
+            _review_scan_decisions(
+                to_unsub,
+                to_keep,
+                to_review,
+                to_block,
+                incomplete_accounts=frozenset(incomplete_accounts),
+            )
             updated_tree = Tree("[header]Updated decisions[/header]")
             updated_tree.add(f"[unsubscribe]{len(to_unsub)} unsubscribe candidates[/unsubscribe]")
             updated_tree.add(f"[block]{len(to_block)} to block[/block]")
             updated_tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
             updated_tree.add(f"[review]{len(to_review)} need review[/review]")
             console.print(updated_tree)
+
+    for pending in (to_unsub, to_block):
+        for row in pending[:]:
+            key, sender, classification = row
+            if sender.account_key in incomplete_accounts:
+                pending.remove(row)
+                deferred = replace(
+                    classification,
+                    action=Action.REVIEW,
+                    source="scan_policy",
+                    reasoning="Incomplete mailbox scan; no destructive actions are permitted",
+                )
+                if _is_marketing_candidate(sender, deferred):
+                    to_review.append((key, sender, deferred))
+                else:
+                    outside_cleanup_review.append((key, sender, deferred))
 
     new_requests = sum(_unsubscribe_execution_state(sender) == "ready" for _, sender, _ in to_unsub)
 
@@ -3317,6 +3339,8 @@ def _review_scan_decisions(
     to_keep: list[_DecisionRow],
     to_review: list[_DecisionRow],
     to_block: list[_DecisionRow],
+    *,
+    incomplete_accounts: frozenset[str] = frozenset(),
 ) -> None:
     groups = {
         "review": ("Needs review", to_review),
@@ -3429,8 +3453,10 @@ def _review_scan_decisions(
             )
             allowed = {"keep", "skip", "unchanged"}
             action_choices = [questionary.Choice("Keep future mail", value="keep")]
-            if classification.source != "scan_policy" and (
-                not sender.protected_subject_emails or _confirmed_provider_threat(sender)
+            if (
+                sender.account_key not in incomplete_accounts
+                and classification.source != "scan_policy"
+                and (not sender.protected_subject_emails or _confirmed_provider_threat(sender))
             ):
                 allowed.add("block")
                 action_choices.append(

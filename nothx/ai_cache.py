@@ -38,12 +38,21 @@ def load(fingerprints: list[str]) -> dict[str, Classification]:
                         confidence = float(confidence)
                         if not 0 <= confidence <= 1:
                             continue
+                        parsed_type = EmailType(email_type)
+                        parsed_action = Action(action)
+                        safe_action = (
+                            Action.REVIEW
+                            if parsed_type is EmailType.UNKNOWN
+                            and parsed_action in {Action.UNSUB, Action.BLOCK}
+                            else parsed_action
+                        )
                         results[key] = Classification(
-                            EmailType(email_type),
-                            Action(action),
+                            parsed_type,
+                            safe_action,
                             confidence,
                             "Reused unchanged AI classification; local policy rechecked",
                             "ai",
+                            recommended_action=parsed_action,
                         )
                     except (TypeError, ValueError):
                         continue

@@ -597,11 +597,7 @@ class AIClassifier:
                 except ValueError:
                     errors.append(f"Item {idx} ({domain}): invalid action '{action_str}'")
                     action = Action.REVIEW
-                if (
-                    email_type is EmailType.UNKNOWN
-                    and type_str != "unknown"
-                    and action in {Action.UNSUB, Action.BLOCK}
-                ):
+                if email_type is EmailType.UNKNOWN and action in {Action.UNSUB, Action.BLOCK}:
                     action = Action.REVIEW
 
                 # Parse and validate confidence

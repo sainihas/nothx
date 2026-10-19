@@ -35,7 +35,7 @@ def row(
     )
 
 
-def run_picker(groups, answers, searches=()):
+def run_picker(groups, answers, searches=(), **kwargs):
     prompts = []
     values = iter(answers)
 
@@ -48,7 +48,7 @@ def run_picker(groups, answers, searches=()):
         patch("nothx.cli.questionary.text") as text,
     ):
         text.return_value.ask.side_effect = list(searches)
-        _review_scan_decisions(*groups)
+        _review_scan_decisions(*groups, **kwargs)
     return prompts
 
 
@@ -143,3 +143,29 @@ def test_details_do_not_show_personal_kept_sender(capsys):
     kept[1].sample_subjects = ["Dinner tomorrow"]
     _show_details([], [kept], [], [])
     assert "person-0@" not in capsys.readouterr().out
+
+
+def test_incomplete_scan_stays_immutable_after_keep_and_reopen():
+    item = row(source="scan_policy")
+    review = [item]
+    kept = []
+    prompts = run_picker(
+        ([], kept, review, []),
+        [
+            "review",
+            f"sender:{item[0]}",
+            "keep",
+            "back",
+            "keep",
+            f"sender:{item[0]}",
+            "unchanged",
+            "finish",
+        ],
+        incomplete_accounts=frozenset({"owner@example.com"}),
+    )
+    action_prompts = [opts for message, opts in prompts if message.startswith("Action for")]
+    assert len(action_prompts) == 2
+    assert all(
+        not {c.value for c in opts["choices"]} & {"block", "unsub"} for opts in action_prompts
+    )
+    assert kept[0][2].source == "user_rule"

@@ -12,11 +12,7 @@ from .scanner import _footer_eligible, _stats_for_emails
 def refresh_sources(
     config: Config, subscription: dict[str, Any], *, source_uid: int | None = None
 ) -> tuple[SenderStats, list[EmailHeader]]:
-    """Revalidate up to 50 stored Inbox refs; inspect at most three footer tails.
-
-    Stored history is a locator index, never authority to contact an endpoint.
-    UIDVALIDITY, UID, Message-ID, From and list identity must still match.
-    """
+    """Revalidate up to 50 stored Inbox refs; inspect at most three footer tails."""
     entry = next(
         (
             (name, account)
@@ -36,8 +32,7 @@ def refresh_sources(
         source_uid=source_uid,
     )
     if source_uid is None:
-        # Reserve space for fresh tokens even when many old promotional refs
-        # rank ahead of recent service-like subjects in the discovery shortlist.
+        # Keep fresh tokens in the shortlist even when older promotions rank higher.
         newest = db.list_message_refs(
             subscription_id=subscription["id"], mailbox_role="inbox", limit=3
         )
@@ -77,13 +72,10 @@ def refresh_sources(
             header.account_name = name
             headers.append(header)
         headers.sort(key=lambda h: h.received_at or h.date, reverse=True)
-        # A targeted resolution can recover footer alternatives even when an
-        # unusable header method was present. Consent and admission still apply.
         if config.footer_scan_enabled:
             eligible = [
                 header for header in headers if _footer_eligible(header, allow_header_method=True)
             ]
-            # Prefer sources already carrying a method, then newest sources.
             eligible.sort(key=lambda h: bool(h.list_unsubscribe_targets), reverse=True)
             for header in eligible[:3]:
                 header.footer_unsubscribe_candidates = connection.fetch_footer_candidates(header)

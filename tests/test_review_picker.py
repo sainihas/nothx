@@ -148,18 +148,18 @@ def test_search_finds_older_promotional_example_and_keeps_mixed_mail_protected(c
     item[1].sample_subjects = ["Your order confirmation"]
     item[1].protected_subject_emails = 4
     item[1].promotional_subject_emails = 1
-    item[1].promotional_sample_subjects = ["Use promo code AUTUMN"]
+    item[1].promotional_sample_subjects = ["Use promo code Q7M4"]
     with patch("nothx.cli._confirmed_provider_threat", return_value=False):
         prompts = run_picker(
             ([], [], [item], []),
             ["review", "search", f"sender:{item[0]}", "unchanged", "finish"],
-            ["autumn"],
+            ["q7m4"],
         )
     matches = [c for c in prompts[2][1]["choices"] if str(c.value).startswith("sender:")]
     assert len(matches) == 1
     actions = {c.value for c in prompts[3][1]["choices"]}
     assert not actions & {"block", "unsub"}
-    assert "Use promo code AUTUMN" in capsys.readouterr().out
+    assert "Use promo code Q7M4" in capsys.readouterr().out
 
 
 def test_details_do_not_show_personal_kept_sender(capsys):

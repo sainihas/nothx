@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 
 @dataclass
@@ -40,8 +40,7 @@ class ConfirmationPage(HTMLParser):
             )
         )
         if self.hidden_elements or invisible:
-            # Hidden controls still affect browser form submission. Do not
-            # silently drop them and send a different preference payload.
+            # Browsers submit hidden controls; dropping them changes the payload.
             if self.current and tag in {"input", "button", "select", "textarea", "form"}:
                 self.current.unsafe = True
             if tag not in {
@@ -127,7 +126,6 @@ def confirmation_request(body: str, page_url: str) -> tuple[str, str, bytes | No
     """Return one same-origin opt-out request, or leave interactive pages alone."""
     page = ConfirmationPage()
     page.feed(body)
-    # Relative form actions under a document base need browser semantics.
     if re.search(r"<base\b", body, re.I):
         return None
     visible = " ".join(page.text).casefold()
@@ -136,14 +134,7 @@ def confirmation_request(body: str, page_url: str) -> tuple[str, str, bytes | No
     ):
         return None
     source = urlsplit(page_url)
-    query = dict(parse_qsl(source.query.replace(";", "&")))
-    flightaware_newsletter = (
-        source.hostname == "www.flightaware.com"
-        and source.path == "/account/change_setting.rvt"
-        and query.get("target") == "newsletter"
-        and query.get("action") == "never"
-    )
-    if not flightaware_newsletter and not re.search(r"unsubscribe|opt out of this email", visible):
+    if not re.search(r"unsubscribe|opt out of this email", visible):
         return None
     candidates: list[tuple[str, str, bytes | None]] = []
     for form in page.forms:
@@ -158,10 +149,9 @@ def confirmation_request(body: str, page_url: str) -> tuple[str, str, bytes | No
         ]
         if len(affirmative) != 1:
             continue
-        # A generic Confirm elsewhere on the page is not an unsubscribe.
         labels = " ".join(label for label, _, _ in form.buttons).casefold()
         form_text = " ".join(form.text).casefold()
-        if not flightaware_newsletter and "unsubscribe" not in labels:
+        if "unsubscribe" not in labels:
             if not re.search(r"confirm (?:your )?unsubscribe|unsubscribe from", form_text):
                 continue
         if re.search(r"delete (?:your )?account|close (?:your )?account|resubscribe", form_text):

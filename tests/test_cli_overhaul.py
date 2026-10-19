@@ -2666,7 +2666,7 @@ def test_mixed_service_promotions_reach_cleanup_review_without_actions(configure
     sender.sample_subjects = ["Your order confirmation"] * 5
     sender.protected_subject_emails = 5
     sender.promotional_subject_emails = 1
-    sender.promotional_sample_subjects = ["Use promo code AUTUMN"]
+    sender.promotional_sample_subjects = ["Use promo code Q7M4"]
     classes[key] = Classification(
         EmailType.TRANSACTIONAL, Action.REVIEW, 0.9, "Mixed service mail", "transactional_policy"
     )

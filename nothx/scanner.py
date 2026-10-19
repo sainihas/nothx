@@ -560,8 +560,6 @@ def scan_inbox(
                         for header in headers:
                             header.account_name = account_name
                             header.account_key = account_key
-                        # Spend the bounded footer budget across distinct lists,
-                        # newest first, rather than on the first 100 old messages.
                         for header in (
                             sorted(headers, key=_delivery_time, reverse=True)
                             if getattr(config, "footer_scan_enabled", False)

@@ -574,9 +574,7 @@ def _html_targets(text: str) -> tuple[list[tuple[str, str]], bool]:
     previous_end = 0
     for anchor in parser.anchors:
         context = parser.text[anchor.start : anchor.end]
-        # Only generic call-to-action anchors borrow preceding text, within
-        # their block and after the previous link. Neighboring article titles,
-        # social links and recipient addresses must not inherit opt-out text.
+        # Limit borrowed context so neighboring links cannot inherit opt-out evidence.
         if re.fullmatch(r"\s*(?:(?:click|tap)\s+)?here[.!]?\s*", context, re.IGNORECASE):
             start = max(
                 previous_end,

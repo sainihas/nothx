@@ -80,9 +80,7 @@ OPERATIONAL_SUBJECT_PATTERNS = [
 ]
 COLD_OUTREACH_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _COLD_OUTREACH_PATTERNS_RAW]
 
-# Strong content evidence for review discovery, independent of engagement.
-# Broad scoring words such as "free", "urgent", or "off" also occur in
-# service notices and are deliberately excluded from this predicate.
+# Exclude broad terms such as "free" or "urgent" that also occur in service notices.
 PROMOTIONAL_SUBJECT_PATTERN = re.compile(
     r"\b(?:discount|clearance (?:sale|event)|promotions?|new arrivals"
     r"|black friday|cyber monday|shop now|weekly (?:digest|roundup))\b"

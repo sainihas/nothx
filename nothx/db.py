@@ -2129,8 +2129,7 @@ def acknowledge_browser_confirmation(subscription_id: int) -> dict[str, Any]:
         if operation and operation["outcome"] not in {"failed", "needs_user", "ineffective"}:
             raise ValueError("There is no manual request to acknowledge")
         if operation is None:
-            # Opening a browser first is a valid app workflow. Without a
-            # selected source, do not infer a whole-list verification scope.
+            # Without a selected source, the report cannot establish whole-list scope.
             cursor = conn.execute(
                 "INSERT INTO unsubscribe_operations "
                 "(subscription_id, operation_key, kind, started_at, created_at, updated_at, "

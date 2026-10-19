@@ -851,8 +851,6 @@ def _execute_get(url: str) -> UnsubResult:
             follow_redirects=True,
             max_body=GET_RESPONSE_MAX_BODY,
         )
-        # A single, unambiguous opt-out confirmation can be completed by the
-        # app. No preference choices, credentials, scripts or cross-site forms.
         initial_success = response.status == 204 or (
             200 <= response.status < 300
             and _check_success_indicators(response.body)
@@ -871,8 +869,7 @@ def _execute_get(url: str) -> UnsubResult:
                 return limited
             submitted = True
             try:
-                # Never retry a form submission: acceptance may precede a
-                # transport failure. Keep that ambiguity at the manual boundary.
+                # A transport failure can follow acceptance; never retry submission.
                 response = safe_fetch(
                     target,
                     method=method,
@@ -896,12 +893,6 @@ def _execute_get(url: str) -> UnsubResult:
                 return _mark_attempt(
                     result, "needs_user", "ambiguous_confirmation", ambiguous_send=True
                 )
-        # A 200 alone proves nothing: many unsubscribe pages require another
-        # click. Success needs a positive phrase and no interaction gate.
-        # Structural markers like <script> or a footer <form> are normal on a
-        # page that already confirmed the unsubscribe, so they only demand
-        # user action when no success phrase is present. A 204 No Content is
-        # unconditional success by definition (there is no body to check).
         gated = _check_interaction_gate_indicators(response.body)
         confirmed = (
             _check_success_indicators(response.body)
@@ -1293,7 +1284,6 @@ def _check_success_indicators(body: str) -> bool:
     ]
     if re.fullmatch(r"already unsubscribed[.!]?", body_lower.strip()):
         return True
-    # A conditional instruction is not a report of a completed request.
     assertions = re.sub(r"\bif\b[^.!?]*(?:[.!?]|$)", "", body_lower)
     return any(phrase in assertions for phrase in success_phrases)
 
@@ -1334,8 +1324,6 @@ def _check_interaction_gate_indicators(body: str) -> bool:
         "cookies required",
         "enable cookies",
     )
-    # A navigation Log In link does not invalidate an explicit success page.
-    # A credential form or an explicit login instruction still does.
     credential_form = bool(re.search(r"type\s*=\s*['\"]?password", body_lower))
     bare_login_wall = not _check_success_indicators(body) and any(
         text in visible_text(body).casefold() for text in ("sign in", "log in")

@@ -43,19 +43,10 @@ def test_generic_confirmation_requires_local_unsubscribe_context():
     )
 
 
-def test_flightaware_newsletter_confirm_scope():
-    form = '<form method="post"><input type="hidden" name="target" value="newsletter"><button>Confirm</button></form>'
-    assert confirmation_request(
-        form,
-        "https://www.flightaware.com/account/change_setting.rvt?target=newsletter;action=never",
-    )
-    assert (
-        confirmation_request(
-            form,
-            "https://www.flightaware.com/account/change_setting.rvt?target=account;action=delete",
-        )
-        is None
-    )
+@pytest.mark.parametrize("query", ["target=bulletin&action=disable", "target=profile&action=erase"])
+def test_query_parameters_do_not_authorize_generic_confirmation(query):
+    form = '<form method="post"><input type="hidden" name="record" value="K8R3"><button>Confirm</button></form>'
+    assert confirmation_request(form, f"https://mailer-q7m4.example/settings?{query}") is None
 
 
 def test_executor_finishes_form_and_navigation_login_does_not_override_success(monkeypatch):

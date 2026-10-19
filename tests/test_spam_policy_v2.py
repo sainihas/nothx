@@ -488,12 +488,12 @@ def test_policy_transformation_preserves_original_ai_recommendation(policy_engin
         ["[Action Required] Renew test API credentials"],
         ["Re: [example/project] Routine update (PR #123)", "[example/project] PR run failed: CI"],
         ["Re: [example/project] Quick question (PR #123)"],
-        ["The Developer Agreement has been updated"],
-        ["Notice of Class Action Settlement"],
-        ["Insta Alert Price revision"],
-        ["Updates to Example's Terms"],
-        ["Upcoming changes to Example's Pricing"],
-        ["Journey Cancellation"],
+        ["Service K7P4 developer agreement updated"],
+        ["Case R8M2: notice of class action settlement"],
+        ["Service Z9N3 pricing update"],
+        ["Updates to Service P4Q8 terms"],
+        ["Upcoming changes to Service V6R2 pricing"],
+        ["Booking C8N4 journey cancellation notice"],
     ],
 )
 def test_operational_notifications_are_never_automatically_suppressed(
@@ -877,7 +877,7 @@ def test_uppercase_protected_notices_stay_local_even_when_every_subject_is_prote
         "New arrivals for autumn",
         "Black Friday starts now",
         "Save up to 30% this weekend",
-        "Use promo code AUTUMN",
+        "Use promo code Q7M4",
         "Weekly roundup: design stories",
     ],
 )

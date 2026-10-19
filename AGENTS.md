@@ -18,7 +18,7 @@ gh pr create --draft --title "…" --body "…"
 Draft is the resting state. A PR stays in draft for as long as it takes and through as
 many pushes as it takes — finishing the work is not what takes it out of draft.
 
-Only when Sai asks for it to be merged, and in this order:
+Only when the maintainer asks for it to be merged, and in this order:
 
 1. `gh pr ready <n>` — take it out of draft.
 2. `gh pr checks <n> --watch` — wait for the run to finish. Don't skip this: step 1 is
@@ -37,12 +37,15 @@ and `mypy nothx` locally instead; that is the same ground CI covers.
 
 <!-- commit-attribution-policy -->
 
-- All commits in this repo are owned solely by `sainihas <gsainihas@gmail.com>`. Never
-  commit under any other identity.
+- Attribute commits to the maintainer's GitHub identity using its GitHub-provided
+  `noreply` email address. Do not include personal email addresses.
 - Never add a `Co-Authored-By:` trailer naming Claude, Anthropic, or any other AI tool.
 - Never add the `🤖 Generated with [Claude Code]` footer to a commit message or PR body.
 
-This applies to every agent and every environment — Claude Code, Codex, Cursor, cloud and
-scheduled sessions, and edits made through the GitHub web UI. Local git hooks in
-`~/.config/git/hooks/` enforce it on Sai's machine, but they do **not** run in cloud
-sessions or web edits, so follow the rule directly rather than relying on them.
+This applies to every agent and environment, including cloud and web edits.
+
+## Public content
+
+- Keep comments only when they explain a non-obvious constraint or decision.
+- Use deterministic synthetic examples and reserved example domains. Never copy
+  real mailbox content, personal identifiers, credentials, or local account details.

@@ -71,6 +71,11 @@ OPERATIONAL_SUBJECT_PATTERNS = [
         r"\b(?:pull request|PR|issue)\s*#\s*\d+\b",
         r"\b(?:CI|workflow|build|PR)\s+run\s+(?:failed|succeeded|cancelled)\b",
         r"\[action required\].*\b(?:OAuth|API|access|certificate|quota)\b",
+        r"\b(?:developer|merchant|license|licence|subscription)\s+agreement\b",
+        r"\bnotice\s+of\s+(?:a\s+)?class[ -]action\s+settlement\b",
+        r"\b(?:price|pricing)\s+(?:revision|changes?|updates?)\b",
+        r"\b(?:updates?|changes?)\s+to\s+[^\r\n]{0,60}\b(?:terms|pricing)\b",
+        r"\b(?:reservation|appointment|booking|journey)\s+(?:cancellation|cancelled|canceled)\b",
     )
 ]
 COLD_OUTREACH_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _COLD_OUTREACH_PATTERNS_RAW]
@@ -79,8 +84,11 @@ COLD_OUTREACH_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _COLD_OUTREACH_P
 # Broad scoring words such as "free", "urgent", or "off" also occur in
 # service notices and are deliberately excluded from this predicate.
 PROMOTIONAL_SUBJECT_PATTERN = re.compile(
-    r"\b(?:sale|discount|coupon|clearance|newsletter|promotions?|new arrivals"
+    r"\b(?:discount|clearance (?:sale|event)|promotions?|new arrivals"
     r"|black friday|cyber monday|shop now|weekly (?:digest|roundup))\b"
+    r"|(?<![\w-])sale(?![\w-])"
+    r"|\b(?:your|special|exclusive)\s+coupon\b|\bcoupon\s+(?:code|inside|expires?)\b"
+    r"|\b(?:weekly|monthly|daily)\s+newsletter\b|\bnewsletter:"
     r"|\b(?:exclusive|special|limited[ -]time)\s+offers?\b"
     r"|\bpromo(?:tional)?\s+code\b|\d+%\s*off\b"
     r"|\bsave\s+(?:up to\s+)?(?:\d+%|[$£€]\s*\d+)",

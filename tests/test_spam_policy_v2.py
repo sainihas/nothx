@@ -488,6 +488,12 @@ def test_policy_transformation_preserves_original_ai_recommendation(policy_engin
         ["[Action Required] Renew test API credentials"],
         ["Re: [example/project] Routine update (PR #123)", "[example/project] PR run failed: CI"],
         ["Re: [example/project] Quick question (PR #123)"],
+        ["The Developer Agreement has been updated"],
+        ["Notice of Class Action Settlement"],
+        ["Insta Alert Price revision"],
+        ["Updates to Example's Terms"],
+        ["Upcoming changes to Example's Pricing"],
+        ["Journey Cancellation"],
     ],
 )
 def test_operational_notifications_are_never_automatically_suppressed(
@@ -914,6 +920,10 @@ def test_full_history_promotions_remain_discoverable_without_suppressing_service
         "Your payment went through",
         "Out of office",
         "Revised terms and conditions of sale",
+        "Your parcel needs customs clearance",
+        'Someone shared "40-SALE-Design.zip" with you',
+        "Coupon Design",
+        "Newsletter names",
         "Your package is out for delivery",
         "Dinner tomorrow?",
     ],

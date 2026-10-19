@@ -460,6 +460,8 @@ class SenderStats:
     provider_bulk_emails: int = 0
     provider_threat: bool = False
     protected_subject_emails: int = 0
+    promotional_subject_emails: int = 0
+    promotional_sample_subjects: list[str] = field(default_factory=list)
 
     @property
     def has_threat_conflict(self) -> bool:

@@ -488,6 +488,12 @@ def test_policy_transformation_preserves_original_ai_recommendation(policy_engin
         ["[Action Required] Renew test API credentials"],
         ["Re: [example/project] Routine update (PR #123)", "[example/project] PR run failed: CI"],
         ["Re: [example/project] Quick question (PR #123)"],
+        ["Service K7P4 developer agreement updated"],
+        ["Case R8M2: notice of class action settlement"],
+        ["Service Z9N3 pricing update"],
+        ["Updates to Service P4Q8 terms"],
+        ["Upcoming changes to Service V6R2 pricing"],
+        ["Booking C8N4 journey cancellation notice"],
     ],
 )
 def test_operational_notifications_are_never_automatically_suppressed(
@@ -862,3 +868,79 @@ def test_uppercase_protected_notices_stay_local_even_when_every_subject_is_prote
     assert result.action is (Action.KEEP if sender_address.startswith("alerts@") else Action.REVIEW)
     policy_engine.ai.classify_batch.assert_not_called()
     policy_engine.ai.classify_single.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Your coupon is waiting",
+        "New arrivals for autumn",
+        "Black Friday starts now",
+        "Save up to 30% this weekend",
+        "Use promo code Q7M4",
+        "Weekly roundup: design stories",
+    ],
+)
+def test_full_history_promotions_remain_discoverable_without_suppressing_service_mail(
+    policy_engine, subject
+):
+    from nothx.cli import _is_marketing_candidate
+    from nothx.models import AuthenticationEvidence
+
+    headers = [
+        EmailHeader(
+            sender="news@mixed.example",
+            subject=subject if index == 1 else f"Your order confirmation #{10000 + index}",
+            date=datetime(2026, 1, index, tzinfo=UTC),
+            message_id=f"<{index}@mixed.example>",
+            list_unsubscribe="<https://mixed.example/unsubscribe>",
+            account_key="owner@example.com",
+            authentication=AuthenticationEvidence(trusted=True, dmarc=AuthResult.PASS),
+        )
+        for index in range(1, 9)
+    ]
+    sender = _stats_for_emails("mixed.example", headers)
+    assert subject not in sender.sample_subjects
+    assert sender.promotional_subject_emails == 1
+    assert sender.promotional_sample_subjects == [subject]
+    policy_engine.ai.is_available = Mock(return_value=True)
+    policy_engine.ai.classify_batch = Mock()
+    result = policy_engine.classify_batch([sender])[sender.classification_key]
+    assert result.action is Action.REVIEW
+    assert result.source == "transactional_policy"
+    assert _is_marketing_candidate(sender, result)
+    policy_engine.ai.classify_batch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Your free storage is nearly full",
+        "Urgent security notice",
+        "Your payment went through",
+        "Out of office",
+        "Revised terms and conditions of sale",
+        "Your parcel needs customs clearance",
+        'Someone shared "40-SALE-Design.zip" with you',
+        "Coupon Design",
+        "Newsletter names",
+        "Your package is out for delivery",
+        "Dinner tomorrow?",
+    ],
+)
+def test_service_and_personal_subjects_do_not_create_promotional_history(subject):
+    from nothx.classifier.heuristics import has_promotional_subject
+
+    assert not has_promotional_subject(subject)
+
+
+def test_promotional_history_keeps_latest_distinct_examples_bounded():
+    headers = [
+        EmailHeader("news@shop.example", subject, datetime(2026, 1, i, tzinfo=UTC), str(i))
+        for i, subject in enumerate(
+            ["Sale one", "Sale two", "Sale three", "Sale four", "Sale four"], 1
+        )
+    ]
+    sender = _stats_for_emails("shop.example", headers)
+    assert sender.promotional_subject_emails == 5
+    assert sender.promotional_sample_subjects == ["Sale four", "Sale three", "Sale two"]

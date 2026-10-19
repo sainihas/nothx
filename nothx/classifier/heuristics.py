@@ -75,6 +75,25 @@ OPERATIONAL_SUBJECT_PATTERNS = [
 ]
 COLD_OUTREACH_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _COLD_OUTREACH_PATTERNS_RAW]
 
+# Strong content evidence for review discovery, independent of engagement.
+# Broad scoring words such as "free", "urgent", or "off" also occur in
+# service notices and are deliberately excluded from this predicate.
+PROMOTIONAL_SUBJECT_PATTERN = re.compile(
+    r"\b(?:sale|discount|coupon|clearance|newsletter|promotions?|new arrivals"
+    r"|black friday|cyber monday|shop now|weekly (?:digest|roundup))\b"
+    r"|\b(?:exclusive|special|limited[ -]time)\s+offers?\b"
+    r"|\bpromo(?:tional)?\s+code\b|\d+%\s*off\b"
+    r"|\bsave\s+(?:up to\s+)?(?:\d+%|[$£€]\s*\d+)",
+    re.IGNORECASE,
+)
+
+
+def has_promotional_subject(subject: str) -> bool:
+    """Find explicit promotional content without deciding whether it is unwanted."""
+    return not any(pattern.search(subject) for pattern in OPERATIONAL_SUBJECT_PATTERNS) and bool(
+        PROMOTIONAL_SUBJECT_PATTERN.search(subject)
+    )
+
 
 def has_strong_cold_outreach_evidence(subject: str) -> bool:
     """Require a sales opener or multiple independent outreach indicators.

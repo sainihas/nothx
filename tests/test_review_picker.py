@@ -131,11 +131,35 @@ def test_incomplete_or_mixed_protected_sender_offers_no_destructive_action(sourc
 @pytest.mark.parametrize("email_type", [EmailType.TRANSACTIONAL, EmailType.SECURITY])
 def test_receipts_security_and_personal_threads_are_not_marketing(email_type):
     _, sender, classification = row(email_type=email_type)
+    sender.sample_subjects = [
+        "Your order confirmation"
+        if email_type is EmailType.TRANSACTIONAL
+        else "Security alert: new login"
+    ]
     assert not _is_marketing_candidate(sender, classification)
     classification.email_type = EmailType.UNKNOWN
     sender.sample_subjects = ["Re: Dinner tomorrow"]
     sender.list_id = "group.discussion.example"
     assert not _is_marketing_candidate(sender, classification)
+
+
+def test_search_finds_older_promotional_example_and_keeps_mixed_mail_protected(capsys):
+    item = row(email_type=EmailType.TRANSACTIONAL, source="transactional_policy")
+    item[1].sample_subjects = ["Your order confirmation"]
+    item[1].protected_subject_emails = 4
+    item[1].promotional_subject_emails = 1
+    item[1].promotional_sample_subjects = ["Use promo code AUTUMN"]
+    with patch("nothx.cli._confirmed_provider_threat", return_value=False):
+        prompts = run_picker(
+            ([], [], [item], []),
+            ["review", "search", f"sender:{item[0]}", "unchanged", "finish"],
+            ["autumn"],
+        )
+    matches = [c for c in prompts[2][1]["choices"] if str(c.value).startswith("sender:")]
+    assert len(matches) == 1
+    actions = {c.value for c in prompts[3][1]["choices"]}
+    assert not actions & {"block", "unsub"}
+    assert "Use promo code AUTUMN" in capsys.readouterr().out
 
 
 def test_details_do_not_show_personal_kept_sender(capsys):

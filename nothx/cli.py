@@ -35,6 +35,7 @@ from rich.tree import Tree
 from . import __version__, db, msauth
 from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
+from .classifier.heuristics import has_promotional_subject
 from .config import (
     CONSENT_REVOKED,
     CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
@@ -3313,8 +3314,6 @@ def _is_marketing_candidate(sender: SenderStats, classification: Classification)
         EmailType.COLD_OUTREACH,
     }:
         return True
-    if classification.email_type in {EmailType.TRANSACTIONAL, EmailType.SECURITY}:
-        return False
     bulk = bool(
         sender.has_unsubscribe
         or sender.list_id
@@ -3323,14 +3322,11 @@ def _is_marketing_candidate(sender: SenderStats, classification: Classification)
         or sender.esp_name
         or sender.provider_bulk_emails
     )
-    promotional = any(
-        re.search(
-            r"\b(?:sale|discount|newsletter|promotions?|exclusive offer|weekly digest|weekly roundup)\b|\d+%\s*off",
-            subject,
-            re.IGNORECASE,
-        )
-        for subject in sender.sample_subjects
+    promotional = sender.promotional_subject_emails > 0 or any(
+        has_promotional_subject(subject) for subject in sender.sample_subjects
     )
+    # Mixed service/promotional identities remain protected from suppression,
+    # but their marketing must still be discoverable in the review screen.
     return bulk and promotional
 
 
@@ -3397,6 +3393,7 @@ def _review_scan_decisions(
                         _review_sender_label(row[1]),
                         row[1].domain,
                         *row[1].sample_subjects,
+                        *row[1].promotional_sample_subjects,
                         *row[1].sample_senders,
                     ]
                 ).casefold()
@@ -3455,7 +3452,9 @@ def _review_scan_decisions(
                     f"Decision: {classification.action.value} · {classification.email_type.value}\n"
                     f"Reason: {escape(classification.reasoning)}\n"
                     f"Marked read: {sender.open_rate:.0f}%\n"
-                    f"Recent subjects: {escape(' / '.join(sender.sample_subjects[:3]))}",
+                    f"Recent subjects: {escape(' / '.join(sender.sample_subjects[:3]))}\n"
+                    f"Promotional subjects in scan: {sender.promotional_subject_emails:,}\n"
+                    f"Promotional examples: {escape(' / '.join(sender.promotional_sample_subjects))}",
                     title="Sender details",
                 )
             )

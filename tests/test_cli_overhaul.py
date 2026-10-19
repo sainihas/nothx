@@ -2450,6 +2450,8 @@ def test_personal_uncertain_mail_is_outside_cleanup_review(configured_cli):
     key, sender = next(iter(scan.subscription_stats.items()))
     sender.sample_subjects = ["Dinner tomorrow"]
     sender.sample_senders = ["friend@example.com"]
+    sender.promotional_subject_emails = 0
+    sender.promotional_sample_subjects = []
     classes[key] = Classification(
         EmailType.UNKNOWN, Action.REVIEW, 0.5, "Personal thread", "uncertain"
     )
@@ -2655,3 +2657,36 @@ def test_mixed_saved_and_legacy_store_exposes_both_without_domain_fallthrough(co
     assert result.exit_code == 0, result.output
     assert select.call_count == 1
     assert db.get_subscription(modern["id"])["policy_action"] == "review"
+
+
+def test_mixed_service_promotions_reach_cleanup_review_without_actions(configured_cli):
+    runner, _ = configured_cli
+    scan, classes = _subscription_scan(Action.REVIEW)
+    key, sender = next(iter(scan.subscription_stats.items()))
+    sender.sample_subjects = ["Your order confirmation"] * 5
+    sender.protected_subject_emails = 5
+    sender.promotional_subject_emails = 1
+    sender.promotional_sample_subjects = ["Use promo code AUTUMN"]
+    classes[key] = Classification(
+        EmailType.TRANSACTIONAL, Action.REVIEW, 0.9, "Mixed service mail", "transactional_policy"
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli._styled_confirm", return_value=False),
+        patch("nothx.cli.unsubscribe_subscription") as unsub,
+        patch("nothx.cli._block_subscription") as block,
+    ):
+        result = runner.invoke(cleanup, [])
+    assert result.exit_code == 0, result.output
+    assert "1 marketing/spam groups need review" in result.output
+    assert (
+        db.get_subscription(
+            account=sender.account_key,
+            identity_kind=sender.identity_kind,
+            identity_value=sender.identity_value,
+        )["policy_action"]
+        == "review"
+    )
+    unsub.assert_not_called()
+    block.assert_not_called()

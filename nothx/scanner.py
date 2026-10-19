@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 from . import db
 from .authres import has_aligned_dkim_pass
-from .classifier.heuristics import has_protected_subject
+from .classifier.heuristics import has_promotional_subject, has_protected_subject
 from .config import Config
 from .errors import ErrorCode, IMAPError
 from .footer import MAX_MESSAGES_PER_ACCOUNT
@@ -364,6 +364,10 @@ def _stats_for_emails(
     dates = [_delivery_time(email) for email in emails]
     sorted_emails = sorted(emails, key=_delivery_time, reverse=True)
     sample_subjects = [email.subject for email in sorted_emails[:5]]
+    promotional_subjects = [
+        header.subject for header in sorted_emails if has_promotional_subject(header.subject)
+    ]
+    promotional_samples = list(dict.fromkeys(promotional_subjects))[:3]
     sample_senders: list[str] = []
     for header in sorted_emails:
         address = header.sender_address
@@ -422,6 +426,8 @@ def _stats_for_emails(
         provider_bulk_emails=sum(header.provider_bulk for header in emails),
         provider_threat=any(header.provider_threat for header in emails),
         protected_subject_emails=sum(has_protected_subject(header.subject) for header in emails),
+        promotional_subject_emails=len(promotional_subjects),
+        promotional_sample_subjects=promotional_samples,
     )
 
 

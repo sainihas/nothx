@@ -1769,10 +1769,10 @@ def test_cleanup_preview_is_full_inbox_ai_without_actions_or_saved_decisions(con
     assert scan.call_args.kwargs["full_history"] is True
     assert scan.call_args.kwargs["inbox_only"] is True
     assert scan.call_args.kwargs["persist"] is False
-    assert engine.return_value.classify_batch.call_args.kwargs == {
-        "persist": False,
-        "allow_ai": True,
-    }
+    options = engine.return_value.classify_batch.call_args.kwargs
+    assert options["persist"] is False
+    assert options["allow_ai"] is True
+    assert callable(options["on_ai_progress"])
     for mutation in (unsub, block, reconcile, persist, log):
         mutation.assert_not_called()
     assert "Sale" in result.output
@@ -2314,3 +2314,46 @@ def test_manual_mixed_evidence_block_uses_displayed_scope_snapshot(configured_cl
         101,
     }
     assert "Blocked: 2 moved, 0 partial/failed" in result.output
+
+
+def test_full_history_old_service_notice_blocks_stored_automatic_suppression(configured_cli):
+    runner, _config = configured_cli
+    scan, classes = _subscription_scan(Action.BLOCK)
+    key, sender = next(iter(scan.subscription_stats.items()))
+    template = scan.subscription_emails[key][0]
+    from dataclasses import replace
+
+    from nothx.models import AuthenticationEvidence, AuthResult
+
+    headers = [
+        replace(
+            template,
+            subject="Privacy policy update" if index == 1 else "Quick question about your company",
+            date=datetime(2026, 1, index, tzinfo=UTC),
+            received_at=None,
+            uid=index,
+            authentication=AuthenticationEvidence(
+                trusted=True,
+                dkim=AuthResult.PASS,
+                dmarc=AuthResult.PASS,
+                dkim_domains=(template.domain,),
+            ),
+        )
+        for index in range(1, 9)
+    ]
+    sender = _stats_for_emails(template.domain, headers)
+    scan.subscription_stats = {key: sender}
+    scan.subscription_emails = {key: headers}
+    subscription, _ = _persist_subscription_records(
+        sender, headers, replace(classes[key], source="heuristics"), policy_action="block"
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.IMAPConnection") as imap,
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe,
+    ):
+        result = runner.invoke(cleanup, ["--apply", "--auto"])
+    assert result.exit_code == 0, result.output
+    imap.assert_not_called()
+    unsubscribe.assert_not_called()
+    assert db.get_subscription(subscription["id"])["policy_action"] == "review"

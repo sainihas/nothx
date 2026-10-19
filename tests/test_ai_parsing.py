@@ -219,3 +219,41 @@ def test_explicit_ai_preview_sends_prompt_without_saving_classification(temp_db)
     assert result["mailer.example"].action is Action.UNSUB
     assert len(provider.calls) == 1
     save.assert_not_called()
+
+
+def test_batch_progress_reports_processed_groups_through_provider_failure(temp_db, monkeypatch):
+    monkeypatch.setattr("nothx.classifier.ai.AI_BATCH_CHUNK_SIZE", 2)
+    failure = ProviderError(
+        error_type=ProviderErrorType.AUTHENTICATION_ERROR,
+        message="invalid synthetic key",
+        provider="fake",
+        retryable=False,
+    )
+    response = '[{"domain":"third.example","type":"marketing","action":"unsub","confidence":0.95}]'
+    provider = _FakeProvider([failure, response])
+    classifier = _classifier(provider)
+    progress = []
+    with patch("nothx.classifier.ai.db.update_sender_classification") as save:
+        results = classifier.classify_batch(
+            [_sender("first.example"), _sender("second.example"), _sender("third.example")],
+            persist=False,
+            allow_egress=True,
+            on_progress=lambda done, total: progress.append((done, total, len(provider.calls))),
+        )
+    assert progress == [(0, 3, 0), (2, 3, 1), (3, 3, 2)]
+    assert set(results) == {"third.example"}
+    save.assert_not_called()
+
+
+def test_progress_callback_does_not_enable_ai_egress(temp_db):
+    provider = _FakeProvider([])
+    classifier = _classifier(provider)
+    progress = []
+    assert (
+        classifier.classify_batch(
+            [_sender()], persist=False, on_progress=lambda *counts: progress.append(counts)
+        )
+        == {}
+    )
+    assert progress == []
+    assert provider.calls == []

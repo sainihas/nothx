@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import Callable
 
 from .. import db
 from ..config import Config
@@ -161,7 +162,12 @@ class AIClassifier:
         return provider.is_available()
 
     def classify_batch(
-        self, senders: list[SenderStats], persist: bool = True, *, allow_egress: bool = False
+        self,
+        senders: list[SenderStats],
+        persist: bool = True,
+        *,
+        allow_egress: bool = False,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Classification]:
         """
         Classify a batch of senders using AI, in chunks.
@@ -186,10 +192,14 @@ class AIClassifier:
             return {}
 
         results: dict[str, Classification] = {}
+        if on_progress:
+            on_progress(0, len(senders))
         for start in range(0, len(senders), AI_BATCH_CHUNK_SIZE):
             results.update(
                 self._classify_chunk(senders[start : start + AI_BATCH_CHUNK_SIZE], persist=persist)
             )
+            if on_progress:
+                on_progress(min(start + AI_BATCH_CHUNK_SIZE, len(senders)), len(senders))
         return results
 
     def _classify_chunk(

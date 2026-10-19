@@ -465,3 +465,22 @@ def test_partial_fetch_is_visible_in_coverage(database: Path) -> None:
             Config(accounts={"main": AccountConfig("gmail", "me@example.com", "pw")}), persist=False
         )
     assert result.coverage[0].complete is False
+
+
+def test_folded_from_headers_are_processed_instead_of_counted_as_invalid(database):
+    messages = [
+        header(
+            index, sender='"First, Second & Third\r\n Team" <bulletin@example.com>', list_id=None
+        )
+        for index in (1, 2)
+    ]
+    conn = fake_connection({"INBOX": messages})
+    config = Config(accounts={"main": AccountConfig("gmail", "owner@example.com", "pw")})
+    with patch("nothx.scanner.IMAPConnection", return_value=conn):
+        result = scan_inbox(config, persist=True)
+    assert result.skipped_invalid_senders == 0
+    assert len(result.subscription_stats) == 1
+    sender = next(iter(result.subscription_stats.values()))
+    assert sender.total_emails == 2
+    assert sender.identity_value == "bulletin@example.com"
+    assert len(db.list_message_refs()) == 2

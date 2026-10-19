@@ -13,6 +13,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,9 @@ from .models import Action, RunStats, SenderStatus, UnsubMethod, UserAction, Use
 from .timeutil import ensure_utc, utcnow
 
 BUSY_TIMEOUT_MS = 5_000
+_metadata_connection: ContextVar[sqlite3.Connection | None] = ContextVar(
+    "metadata_connection", default=None
+)
 DEFAULT_OPERATION_LEASE_SECONDS = 30 * 60
 _LIST_ID_VALUE_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~.]{1,255}$")
 
@@ -45,6 +49,10 @@ def get_connection() -> sqlite3.Connection:
 @contextmanager
 def get_db() -> Iterator[sqlite3.Connection]:
     """Context manager for database connections."""
+    active = _metadata_connection.get()
+    if active is not None:
+        yield active
+        return
     conn = get_connection()
     try:
         yield conn
@@ -54,6 +62,17 @@ def get_db() -> Iterator[sqlite3.Connection]:
         raise
     finally:
         conn.close()
+
+
+@contextmanager
+def metadata_batch() -> Iterator[None]:
+    """Commit a bounded group of metadata upserts together."""
+    with get_db() as connection:
+        token = _metadata_connection.set(connection)
+        try:
+            yield
+        finally:
+            _metadata_connection.reset(token)
 
 
 def init_db() -> None:
@@ -834,10 +853,10 @@ def list_subscriptions(
     account: str | None = None,
     policy_action: str | None = None,
     outcome: str | None = None,
-    limit: int = 500,
+    limit: int | None = 500,
 ) -> list[dict[str, Any]]:
     """List account-scoped subscriptions with stable newest-first ordering."""
-    if limit < 1:
+    if limit is not None and limit < 1:
         return []
     if policy_action not in (None, "keep", "unsub", "block", "review"):
         raise ValueError("Invalid subscription policy action")
@@ -855,7 +874,7 @@ def list_subscriptions(
         clauses.append("last_outcome = ?")
         params.append(outcome)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.append(limit)
+    params.append(limit if limit is not None else -1)
     with get_db() as conn:
         rows = conn.execute(
             f"SELECT * FROM subscriptions{where} ORDER BY last_seen DESC, id DESC LIMIT ?",

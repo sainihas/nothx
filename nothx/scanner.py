@@ -76,7 +76,7 @@ def _aliases_with_stored_promotions(
     result = _promotion_aliases(headers)
     for account in {header.account_key for header in headers if header.account_key}:
         stored_candidates: dict[tuple[str, str], set[str]] = defaultdict(set)
-        for row in db.list_subscriptions(account=account):
+        for row in db.list_subscriptions(account=account, limit=None):
             promoted_from = row.get("promoted_from_value")
             if row.get("identity_kind") == "list_id" and promoted_from:
                 stored_candidates[(account, str(promoted_from))].add(str(row["identity_value"]))
@@ -173,7 +173,11 @@ def _persist_headers(
     # Promote old fallback rows before inserting a target List-Id.  The in-run
     # mapping and historical list rows must both be unambiguous.
     promotion_source = promotion_headers if promotion_headers is not None else headers
-    existing = db.list_subscriptions(account=account)
+    fallback_headers_by_from: dict[str, list[EmailHeader]] = defaultdict(list)
+    for header in promotion_source:
+        if header.account_key == account and header.normalized_list_id is None:
+            fallback_headers_by_from[header.sender_address].append(header)
+    existing = db.list_subscriptions(account=account, limit=None)
     existing_list_ids_by_from: dict[str, set[str]] = defaultdict(set)
     for row in existing:
         if row.get("identity_kind") == "list_id" and row.get("from_address"):
@@ -195,13 +199,7 @@ def _persist_headers(
             identity_value=list_id,
         )
         if fallback is None and target is None:
-            fallback_headers = [
-                header
-                for header in promotion_source
-                if header.account_key == account
-                and header.sender_address == from_address
-                and header.normalized_list_id is None
-            ]
+            fallback_headers = fallback_headers_by_from.get(from_address, [])
             if fallback_headers:
                 # Seed the fallback from a real observed message, then use the
                 # database's transactional promotion API. This records the
@@ -227,54 +225,57 @@ def _persist_headers(
                     account,
                 )
 
-    for header in headers:
-        identity = _effective_identity(header, aliases)
-        effective_list_id: str | None = (
-            identity.value if identity.kind == "list_id" else header.normalized_list_id
-        )
-        sender_address: str | None = header.sender_address or None
-        subscription = db.upsert_subscription(
-            account,
-            identity.kind,
-            identity.value,
-            list_id=effective_list_id,
-            from_address=sender_address,
-            sender_domain=header.domain if header.domain != "unknown" else None,
-            first_seen=_delivery_time(header),
-            last_seen=_delivery_time(header),
-            last_delivery_at=_delivery_time(header),
-        )
-        locator = header.message_ref
-        if locator is None:
-            continue
-        provider_verdict = header.provider_threat
-        if provider_verdict is None and header.server_junk:
-            provider_verdict = "junk"
-        db.upsert_message_ref(
-            int(subscription["id"]),
-            account,
-            locator.mailbox,
-            header.mailbox_role,
-            locator.uidvalidity,
-            locator.uid,
-            message_id=header.message_id or None,
-            from_address=sender_address,
-            list_id=header.normalized_list_id,
-            received_at=_delivery_time(header),
-            flags=[*header.system_flags, *header.keywords, *header.gmail_labels],
-            auth_evidence=_auth_evidence(header),
-            bulk_evidence={
-                "list_id": header.normalized_list_id,
-                "precedence": header.precedence,
-                "feedback_id": bool(header.feedback_id),
-                "esp": header.esp,
-                "provider_bulk": header.provider_bulk,
-            },
-            provider_verdict=provider_verdict,
-            endpoint_fingerprints=_endpoint_fingerprints(header),
-            has_header_method=_has_usable_header_method(header),
-            can_unsubscribe=header.server_can_unsubscribe,
-        )
+    for start in range(0, len(headers), 500):
+        batch = headers[start : start + 500]
+        with db.metadata_batch():
+            for header in batch:
+                identity = _effective_identity(header, aliases)
+                effective_list_id: str | None = (
+                    identity.value if identity.kind == "list_id" else header.normalized_list_id
+                )
+                sender_address: str | None = header.sender_address or None
+                subscription = db.upsert_subscription(
+                    account,
+                    identity.kind,
+                    identity.value,
+                    list_id=effective_list_id,
+                    from_address=sender_address,
+                    sender_domain=header.domain if header.domain != "unknown" else None,
+                    first_seen=_delivery_time(header),
+                    last_seen=_delivery_time(header),
+                    last_delivery_at=_delivery_time(header),
+                )
+                locator = header.message_ref
+                if locator is None:
+                    continue
+                provider_verdict = header.provider_threat
+                if provider_verdict is None and header.server_junk:
+                    provider_verdict = "junk"
+                db.upsert_message_ref(
+                    int(subscription["id"]),
+                    account,
+                    locator.mailbox,
+                    header.mailbox_role,
+                    locator.uidvalidity,
+                    locator.uid,
+                    message_id=header.message_id or None,
+                    from_address=sender_address,
+                    list_id=header.normalized_list_id,
+                    received_at=_delivery_time(header),
+                    flags=[*header.system_flags, *header.keywords, *header.gmail_labels],
+                    auth_evidence=_auth_evidence(header),
+                    bulk_evidence={
+                        "list_id": header.normalized_list_id,
+                        "precedence": header.precedence,
+                        "feedback_id": bool(header.feedback_id),
+                        "esp": header.esp,
+                        "provider_bulk": header.provider_bulk,
+                    },
+                    provider_verdict=provider_verdict,
+                    endpoint_fingerprints=_endpoint_fingerprints(header),
+                    has_header_method=_has_usable_header_method(header),
+                    can_unsubscribe=header.server_can_unsubscribe,
+                )
 
 
 def _most_common(values: "Iterable[str | None]") -> str | None:
@@ -711,16 +712,20 @@ def scan_inbox(
     }
 
     if persist:
-        for domain, stats in sender_stats.items():
-            db.upsert_sender(
-                domain=domain,
-                total_emails=stats.total_emails,
-                seen_emails=stats.seen_emails,
-                sample_subjects=stats.sample_subjects,
-                has_unsubscribe=stats.has_unsubscribe,
-                first_seen=stats.first_seen,
-                last_seen=stats.last_seen,
-            )
+        rows = list(sender_stats.items())
+        for start in range(0, len(rows), 500):
+            stats_batch = rows[start : start + 500]
+            with db.metadata_batch():
+                for domain, stats in stats_batch:
+                    db.upsert_sender(
+                        domain=domain,
+                        total_emails=stats.total_emails,
+                        seen_emails=stats.seen_emails,
+                        sample_subjects=stats.sample_subjects,
+                        has_unsubscribe=stats.has_unsubscribe,
+                        first_seen=stats.first_seen,
+                        last_seen=stats.last_seen,
+                    )
 
     return ScanResult(
         sender_stats,

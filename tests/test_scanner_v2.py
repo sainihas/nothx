@@ -484,3 +484,51 @@ def test_folded_from_headers_are_processed_instead_of_counted_as_invalid(databas
     assert sender.total_emails == 2
     assert sender.identity_value == "bulletin@example.com"
     assert len(db.list_message_refs()) == 2
+
+
+def test_metadata_batches_bound_connections_and_rollback_failed_batch(database: Path) -> None:
+    from nothx.scanner import _persist_headers
+
+    headers = [header(index) for index in range(1, 1002)]
+    for item in headers:
+        item.account_key = "me@example.com"
+    with patch("nothx.db.get_connection", wraps=db.get_connection) as connections:
+        _persist_headers("me@example.com", headers, {})
+    assert connections.call_count == 4
+    assert len(db.list_message_refs(account="me@example.com", limit=2000)) == 1001
+    before = db.get_mailbox_state("me@example.com", "INBOX")
+    fresh = header(1002, sender="failed@example.com", list_id=None)
+    fresh.account_key = "me@example.com"
+    with patch("nothx.db.upsert_message_ref", side_effect=RuntimeError("write failed")):
+        with pytest.raises(RuntimeError):
+            _persist_headers("me@example.com", [fresh], {})
+    assert len(db.list_message_refs(account="me@example.com", limit=2000)) == 1001
+    assert db.get_mailbox_state("me@example.com", "INBOX") == before
+    assert (
+        db.get_subscription(
+            account="me@example.com", identity_kind="from", identity_value="failed@example.com"
+        )
+        is None
+    )
+    db.upsert_subscription("me@example.com", "from", "new@example.com")
+    assert db.get_subscription(
+        account="me@example.com", identity_kind="from", identity_value="new@example.com"
+    )
+
+
+def test_stored_promotion_conflicts_are_checked_past_first_500(database: Path) -> None:
+    from nothx.scanner import _aliases_with_stored_promotions
+
+    db.upsert_subscription("me@example.com", "from", "shared@example.com")
+    db.promote_subscription_identity("me@example.com", "shared@example.com", "original.example")
+    with db.metadata_batch():
+        for index in range(505):
+            db.upsert_subscription(
+                "me@example.com",
+                "list_id",
+                f"list-{index}.example",
+                from_address=f"news-{index}@example.com",
+            )
+    item = header(1, sender="shared@example.com", list_id="<different.example>")
+    item.account_key = "me@example.com"
+    assert ("me@example.com", "shared@example.com") not in _aliases_with_stored_promotions([item])

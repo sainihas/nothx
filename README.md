@@ -133,6 +133,13 @@ Provider threat evidence and explicit block rules are resolved before AI. Mixed 
 | `nothx review` | Decide on uncertain senders |
 | `nothx test --ai` | Test mailbox connections and the configured AI provider, including disabled-provider recovery |
 
+Cleanup review focuses on marketing/newsletters and spam. Personal conversations, receipts,
+and security notices stay outside the cleanup picker. Search by full sender address,
+account, mailing list, or subject; pages contain at most 20 sender groups and you can
+finish review at any time. Accounts and separate mailing lists are never merged by domain.
+Use `nothx cleanup --details` for candidate tables before review.
+
+
 ### Day-to-Day
 
 | Command | What it does |

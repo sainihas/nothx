@@ -230,5 +230,6 @@ def test_unknown_bulk_announcements_remain_visible_for_review():
 def test_explicit_offer_from_named_sender_needs_no_list_headers():
     _, sender, classification = row(email_type=EmailType.UNKNOWN)
     sender.has_unsubscribe = False
+    sender.authenticated_emails = 1
     sender.sample_subjects = ["Trade-in weekend: 25% bonus credit"]
     assert _is_marketing_candidate(sender, classification)

@@ -447,6 +447,7 @@ def _create_authoritative_tables(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             subscription_id INTEGER NOT NULL,
             operation_key TEXT NOT NULL CHECK (length(operation_key) > 0),
+            affects_subscription INTEGER NOT NULL DEFAULT 1 CHECK (affects_subscription IN (0, 1)),
             kind TEXT NOT NULL DEFAULT 'unsubscribe'
                 CHECK (kind IN ('unsubscribe', 'block', 'verification')),
             outcome TEXT CHECK (outcome IS NULL OR outcome IN
@@ -2432,6 +2433,29 @@ def reconcile_missing_mailbox_source(action_id: int) -> bool:
             (_iso_timestamp(), action_id),
         )
         return result.rowcount == 1
+
+
+def message_cleanup_key(
+    account: str,
+    message_id: str | None,
+    from_address: str | None,
+    received_at: datetime | str | None,
+) -> tuple[str, str, str, str] | None:
+    if not message_id or not from_address or received_at is None:
+        return None
+    return (account.casefold(), message_id, from_address.casefold(), _iso_timestamp(received_at))
+
+
+def get_locally_cleaned_message_keys() -> set[tuple[str, str, str, str]]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT m.account, m.message_id, m.from_address, m.received_at
+               FROM mailbox_actions a
+               JOIN unsubscribe_operations o ON o.id = a.operation_id
+               JOIN message_refs m ON m.id = a.message_ref_id
+               WHERE o.affects_subscription = 0 AND a.outcome IN ('moved', 'partial')"""
+        ).fetchall()
+    return {key for row in rows if (key := message_cleanup_key(*row)) is not None}
 
 
 def get_operation_metrics(

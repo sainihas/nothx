@@ -35,7 +35,11 @@ from rich.tree import Tree
 from . import __version__, db, msauth
 from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
-from .classifier.heuristics import has_promotional_subject, has_protected_subject
+from .classifier.heuristics import (
+    has_explicit_offer_subject,
+    has_promotional_subject,
+    has_protected_subject,
+)
 from .config import (
     CONSENT_REVOKED,
     CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
@@ -514,6 +518,7 @@ def _persisted_threat_action(
     junk = bool(sender and (sender.junk_emails or sender.junk_keyword_emails))
     inbox = bool(sender and sender.clean_inbox_emails)
     not_junk = bool(sender and sender.not_junk_emails)
+    locally_cleaned = db.get_locally_cleaned_message_keys()
     for message in db.list_message_refs(subscription_id=subscription_id, limit=100_000):
         try:
             flags = json.loads(message.get("flags_json") or "[]")
@@ -545,6 +550,16 @@ def _persisted_threat_action(
             or message.get("mailbox_role") == "junk"
             or bool(normalized & {"$junk", r"\junk", "spam", r"\spam"})
         )
+        if (
+            db.message_cleanup_key(
+                message["account"],
+                message.get("message_id"),
+                message.get("from_address"),
+                message.get("received_at"),
+            )
+            in locally_cleaned
+        ):
+            is_junk = False
         junk |= is_junk
         inbox |= message.get("mailbox_role") == "inbox" and not is_junk and not is_hard_threat
         not_junk |= bool(normalized & {"$notjunk", r"\notjunk", "notjunk", "$nonjunk"})
@@ -1163,10 +1178,25 @@ def _clean_unwanted_inbox(
     subscription: dict[str, Any],
     messages: list[tuple[EmailHeader, dict[str, Any]]],
 ) -> tuple[int, int]:
+    try:
+        return _execute_inbox_cleanup(config, subscription, messages)
+    except ValueError:
+        console.print(
+            "[warning]Inbox cleanup needs review; the unsubscribe result is preserved.[/warning]"
+        )
+        return 0, len(messages)
+
+
+def _execute_inbox_cleanup(
+    config: Config,
+    subscription: dict[str, Any],
+    messages: list[tuple[EmailHeader, dict[str, Any]]],
+) -> tuple[int, int]:
     if not config.move_unwanted_to_junk or not config.permits_mailbox_mutation:
         return 0, 0
-    subscription = db.get_subscription(subscription["id"]) or subscription
-    if subscription.get("last_outcome") not in {"requested", "verified_quiet"}:
+    operations = db.list_unsubscribe_operations(subscription_id=subscription["id"], limit=1)
+    operation = operations[0] if operations else None
+    if not operation or operation.get("outcome") not in {"requested", "verified_quiet"}:
         return 0, 0
     message_ids = {
         message["id"]
@@ -1174,6 +1204,12 @@ def _clean_unwanted_inbox(
         if header.mailbox_role == "inbox"
         and header.message_ref is not None
         and not has_protected_subject(header.subject)
+        and not header.server_not_junk
+        and not {flag.casefold() for flag in header.system_flags} & {r"\flagged", r"\answered"}
+        and (
+            operation.get("verification_scope") == "subscription"
+            or message["id"] == operation.get("trigger_message_ref_id")
+        )
     }
     if not message_ids:
         return 0, 0
@@ -1197,7 +1233,7 @@ def _clean_unwanted_inbox(
         preserve_policy=True,
     )
     console.print(
-        f"Inbox cleanup: {moved} message(s) removed from Inbox; {failed} unresolved. "
+        f"Inbox cleanup: {moved} message(s) no longer in Inbox; {failed} unresolved. "
         "Unsubscribe delivery verification remains separate."
     )
     return moved, failed
@@ -3368,18 +3404,25 @@ def _is_marketing_candidate(sender: SenderStats, classification: Classification)
         EmailType.COLD_OUTREACH,
     }:
         return True
-    bulk = bool(
-        sender.bulk_precedence
-        or sender.has_feedback_id
-        or sender.esp_name
-        or sender.provider_bulk_emails
-    )
+    bulk = bool(sender.esp_name or sender.provider_bulk_emails)
     promotional = sender.promotional_subject_emails > 0 or any(
         has_promotional_subject(subject) for subject in sender.sample_subjects
     )
+    list_evidence = bool(
+        sender.has_unsubscribe
+        or sender.list_id
+        or sender.bulk_precedence
+        or sender.has_feedback_id
+        or bulk
+    )
     if classification.email_type in {EmailType.TRANSACTIONAL, EmailType.SECURITY}:
-        return promotional
-    return promotional or (bulk and not sender.protected_subject_emails)
+        return promotional and list_evidence
+    explicit_offer = sender.authenticated_emails > 0 and any(
+        has_explicit_offer_subject(subject) for subject in sender.sample_subjects
+    )
+    return (promotional and (list_evidence or explicit_offer)) or (
+        bulk and not sender.protected_subject_emails
+    )
 
 
 def _review_sender_label(sender: SenderStats) -> str:
@@ -3715,6 +3758,18 @@ def status(learning: bool):
         for subscription in db.list_subscriptions(outcome="needs_user", limit=10_000)
         if subscription.get("policy_action") != "keep"
     ]
+    cleanup_operations = [
+        row
+        for row in db.list_unsubscribe_operations(include_mailbox_cleanup=True, limit=100_000)
+        if not row["affects_subscription"] and row["outcome"] in {None, "failed", "needs_user"}
+    ]
+    if cleanup_operations:
+        console.print(f"\nInbox cleanup: {len(cleanup_operations)} unresolved operation(s)")
+        for row in cleanup_operations[:10]:
+            console.print(
+                f"  Subscription #{row['subscription_id']}: "
+                f"{row['error_code'] or 'in progress'}; run `nothx cleanup` to retry eligible moves"
+            )
     if any(outcomes.values()) or active_manual:
         console.print("\n[header]Subscription operations[/header]")
         console.print(
@@ -4374,8 +4429,8 @@ def resolve_subscription(
         operation_id=operation["id"],
         claim_owner=owner,
     )
-    _clean_unwanted_inbox(config, subscription, messages)
     if result.success:
+        _clean_unwanted_inbox(config, subscription, messages)
         if not source_scoped:
             db.set_subscription_policy(subscription_id, "unsub")
         console.print(
@@ -4667,6 +4722,10 @@ def config_cmd(
         config.move_unwanted_to_junk = unwanted_mail == "junk"
         config.save()
         console.print(f"Approved unwanted mail: {unwanted_mail}")
+        if config.move_unwanted_to_junk:
+            console.print("Run `nothx cleanup` to include older Inbox messages.")
+            if not config.permits_mailbox_mutation:
+                console.print("Mailbox consent is missing; Junk movement remains disabled.")
 
     if show or (
         not ai and not mode and not footer_scan and not engaged_marketing and not unwanted_mail

@@ -102,6 +102,23 @@ def has_promotional_subject(subject: str) -> bool:
     )
 
 
+PERSONAL_MAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "outlook.com",
+        "hotmail.com",
+        "live.com",
+        "icloud.com",
+        "me.com",
+        "yahoo.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+    }
+)
+
+
 def has_explicit_offer_subject(subject: str) -> bool:
     return has_promotional_subject(subject) and bool(
         re.search(r"\d+%|[$£€]\s*\d+|\b(?:shop now|coupon code|promo code)\b", subject, re.I)

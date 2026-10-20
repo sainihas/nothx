@@ -207,6 +207,7 @@ class EmailHeader:
     list_unsubscribe_post_count: int = 0
     footer_unsubscribe_candidates: tuple[FooterUnsubscribeCandidate, ...] = ()
     footer_requires_user: bool = False
+    locally_cleaned: bool = False
 
     @property
     def is_bulk_precedence(self) -> bool:
@@ -219,6 +220,8 @@ class EmailHeader:
 
     @property
     def server_junk(self) -> bool:
+        if self.locally_cleaned:
+            return False
         flags = {value.casefold() for value in (*self.system_flags, *self.keywords)}
         labels = {value.casefold() for value in self.gmail_labels}
         return (

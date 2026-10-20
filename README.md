@@ -164,6 +164,7 @@ Use `nothx cleanup --details` for candidate tables before review.
 | `nothx account add/remove` | Manage email accounts |
 | `nothx config --show` | View current config |
 | `nothx config --engaged-marketing review/allow` | Review or permit automatic actions on engaged marketing |
+| `nothx config --unwanted-mail keep/junk` | Keep mail in Inbox or move approved mail to Junk after request acceptance |
 | `nothx consent` | Explicitly grant or revoke versioned network/mailbox automation consent |
 | `nothx run --preview` | Preview recent mail with configured AI; no mail actions or saved decisions |
 | `nothx run --dry-run` | Preview recent mail with local rules; no cloud AI or mail actions |
@@ -293,7 +294,8 @@ unsubscribe email.
 - Marketing/newsletters with at least 25% of messages marked read require review by default. Engaged cold outreach also requires review. Read flags are imperfect evidence of preference, so they never force KEEP. Choose `nothx config --engaged-marketing allow` to permit automatic actions on clear promotions even when read; explicit keep/block choices still win.
 - Every scan reports mailbox size, selected headers, headers read, and scope. A small incremental result describes new mail, not a clean Inbox. Junk messages already outside Inbox are reported separately from Inbox messages to move.
 - Cleanup previews show summary counts; add `--details` for each unsubscribe/block candidate’s account/list identity and recent subjects. Unsubscribe requests stop future deliveries when honored; existing marketing messages remain in Inbox. Block actions move matching messages to Junk. Preview uses configured AI only when enabled; `--dry-run` remains local.
-- Body fetching is disabled by default. The optional footer scanner examines at most two inline text tails (64 KiB each, 128 KiB total) for authenticated list/bulk candidates. It skips attachments, nested messages, images, scripts, and forms.
+- Inbox cleanup is optional: `nothx config --unwanted-mail junk` moves approved, non-protected messages after the unsubscribe request is accepted. It also clears subsequent matching deliveries while verification is pending. Requests needing a manual step keep their source messages available. Mailbox consent is still required, failures remain visible, and moving to Junk does not prove the sender stopped mailing.
+- Body fetching is disabled by default. The optional footer scanner examines at most two inline text tails (64 KiB each, 128 KiB total) for authenticated list/bulk candidates or explicit commercial offers. It skips attachments, nested messages, images, scripts, and forms.
 - One-click POST requires compliant headers plus `$canunsubscribe` or a correlated passing DKIM signature that covers both unsubscribe headers. All outbound unsubscribe contact—including an explicitly opened browser page—and mailbox actions require separate, versioned consent.
 - HTTP requests are HTTPS-only, proxy/cookie/auth/referrer-free, redirect constrained, SSRF checked, and connected to an already validated public IP while preserving TLS hostname verification.
 - Stored targets are fingerprints and hashed destination labels. Complete hosts, paths, queries, mailto recipients/bodies, and HTTP response bodies are excluded from normal history and exports.

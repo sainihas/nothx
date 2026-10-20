@@ -1132,3 +1132,31 @@ def test_manual_policy_provenance_survives_automatic_reclassification(state_db):
     assert db.get_subscription(row["id"])["policy_action"] == "keep"
     assert db.get_subscription(row["id"])["policy_source"] is None
     assert list(state_db.parent.glob("state.db.backup-*"))
+
+
+def test_mailbox_cleanup_does_not_replace_unsubscribe_state_or_metrics(state_db):
+    subscription = _subscription()
+    db.set_subscription_policy(subscription["id"], "unsub")
+    request, acquired = db.claim_unsubscribe_operation(subscription["id"], "request", "owner")
+    assert acquired
+    now = datetime.now(UTC)
+    db.update_unsubscribe_operation_outcome(
+        request["id"],
+        "requested",
+        requested_at=now,
+        grace_until=now + timedelta(hours=48),
+        claim_owner="owner",
+    )
+    before = db.get_subscription(subscription["id"])
+    cleanup, acquired = db.claim_unsubscribe_operation(
+        subscription["id"], "cleanup", "cleaner", kind="block", affects_subscription=False
+    )
+    assert acquired
+    db.update_unsubscribe_operation_outcome(cleanup["id"], "blocked", claim_owner="cleaner")
+    after = db.get_subscription(subscription["id"])
+    assert after == before
+    assert [o["id"] for o in db.list_unsubscribe_operations()] == [request["id"]]
+    assert len(db.list_unsubscribe_operations(include_mailbox_cleanup=True)) == 2
+    assert db.get_operation_metrics()["blocked"] == 0
+    with pytest.raises(ValueError, match="scope"):
+        db.claim_unsubscribe_operation(subscription["id"], "cleanup", "other", kind="block")

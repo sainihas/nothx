@@ -35,7 +35,7 @@ from rich.tree import Tree
 from . import __version__, db, msauth
 from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
-from .classifier.heuristics import has_promotional_subject
+from .classifier.heuristics import has_promotional_subject, has_protected_subject
 from .config import (
     CONSENT_REVOKED,
     CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
@@ -975,6 +975,7 @@ def _move_persisted_subscription_to_junk(
     *,
     claim_owner: str,
     message_ids: set[int] | None = None,
+    preserve_policy: bool = False,
 ) -> tuple[int, int]:
     """Move approved Inbox locators, or the explicitly approved full identity."""
     inbox_messages = db.list_message_refs(
@@ -996,7 +997,8 @@ def _move_persisted_subscription_to_junk(
         subscription.get("policy_source") == "manual"
         and subscription.get("policy_action") == "block"
     ) and (_persisted_threat_action(subscription["id"]) is Action.REVIEW):
-        db.set_subscription_policy(subscription["id"], "review", source="automatic")
+        if not preserve_policy:
+            db.set_subscription_policy(subscription["id"], "review", source="automatic")
         db.update_unsubscribe_operation_outcome(
             operation_id,
             "needs_user",
@@ -1152,6 +1154,51 @@ def _move_persisted_subscription_to_junk(
         error_code="partial_mailbox_failure" if failed else None,
         detail_redacted=f"{failed} message action(s) failed" if failed else None,
         claim_owner=claim_owner,
+    )
+    return moved, failed
+
+
+def _clean_unwanted_inbox(
+    config: Config,
+    subscription: dict[str, Any],
+    messages: list[tuple[EmailHeader, dict[str, Any]]],
+) -> tuple[int, int]:
+    if not config.move_unwanted_to_junk or not config.permits_mailbox_mutation:
+        return 0, 0
+    subscription = db.get_subscription(subscription["id"]) or subscription
+    if subscription.get("last_outcome") not in {"requested", "verified_quiet"}:
+        return 0, 0
+    message_ids = {
+        message["id"]
+        for header, message in messages
+        if header.mailbox_role == "inbox"
+        and header.message_ref is not None
+        and not has_protected_subject(header.subject)
+    }
+    if not message_ids:
+        return 0, 0
+    material = ",".join(str(value) for value in sorted(message_ids))
+    owner = uuid.uuid4().hex
+    operation, acquired = db.claim_unsubscribe_operation(
+        subscription["id"],
+        "inbox-cleanup-v1-" + hashlib.sha256(material.encode()).hexdigest(),
+        owner,
+        kind="block",
+        affects_subscription=False,
+    )
+    if not acquired:
+        return 0, 0
+    moved, failed = _move_persisted_subscription_to_junk(
+        config,
+        subscription,
+        operation["id"],
+        claim_owner=owner,
+        message_ids=message_ids,
+        preserve_policy=True,
+    )
+    console.print(
+        f"Inbox cleanup: {moved} message(s) removed from Inbox; {failed} unresolved. "
+        "Unsubscribe delivery verification remains separate."
     )
     return moved, failed
 
@@ -3108,6 +3155,10 @@ def _run_scan(
                                 progress.advance(task)
                                 continue
                             if not execute:
+                                _, move_failed = _clean_unwanted_inbox(
+                                    config, subscription, messages
+                                )
+                                stats.failed += move_failed
                                 logger.info(
                                     "Not repeating an accepted or in-grace request for %s",
                                     sender.classification_key,
@@ -3160,6 +3211,8 @@ def _run_scan(
                                 operation_id=claimed_operation["id"],
                                 claim_owner=claim_owner,
                             )
+                            _, move_failed = _clean_unwanted_inbox(config, subscription, messages)
+                            stats.failed += move_failed
                             if exhausted_retry:
                                 block_classification = Classification(
                                     email_type=EmailType.UNKNOWN,
@@ -3316,9 +3369,7 @@ def _is_marketing_candidate(sender: SenderStats, classification: Classification)
     }:
         return True
     bulk = bool(
-        sender.has_unsubscribe
-        or sender.list_id
-        or sender.bulk_precedence
+        sender.bulk_precedence
         or sender.has_feedback_id
         or sender.esp_name
         or sender.provider_bulk_emails
@@ -3326,7 +3377,9 @@ def _is_marketing_candidate(sender: SenderStats, classification: Classification)
     promotional = sender.promotional_subject_emails > 0 or any(
         has_promotional_subject(subject) for subject in sender.sample_subjects
     )
-    return bulk and promotional
+    if classification.email_type in {EmailType.TRANSACTIONAL, EmailType.SECURITY}:
+        return promotional
+    return promotional or (bulk and not sender.protected_subject_emails)
 
 
 def _review_sender_label(sender: SenderStats) -> str:
@@ -4321,6 +4374,7 @@ def resolve_subscription(
         operation_id=operation["id"],
         claim_owner=owner,
     )
+    _clean_unwanted_inbox(config, subscription, messages)
     if result.success:
         if not source_scoped:
             db.set_subscription_policy(subscription_id, "unsub")
@@ -4572,12 +4626,18 @@ def schedule(monthly: bool, weekly: bool, daily: bool, off: bool, show_status: b
     type=click.Choice(["review", "allow"]),
     help="Review or allow automatic actions on marketing with at least 25% marked read",
 )
+@click.option(
+    "--unwanted-mail",
+    type=click.Choice(["keep", "junk"]),
+    help="Keep approved unsubscribe mail in Inbox or move it to Junk after request acceptance",
+)
 def config_cmd(
     show: bool,
     ai: str | None,
     footer_scan: str | None,
     mode: str | None,
     engaged_marketing: str | None = None,
+    unwanted_mail: str | None = None,
 ):
     """View or modify configuration."""
     config = Config.load()
@@ -4603,7 +4663,14 @@ def config_cmd(
         config.save()
         console.print(f"Engaged marketing: {engaged_marketing}")
 
-    if show or (not ai and not mode and not footer_scan and not engaged_marketing):
+    if unwanted_mail:
+        config.move_unwanted_to_junk = unwanted_mail == "junk"
+        config.save()
+        console.print(f"Approved unwanted mail: {unwanted_mail}")
+
+    if show or (
+        not ai and not mode and not footer_scan and not engaged_marketing and not unwanted_mail
+    ):
         console.print("\n[header]Current Configuration[/header]")
         console.print(f"{_L} Config dir: {get_config_dir()}")
         console.print(f"{_L} AI enabled: {config.ai.enabled}")
@@ -4614,6 +4681,9 @@ def config_cmd(
         console.print(
             f"{_L} Engaged marketing: "
             f"{'review' if config.review_engaged_marketing else 'allow automatic actions'}"
+        )
+        console.print(
+            f"{_L} Approved unwanted mail: {'junk' if config.move_unwanted_to_junk else 'keep'}"
         )
         console.print(f"{_L} Footer scan: {config.footer_scan_enabled}")
         console.print(f"{_L} Unsubscribe contact consent: {config.permits_unsubscribe}")

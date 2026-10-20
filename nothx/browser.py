@@ -39,7 +39,9 @@ def _confirmed(text: str) -> bool:
     for line in re.findall(r"[^.!?\n]+[.!?]?", text):
         if "?" in line or re.search(r"\b(?:if|when|once|after|before|until)\b", line, re.I):
             continue
-        if CONFIRMED.search(line) or re.fullmatch(r"\s*already unsubscribed[.!]?\s*", line, re.I):
+        if CONFIRMED.match(line.strip()) or re.fullmatch(
+            r"\s*already unsubscribed[.!]?\s*", line, re.I
+        ):
             return True
     return False
 
@@ -85,16 +87,22 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
             or (_unsubscribe_target(request.url) and request.method == "POST")
             or (
                 clicked
-                and request.resource_type in {"xhr", "fetch"}
-                and (request.method == "POST" or _origin(request.url) == origin)
+                and (
+                    request.method != "GET" or request.resource_type in {"xhr", "fetch", "document"}
+                )
+                and (request.method != "GET" or _origin(request.url) == origin)
                 and not re.search(r"/(?:analytics|events|telemetry)/", urlsplit(request.url).path)
             )
         )
         try:
             if request.resource_type not in {"document", "script", "stylesheet", "xhr", "fetch"}:
+                if candidate:
+                    raise ValueError("Unsupported action resource")
                 route.abort()
                 return
             if request.resource_type == "document" and request.frame != page.main_frame:
+                if candidate:
+                    raise ValueError("Subframe action")
                 route.abort()
                 return
             requests += 1
@@ -196,11 +204,17 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
                                 "httpOnly": bool(cookie["httponly"]),
                             }
                             if cookie["max-age"]:
-                                saved["expires"] = max(1, time.time() + int(cookie["max-age"]))
+                                try:
+                                    saved["expires"] = max(1, time.time() + int(cookie["max-age"]))
+                                except ValueError:
+                                    pass
                             elif cookie["expires"]:
-                                saved["expires"] = max(
-                                    1, parsedate_to_datetime(cookie["expires"]).timestamp()
-                                )
+                                try:
+                                    saved["expires"] = max(
+                                        1, parsedate_to_datetime(cookie["expires"]).timestamp()
+                                    )
+                                except (ValueError, TypeError, OverflowError):
+                                    pass
                             context.add_cookies([saved])
                     headers["cookie"] = "; ".join(
                         f"{cookie['name']}={cookie['value']}"
@@ -211,7 +225,11 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
                 raise ValueError("Cross-origin navigation")
             if candidate:
                 if 200 <= response.status < 300:
-                    accepted_submit = True
+                    accepted_submit |= (
+                        request.method == "POST"
+                        or request.url.split("?", 1)[0] in approved_targets
+                        or _unsubscribe_target(request.url)
+                    )
                 else:
                     raise ValueError("Unsubscribe response was not accepted")
             content_type = response.content_type.split(";", 1)[0] + "; charset=utf-8"
@@ -246,7 +264,13 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
             context = browser.new_context(accept_downloads=False, service_workers="block")
             try:
                 context.route("**/*", route_request)
-                context.route_web_socket("**/*", lambda socket: socket.close())
+
+                def close_socket(socket: Any) -> None:
+                    nonlocal blocked_action
+                    blocked_action |= clicked
+                    socket.close()
+
+                context.route_web_socket("**/*", close_socket)
                 page = context.new_page()
                 context.on("page", lambda other: other.close() if other != page else None)
                 page.set_default_timeout(2000)
@@ -309,7 +333,7 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
                             ):
                                 return BrowserOutcome(False, "browser_scope_choice", submitted)
                             if form.count():
-                                target = urljoin(page.url, form.get_attribute("action") or page.url)
+                                target = form.evaluate("form => form.action")
                                 if _origin(target) != origin:
                                     return BrowserOutcome(False, "browser_scope_choice", submitted)
                                 approved_targets.add(target.split("#", 1)[0].split("?", 1)[0])

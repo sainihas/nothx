@@ -18,7 +18,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger("nothx.safefetch")
 
@@ -53,6 +53,8 @@ class FetchResponse:
     body: str
     final_url: str
     redirects: int
+    content_type: str = "text/html"
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 _SENSITIVE_HEADERS = frozenset(
@@ -163,6 +165,7 @@ def _open_request(request: urllib.request.Request, timeout: float):
         key: value
         for key, value in request.header_items()
         if key.casefold() not in _SENSITIVE_HEADERS
+        or (key.casefold() == "cookie" and getattr(request, "_nothx_allow_cookies", False))
     }
     request_headers["Connection"] = "close"
     selector = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
@@ -278,6 +281,31 @@ def _redacted_url(url: str) -> str:
     return redacted_url(url, include_scheme=False)
 
 
+def _browser_response_headers(response: object, *, include_cookies: bool = False) -> dict[str, str]:
+    excluded = {
+        "set-cookie",
+        "content-encoding",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "www-authenticate",
+        "proxy-authenticate",
+    }
+    headers = getattr(response, "headers", {})
+    result = {
+        key.casefold(): value
+        for key, value in headers.items()
+        if key.casefold() not in excluded and isinstance(value, str)
+    }
+    if include_cookies:
+        cookies = headers.get_all("Set-Cookie", []) if hasattr(headers, "get_all") else []
+        if cookies:
+            result["set-cookie"] = "\n".join(cookies)
+        elif cookie := headers.get("Set-Cookie"):
+            result["set-cookie"] = cookie
+    return result
+
+
 def safe_fetch(
     url: str,
     *,
@@ -289,6 +317,8 @@ def safe_fetch(
     max_body: int = DEFAULT_MAX_BODY,
     allow_http: bool = False,
     follow_redirects: bool = True,
+    return_redirects: bool = False,
+    allow_cookies: bool = False,
 ) -> FetchResponse:
     """Fetch a URL with SSRF protection, re-validating every redirect hop.
 
@@ -298,6 +328,8 @@ def safe_fetch(
         urllib.error.HTTPError: For non-redirect HTTP error statuses.
         urllib.error.URLError / OSError: For network failures.
     """
+    if allow_cookies and follow_redirects:
+        raise ValueError("Cookie transport requires caller-validated redirect hops")
     current_url = url
     current_method = method
     current_data = data
@@ -316,19 +348,36 @@ def safe_fetch(
         # urllib Request deliberately has no public extension metadata slot;
         # this private marker is local to this module and never serialized.
         request._nothx_validated_addresses = addresses  # type: ignore[attr-defined]
+        request._nothx_allow_cookies = allow_cookies  # type: ignore[attr-defined]
         try:
             with _open_request(request, timeout) as response:
-                body = response.read(max_body).decode("utf-8", errors="replace")
+                raw_body = response.read(max_body)
+                response_headers = getattr(response, "headers", {})
+                charset = (
+                    response_headers.get_content_charset()
+                    if hasattr(response_headers, "get_content_charset")
+                    else None
+                )
+                try:
+                    body = raw_body.decode(charset or "utf-8", errors="replace")
+                except LookupError:
+                    body = raw_body.decode("utf-8", errors="replace")
                 return FetchResponse(
                     status=response.getcode(),
                     body=body,
                     final_url=current_url,
                     redirects=redirects,
+                    content_type=getattr(response, "headers", {}).get("Content-Type", "text/html"),
+                    headers=_browser_response_headers(response, include_cookies=allow_cookies),
                 )
         except urllib.error.HTTPError as e:
             if e.code not in (301, 302, 303, 307, 308):
                 raise
             if not follow_redirects:
+                if return_redirects:
+                    headers = _browser_response_headers(e, include_cookies=allow_cookies)
+                    e.close()
+                    return FetchResponse(e.code, "", current_url, redirects, headers=headers)
                 raise SSRFBlockedError(
                     f"Redirect (HTTP {e.code}) not allowed for this request"
                 ) from e

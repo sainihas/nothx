@@ -171,6 +171,8 @@ Use `nothx cleanup --details` for candidate tables before review.
 | `nothx run --new-only` | Only scan new UIDs, skipping earlier undecided messages |
 | `nothx resolve ID --dry-run` | Refresh a saved subscription and preview usable sources |
 | `nothx resolve ID` | Finish a selected subscription; supports simple confirmation forms |
+| `nothx browser-setup` | Install the isolated browser runtime and enable JavaScript page completion |
+| `nothx config --browser-fallback off` | Disable browser page completion |
 | `nothx resolve ID --retry` | Explicitly allow one bounded retry of a failed/manual case |
 | `nothx resolve ID --completed` | Record provider confirmation you saw in the browser |
 | `nothx run --full-history` | Scan all history in Inbox and configured folders |
@@ -297,7 +299,7 @@ unsubscribe email.
 - Inbox cleanup is optional: `nothx config --unwanted-mail junk` moves approved, non-protected messages after the unsubscribe request is accepted. It also clears subsequent matching deliveries while verification is pending. Requests needing a manual step keep their source messages available. Mailbox consent is still required, failures remain visible, and moving to Junk does not prove the sender stopped mailing.
 - Body fetching is disabled by default. The optional footer scanner examines at most two inline text tails (64 KiB each, 128 KiB total) for authenticated list/bulk candidates or explicit commercial offers. It skips attachments, nested messages, images, scripts, and forms.
 - One-click POST requires compliant headers plus `$canunsubscribe` or a correlated passing DKIM signature that covers both unsubscribe headers. All outbound unsubscribe contact—including an explicitly opened browser page—and mailbox actions require separate, versioned consent.
-- HTTP requests are HTTPS-only, proxy/cookie/auth/referrer-free, redirect constrained, SSRF checked, and connected to an already validated public IP while preserving TLS hostname verification.
+- HTTP requests are HTTPS-only, proxy/auth/referrer-free, redirect constrained, SSRF checked, and connected to an already validated public IP while preserving TLS hostname verification. Ordinary requests carry no cookies; optional browser completion permits temporary cookies only on the unsubscribe page's origin.
 - Stored targets are fingerprints and hashed destination labels. Complete hosts, paths, queries, mailto recipients/bodies, and HTTP response bodies are excluded from normal history and exports.
 
 ### What an outcome means
@@ -434,3 +436,18 @@ for whole-list requests. A source-level opt-out stays requested: Nothx cannot di
 that stream from other mail sharing the address. Browser acknowledgements are atomic
 with execution claims, and they resolve prior ambiguity without permitting a replay
 to that ambiguous endpoint.
+
+### JavaScript unsubscribe pages
+
+Optional browser support can finish simple JavaScript confirmation pages through
+Nothx. With pipx, run `pipx inject nothx playwright`, then `nothx browser-setup`.
+New scans use the fallback automatically; use `nothx resolve ID --retry` for a
+previously pending page. A failed or uncertain submission is never silently replayed.
+
+The browser uses a fresh isolated context without your saved login. Temporary
+page cookies stay within the unsubscribe origin and are discarded afterward. Downloads,
+service workers, WebSockets, cross-origin submissions, and private-network requests
+are blocked. All page traffic uses the same pinned-address HTTPS fetcher as ordinary
+unsubscribe requests. Login, CAPTCHA, account deletion, broad opt-out choices and
+forms needing personal input remain manual. An accepted unsubscribe request and
+visible confirmation are both required; delivery still needs the normal post-grace scan.

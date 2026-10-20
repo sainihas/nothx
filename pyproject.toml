@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nothx"
-version = "0.1.15"
+version = "0.1.16"
 description = "Smart enough to say no."
 readme = "README.md"
 license = "MIT"
@@ -33,6 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+browser = ["playwright>=1.51"]
 # AI Providers (install the one you need)
 anthropic = ["anthropic>=0.40.0"]
 openai = ["openai>=1.0.0"]

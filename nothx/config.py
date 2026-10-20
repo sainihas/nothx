@@ -239,6 +239,7 @@ class Config:
     scan_days: int = 30
     scan_junk: bool = True
     review_engaged_marketing: bool = True
+    move_unwanted_to_junk: bool = False
     microsoft_client_id: str | None = None
     footer_scan_enabled: bool = False
     # Granted by default (see the CONSENT_REVOKED note above). Revoking stores
@@ -280,6 +281,7 @@ class Config:
             "scan_days": self.scan_days,
             "scan_junk": self.scan_junk,
             "review_engaged_marketing": self.review_engaged_marketing,
+            "move_unwanted_to_junk": self.move_unwanted_to_junk,
             "microsoft_client_id": self.microsoft_client_id,
             "footer_scan_enabled": self.footer_scan_enabled,
             "unsubscribe_consent_version": self.unsubscribe_consent_version,
@@ -355,6 +357,7 @@ class Config:
         config.scan_days = data.get("scan_days", 30)
         config.scan_junk = data.get("scan_junk", True)
         config.review_engaged_marketing = data.get("review_engaged_marketing", True)
+        config.move_unwanted_to_junk = data.get("move_unwanted_to_junk", False)
         config.microsoft_client_id = os.environ.get("NOTHX_MICROSOFT_CLIENT_ID") or data.get(
             "microsoft_client_id"
         )

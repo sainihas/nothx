@@ -3349,3 +3349,197 @@ def test_resolve_preview_shows_older_sources_beyond_twelve_rows(configured_cli):
         result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "UID 20" in result.output
+
+
+def test_accepted_request_cleans_only_approved_unprotected_locators(configured_cli):
+    from dataclasses import replace
+
+    from nothx.cli import _clean_unwanted_inbox
+
+    _, config = configured_cli
+    config.move_unwanted_to_junk = True
+    scan, classes = _subscription_scan(Action.UNSUB)
+    key = next(iter(classes))
+    header = scan.subscription_emails[key][0]
+    protected = replace(header, uid=102, subject="Your order receipt")
+    subscription, messages = _persist_subscription_records(
+        scan.subscription_stats[key], [header, protected], classes[key], policy_action="unsub"
+    )
+    request, _ = db.claim_unsubscribe_operation(subscription["id"], "request", "request-owner")
+    db.update_unsubscribe_operation_outcome(request["id"], "requested", claim_owner="request-owner")
+    before = db.get_subscription(subscription["id"])
+    junk = MailboxInfo("Junk", "Junk", attributes=(r"\Junk",))
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.discover_mailboxes.return_value = MailboxDiscovery(
+        mailboxes=(junk,), inbox=None, junk=junk, junk_candidates=(junk,)
+    )
+    connection.move_message_to_junk.return_value = MailboxActionResult(
+        MailboxActionOutcome.MOVED, header.message_ref, junk.wire_name
+    )
+    with patch("nothx.cli.IMAPConnection", return_value=connection):
+        assert _clean_unwanted_inbox(config, subscription, messages) == (1, 0)
+        assert _clean_unwanted_inbox(config, subscription, messages) == (0, 0)
+    connection.move_message_to_junk.assert_called_once_with(header.message_ref, junk)
+    assert db.get_subscription(subscription["id"]) == before
+    assert db.list_mailbox_actions()[0]["message_ref_id"] == messages[0][1]["id"]
+    assert _unsubscribe_operation_plan(before)[0] is False
+
+
+@pytest.mark.parametrize("state", ["needs_user", "failed", "no_consent", "disabled"])
+def test_cleanup_keeps_unresolved_sources_and_respects_consent(configured_cli, state):
+    from nothx.cli import _clean_unwanted_inbox
+
+    _, config = configured_cli
+    config.move_unwanted_to_junk = state != "disabled"
+    if state == "no_consent":
+        config.mailbox_mutation_consent_version = CONSENT_REVOKED
+    scan, classes = _subscription_scan(Action.UNSUB)
+    key = next(iter(classes))
+    subscription, messages = _persist_subscription_records(
+        scan.subscription_stats[key], scan.subscription_emails[key], classes[key]
+    )
+    operation, _ = db.claim_unsubscribe_operation(subscription["id"], "request", "owner")
+    db.update_unsubscribe_operation_outcome(
+        operation["id"],
+        state if state in {"needs_user", "failed"} else "requested",
+        claim_owner="owner",
+    )
+    with patch("nothx.cli.IMAPConnection") as connection:
+        assert _clean_unwanted_inbox(config, subscription, messages) == (0, 0)
+    connection.assert_not_called()
+
+
+def test_unwanted_mail_preference_round_trips(configured_cli):
+    runner, _ = configured_cli
+    assert runner.invoke(config_cmd, ["--unwanted-mail", "junk"]).exit_code == 0
+    assert Config.load().move_unwanted_to_junk
+    assert runner.invoke(config_cmd, ["--unwanted-mail", "keep"]).exit_code == 0
+    assert not Config.load().move_unwanted_to_junk
+
+
+def test_scan_clears_new_delivery_without_repeating_accepted_request(configured_cli):
+    from dataclasses import replace
+
+    runner, config = configured_cli
+    config.move_unwanted_to_junk = True
+    config.save()
+    scan, classes = _subscription_scan(Action.UNSUB)
+    key = next(iter(classes))
+    original = scan.subscription_emails[key][0]
+    junk = MailboxInfo("Junk", "Junk", attributes=(r"\Junk",))
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.discover_mailboxes.return_value = MailboxDiscovery(
+        mailboxes=(junk,), inbox=None, junk=junk, junk_candidates=(junk,)
+    )
+    connection.move_message_to_junk.side_effect = lambda locator, target: MailboxActionResult(
+        MailboxActionOutcome.MOVED, locator, target.wire_name
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classes),
+        patch("nothx.cli.IMAPConnection", return_value=connection),
+        patch(
+            "nothx.cli.unsubscribe_subscription",
+            return_value=UnsubResult(
+                success=True, method=UnsubMethod.GET, outcome=UnsubscribeOutcome.REQUESTED
+            ),
+        ) as unsubscribe,
+    ):
+        first = runner.invoke(run, ["--auto"])
+        assert first.exit_code == 0, first.output
+        newer = replace(original, uid=103, message_id="<sale-2@example>")
+        scan.subscription_emails[key] = [newer]
+        second = runner.invoke(run, ["--auto"])
+        assert second.exit_code == 0, second.output
+    unsubscribe.assert_called_once()
+    assert connection.move_message_to_junk.call_count == 2
+    assert {r["outcome"] for r in db.list_mailbox_actions()} == {"moved"}
+    assert len(db.list_unsubscribe_operations()) == 1
+    assert db.list_subscriptions()[0]["last_outcome"] == "requested"
+
+
+def test_source_acceptance_does_not_clean_other_messages(configured_cli):
+    from dataclasses import replace
+
+    from nothx.cli import _clean_unwanted_inbox
+
+    _, config = configured_cli
+    config.move_unwanted_to_junk = True
+    scan, classes = _subscription_scan(Action.UNSUB)
+    key = next(iter(classes))
+    header = scan.subscription_emails[key][0]
+    subscription, messages = _persist_subscription_records(
+        scan.subscription_stats[key], [header, replace(header, uid=102)], classes[key]
+    )
+    operation, _ = db.claim_unsubscribe_operation(
+        subscription["id"],
+        "source-request",
+        "owner",
+        verification_scope="source",
+        trigger_message_ref_id=messages[0][1]["id"],
+    )
+    db.update_unsubscribe_operation_outcome(operation["id"], "requested", claim_owner="owner")
+    with patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(1, 0)) as move:
+        assert _clean_unwanted_inbox(config, subscription, messages) == (1, 0)
+    assert move.call_args.kwargs["message_ids"] == {messages[0][1]["id"]}
+
+
+@pytest.mark.parametrize("message_id", ["<offer-73@example.com>", ""])
+def test_own_junk_move_is_not_provider_threat_and_does_not_hide_delivery(
+    configured_cli, message_id
+):
+    from dataclasses import replace
+
+    from nothx.cli import _clean_unwanted_inbox, _persisted_threat_action
+
+    _, config = configured_cli
+    config.move_unwanted_to_junk = True
+    scan, classes = _subscription_scan(Action.UNSUB)
+    key = next(iter(classes))
+    now = datetime.now(UTC)
+    header = replace(
+        scan.subscription_emails[key][0], date=now, received_at=now, message_id=message_id
+    )
+    sender = scan.subscription_stats[key]
+    subscription, messages = _persist_subscription_records(sender, [header], classes[key])
+    request, _ = db.claim_unsubscribe_operation(subscription["id"], "request", "owner")
+    db.update_unsubscribe_operation_outcome(
+        request["id"],
+        "requested",
+        requested_at=now - timedelta(days=4),
+        grace_until=now - timedelta(days=2),
+        claim_owner="owner",
+    )
+    junk = MailboxInfo("Junk", "Junk", attributes=(r"\Junk",))
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.discover_mailboxes.return_value = MailboxDiscovery(
+        mailboxes=(junk,), inbox=None, junk=junk, junk_candidates=(junk,)
+    )
+    connection.move_message_to_junk.return_value = MailboxActionResult(
+        MailboxActionOutcome.MOVED, header.message_ref, junk.wire_name
+    )
+    with patch("nothx.cli.IMAPConnection", return_value=connection):
+        assert _clean_unwanted_inbox(config, subscription, messages) == (1, 0)
+    copied = replace(header, mailbox_name="Junk", mailbox_role="junk", uid=901, keywords=("$Junk",))
+    copied.locally_cleaned = (
+        db.message_cleanup_key(
+            copied.account_key, copied.cleanup_identity, copied.sender_address, copied.received_at
+        )
+        in db.get_locally_cleaned_message_keys()
+    )
+    assert copied.locally_cleaned
+    _persist_subscription_records(sender, [copied], classes[key])
+    stats = _stats_for_emails(header.domain, [header, copied])
+    assert stats.junk_emails == stats.junk_keyword_emails == 0
+    assert _persisted_threat_action(subscription["id"], sender=stats) is None
+    db.upsert_mailbox_state(
+        header.account_key, "INBOX", "inbox", uidvalidity=44, last_uid=101, scan_complete=True
+    )
+    _reconcile_due_operations(config)
+    assert db.get_unsubscribe_operation(request["id"])["outcome"] == "ineffective"
+    copied.provider_threat = "phishing"
+    _persist_subscription_records(sender, [copied], classes[key])
+    assert _persisted_threat_action(subscription["id"]) is Action.REVIEW

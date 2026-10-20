@@ -9,10 +9,12 @@ from ..models import Action, Classification, EmailType, SenderStats
 from .ai import AIClassifier
 from .heuristics import (
     OPERATIONAL_SUBJECT_PATTERNS,
+    PERSONAL_MAIL_DOMAINS,
     SAFE_SENDER_PATTERNS,
     SAFE_SUBJECT_PATTERNS,
     SPAM_SUBJECT_PATTERNS,
     HeuristicScorer,
+    has_explicit_offer_subject,
     has_strong_cold_outreach_evidence,
 )
 from .patterns import PatternMatcher
@@ -349,6 +351,9 @@ class ClassificationEngine:
         return any(
             (
                 sender.has_unsubscribe,
+                sender.authenticated_emails > 0
+                and sender.domain.casefold() not in PERSONAL_MAIL_DOMAINS
+                and any(has_explicit_offer_subject(subject) for subject in sender.sample_subjects),
                 bool(sender.list_id),
                 sender.bulk_precedence,
                 sender.auto_submitted,

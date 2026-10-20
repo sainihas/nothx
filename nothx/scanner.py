@@ -13,7 +13,12 @@ if TYPE_CHECKING:
 
 from . import db
 from .authres import has_aligned_dkim_pass
-from .classifier.heuristics import has_promotional_subject, has_protected_subject
+from .classifier.heuristics import (
+    PERSONAL_MAIL_DOMAINS,
+    has_explicit_offer_subject,
+    has_promotional_subject,
+    has_protected_subject,
+)
 from .config import Config
 from .errors import ErrorCode, IMAPError
 from .footer import MAX_MESSAGES_PER_ACCOUNT
@@ -111,7 +116,14 @@ def _footer_eligible(header: EmailHeader, *, allow_header_method: bool = False) 
     return (
         header.mailbox_role == "inbox"
         and authenticated
-        and bulk_or_list
+        and (
+            bulk_or_list
+            or (
+                header.domain.casefold() not in PERSONAL_MAIL_DOMAINS
+                and has_explicit_offer_subject(header.subject)
+            )
+        )
+        and not has_protected_subject(header.subject)
         and (allow_header_method or not _has_usable_header_method(header))
         and not header.server_junk
         and not header.server_phishing
@@ -265,6 +277,7 @@ def _persist_headers(
                     flags=[*header.system_flags, *header.keywords, *header.gmail_labels],
                     auth_evidence=_auth_evidence(header),
                     bulk_evidence={
+                        "cleanup_identity": header.cleanup_identity,
                         "list_id": header.normalized_list_id,
                         "precedence": header.precedence,
                         "feedback_id": bool(header.feedback_id),
@@ -407,7 +420,9 @@ def _stats_for_emails(
             and not header.strongly_failed_authentication
             for header in emails
         ),
-        junk_emails=sum(header.mailbox_role == "junk" for header in emails),
+        junk_emails=sum(
+            header.mailbox_role == "junk" and not header.locally_cleaned for header in emails
+        ),
         junk_keyword_emails=sum(header.server_junk for header in emails),
         not_junk_emails=sum(header.server_not_junk for header in emails),
         phishing_emails=sum(header.server_phishing for header in emails),
@@ -557,7 +572,17 @@ def scan_inbox(
                                 )
                                 continue
                             headers.append(header)
+                        locally_cleaned = db.get_locally_cleaned_message_keys()
                         for header in headers:
+                            header.locally_cleaned = (
+                                db.message_cleanup_key(
+                                    account_key,
+                                    header.cleanup_identity,
+                                    header.sender_address,
+                                    header.received_at,
+                                )
+                                in locally_cleaned
+                            )
                             header.account_name = account_name
                             header.account_key = account_key
                         for header in (

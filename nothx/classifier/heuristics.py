@@ -89,6 +89,7 @@ PROMOTIONAL_SUBJECT_PATTERN = re.compile(
     r"|\b(?:weekly|monthly|daily)\s+newsletter\b|\bnewsletter:"
     r"|\b(?:exclusive|special|limited[ -]time)\s+offers?\b"
     r"|\bpromo(?:tional)?\s+code\b|\d+%\s*off\b"
+    r"|\btrade[ -]in\b[^\r\n]{0,50}\b\d+%\s+(?:bonus|extra)\b"
     r"|\bsave\s+(?:up to\s+)?(?:\d+%|[$£€]\s*\d+)",
     re.IGNORECASE,
 )
@@ -98,6 +99,29 @@ def has_promotional_subject(subject: str) -> bool:
     """Find explicit promotional content without deciding whether it is unwanted."""
     return not any(pattern.search(subject) for pattern in OPERATIONAL_SUBJECT_PATTERNS) and bool(
         PROMOTIONAL_SUBJECT_PATTERN.search(subject)
+    )
+
+
+PERSONAL_MAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "outlook.com",
+        "hotmail.com",
+        "live.com",
+        "icloud.com",
+        "me.com",
+        "yahoo.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+    }
+)
+
+
+def has_explicit_offer_subject(subject: str) -> bool:
+    return has_promotional_subject(subject) and bool(
+        re.search(r"\d+%|[$£€]\s*\d+|\b(?:shop now|coupon code|promo code)\b", subject, re.I)
     )
 
 

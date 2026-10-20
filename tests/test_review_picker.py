@@ -214,3 +214,22 @@ def test_saved_review_search_pages_and_finish_do_not_visit_every_sender():
     ]
     assert all(p.kwargs["default"] == "finish" for p in prompts)
     assert len(rows) == 1400
+
+
+def test_unknown_bulk_announcements_remain_visible_for_review():
+    _, sender, classification = row(email_type=EmailType.UNKNOWN)
+    sender.has_unsubscribe = False
+    sender.esp_name = "example-esp"
+    sender.sample_subjects = ["Introducing our new workspace"]
+    assert _is_marketing_candidate(sender, classification)
+    sender.protected_subject_emails = 1
+    sender.sample_subjects = ["Your payment receipt"]
+    assert not _is_marketing_candidate(sender, classification)
+
+
+def test_explicit_offer_from_named_sender_needs_no_list_headers():
+    _, sender, classification = row(email_type=EmailType.UNKNOWN)
+    sender.has_unsubscribe = False
+    sender.authenticated_emails = 1
+    sender.sample_subjects = ["Trade-in weekend: 25% bonus credit"]
+    assert _is_marketing_candidate(sender, classification)

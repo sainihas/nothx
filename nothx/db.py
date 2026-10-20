@@ -96,6 +96,7 @@ def init_db() -> None:
                 or not _column_exists(conn, "subscriptions", "policy_source")
                 or not _column_exists(conn, "message_refs", "promotional")
                 or not _column_exists(conn, "unsubscribe_operations", "verification_scope")
+                or not _column_exists(conn, "unsubscribe_operations", "affects_subscription")
                 or any(
                     not _column_exists(conn, "unsubscribe_operations", column)
                     for column in ("claim_owner", "claimed_at", "claim_expires_at")
@@ -309,6 +310,12 @@ def _migrate(conn: sqlite3.Connection, version: int | None = None) -> None:
     _add_column_if_missing(conn, "unsubscribe_operations", "claimed_at", "TEXT")
     _add_column_if_missing(conn, "unsubscribe_operations", "claim_expires_at", "TEXT")
     _add_column_if_missing(conn, "message_refs", "promotional", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(
+        conn,
+        "unsubscribe_operations",
+        "affects_subscription",
+        "INTEGER NOT NULL DEFAULT 1 CHECK (affects_subscription IN (0, 1))",
+    )
     had_verification_scope = _column_exists(conn, "unsubscribe_operations", "verification_scope")
     _add_column_if_missing(
         conn, "unsubscribe_operations", "verification_scope", "TEXT NOT NULL DEFAULT 'subscription'"
@@ -440,6 +447,7 @@ def _create_authoritative_tables(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             subscription_id INTEGER NOT NULL,
             operation_key TEXT NOT NULL CHECK (length(operation_key) > 0),
+            affects_subscription INTEGER NOT NULL DEFAULT 1 CHECK (affects_subscription IN (0, 1)),
             kind TEXT NOT NULL DEFAULT 'unsubscribe'
                 CHECK (kind IN ('unsubscribe', 'block', 'verification')),
             outcome TEXT CHECK (outcome IS NULL OR outcome IN
@@ -1501,6 +1509,7 @@ def claim_unsubscribe_operation(
     claim_owner: str,
     *,
     kind: str = "unsubscribe",
+    affects_subscription: bool = True,
     allow_consent_resume: bool = False,
     allow_no_contact_resume: bool = False,
     verification_scope: str = "subscription",
@@ -1517,6 +1526,8 @@ def claim_unsubscribe_operation(
     mailbox before it crashed. Returning ``acquired=False`` is therefore a
     hard no-side-effect decision for the caller.
     """
+    if not affects_subscription and kind != "block":
+        raise ValueError("Only mailbox operations can leave subscription outcomes unchanged")
     if verification_scope not in {"subscription", "source"}:
         raise ValueError("Invalid verification scope")
     operation_key = _validate_nonempty(operation_key, "operation key", 255)
@@ -1557,6 +1568,11 @@ def claim_unsubscribe_operation(
         ).fetchone()
         if existing is not None:
             current = dict(existing)
+            if (
+                current["kind"] != kind
+                or bool(current["affects_subscription"]) != affects_subscription
+            ):
+                raise ValueError("Operation scope does not match the existing claim")
             if current["outcome"] is not None:
                 if kind == "block" and current["outcome"] == "failed":
                     live_conflict = conn.execute(
@@ -1761,8 +1777,8 @@ def claim_unsubscribe_operation(
                 subscription_id, operation_key, kind, outcome,
                 trigger_message_ref_id, retry_generation, attempt_count,
                 started_at, claim_owner, claimed_at, claim_expires_at,
-                created_at, updated_at, verification_scope
-            ) VALUES (?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, verification_scope, affects_subscription
+            ) VALUES (?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 subscription_id,
@@ -1777,6 +1793,7 @@ def claim_unsubscribe_operation(
                 claimed,
                 claimed,
                 verification_scope,
+                int(affects_subscription),
             ),
         )
         row = conn.execute(
@@ -1792,12 +1809,13 @@ def list_unsubscribe_operations(
     account: str | None = None,
     outcome: str | None = None,
     limit: int = 500,
+    include_mailbox_cleanup: bool = False,
 ) -> list[dict[str, Any]]:
     if limit < 1:
         return []
     if outcome is not None and outcome not in _OPERATION_OUTCOMES:
         raise ValueError("Invalid grouped outcome")
-    clauses: list[str] = []
+    clauses: list[str] = [] if include_mailbox_cleanup else ["o.affects_subscription = 1"]
     params: list[Any] = []
     if subscription_id is not None:
         clauses.append("o.subscription_id = ?")
@@ -1908,7 +1926,7 @@ def _sync_subscription_outcome(
     conn: sqlite3.Connection, operation: dict[str, Any], outcome_at: str
 ) -> None:
     outcome = operation.get("outcome")
-    if outcome is None:
+    if outcome is None or not operation.get("affects_subscription", 1):
         return
     conn.execute(
         """
@@ -1959,6 +1977,7 @@ def list_operations_due_for_verification(
     timestamp = _iso_timestamp(as_of)
     clauses = [
         "o.outcome = 'requested'",
+        "o.affects_subscription = 1",
         "o.grace_until <= ?",
         "o.verification_scope = 'subscription'",
     ]
@@ -2416,11 +2435,43 @@ def reconcile_missing_mailbox_source(action_id: int) -> bool:
         return result.rowcount == 1
 
 
+def message_cleanup_key(
+    account: str,
+    message_id: str | None,
+    from_address: str | None,
+    received_at: datetime | str | None,
+) -> tuple[str, str, str, str] | None:
+    if not message_id or not from_address or received_at is None:
+        return None
+    return (account.casefold(), message_id, from_address.casefold(), _iso_timestamp(received_at))
+
+
+def get_locally_cleaned_message_keys(
+    *,
+    subscription_id: int | None = None,
+) -> set[tuple[str, str, str, str]]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT m.account,
+                      COALESCE(NULLIF(m.message_id, ''),
+                          CASE WHEN json_valid(m.bulk_evidence_json)
+                          THEN json_extract(m.bulk_evidence_json, '$.cleanup_identity') END),
+                      m.from_address, m.received_at
+               FROM mailbox_actions a
+               JOIN unsubscribe_operations o ON o.id = a.operation_id
+               JOIN message_refs m ON m.id = a.message_ref_id
+               WHERE o.affects_subscription = 0 AND a.outcome IN ('moved', 'partial')
+                 AND (? IS NULL OR o.subscription_id = ?)""",
+            (subscription_id, subscription_id),
+        ).fetchall()
+    return {key for row in rows if (key := message_cleanup_key(*row)) is not None}
+
+
 def get_operation_metrics(
     *, account: str | None = None, since: datetime | str | None = None
 ) -> dict[str, int]:
     """Return one count for every grouped outcome, including zeroes."""
-    clauses = ["o.outcome IS NOT NULL"]
+    clauses = ["o.outcome IS NOT NULL", "o.affects_subscription = 1"]
     params: list[Any] = []
     if account is not None:
         clauses.append("s.account = ?")

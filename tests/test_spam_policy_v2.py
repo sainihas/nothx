@@ -944,3 +944,52 @@ def test_promotional_history_keeps_latest_distinct_examples_bounded():
     sender = _stats_for_emails("shop.example", headers)
     assert sender.promotional_subject_emails == 5
     assert sender.promotional_sample_subjects == ["Sale four", "Sale three", "Sale two"]
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        ("Trade-in weekend: 25% bonus credit", True),
+        ("Can we trade in our meeting time?", False),
+        ("Annual bonus payment receipt", False),
+        ("Account security: password reset", False),
+    ],
+)
+def test_authenticated_explicit_offer_admitted_without_bulk_headers(
+    policy_engine, subject, expected
+):
+    from nothx.scanner import _footer_eligible
+
+    header = _parsed_fixture("authenticated_subscription.eml")
+    header.subject = subject
+    header.list_id = None
+    header.list_unsubscribe = None
+    header.list_unsubscribe_post = None
+    header.esp = None
+    header.precedence = None
+    header.feedback_id = None
+    header.provider_bulk = False
+    sender = SenderStats(
+        domain="sales.example", total_emails=1, authenticated_emails=1, sample_subjects=[subject]
+    )
+    assert policy_engine._is_ai_candidate(sender) is expected
+    assert _footer_eligible(header) is expected
+
+
+def test_offer_from_personal_mail_provider_stays_local(policy_engine):
+    from nothx.scanner import _footer_eligible
+
+    header = _parsed_fixture("authenticated_subscription.eml")
+    header.sender = "Friend <person@personal.example>"
+    header.subject = "Trade-in weekend: 25% bonus credit"
+    header.list_id = header.list_unsubscribe = header.precedence = header.esp = (
+        header.feedback_id
+    ) = None
+    header.provider_bulk = False
+    stats = _stats_for_emails(header.domain, [header])
+    with (
+        patch("nothx.classifier.engine.PERSONAL_MAIL_DOMAINS", {"personal.example"}),
+        patch("nothx.scanner.PERSONAL_MAIL_DOMAINS", {"personal.example"}),
+    ):
+        assert not policy_engine._is_ai_candidate(stats)
+        assert not _footer_eligible(header)

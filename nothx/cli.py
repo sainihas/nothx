@@ -518,7 +518,7 @@ def _persisted_threat_action(
     junk = bool(sender and (sender.junk_emails or sender.junk_keyword_emails))
     inbox = bool(sender and sender.clean_inbox_emails)
     not_junk = bool(sender and sender.not_junk_emails)
-    locally_cleaned = db.get_locally_cleaned_message_keys()
+    locally_cleaned = db.get_locally_cleaned_message_keys(subscription_id=subscription_id)
     for message in db.list_message_refs(subscription_id=subscription_id, limit=100_000):
         try:
             flags = json.loads(message.get("flags_json") or "[]")
@@ -1180,7 +1180,7 @@ def _clean_unwanted_inbox(
 ) -> tuple[int, int]:
     try:
         return _execute_inbox_cleanup(config, subscription, messages)
-    except ValueError:
+    except (ValueError, IMAPError, OSError, imaplib.IMAP4.error):
         console.print(
             "[warning]Inbox cleanup needs review; the unsubscribe result is preserved.[/warning]"
         )
@@ -3764,7 +3764,9 @@ def status(learning: bool):
         if not row["affects_subscription"] and row["outcome"] in {None, "failed", "needs_user"}
     ]
     if cleanup_operations:
-        console.print(f"\nInbox cleanup: {len(cleanup_operations)} unresolved operation(s)")
+        console.print(
+            f"\nInbox cleanup: {len(cleanup_operations)} recorded unsuccessful or pending attempt(s)"
+        )
         for row in cleanup_operations[:10]:
             console.print(
                 f"  Subscription #{row['subscription_id']}: "
@@ -4430,7 +4432,6 @@ def resolve_subscription(
         claim_owner=owner,
     )
     if result.success:
-        _clean_unwanted_inbox(config, subscription, messages)
         if not source_scoped:
             db.set_subscription_policy(subscription_id, "unsub")
         console.print(
@@ -4441,6 +4442,7 @@ def resolve_subscription(
                 else "Delivery is verified by a complete scan after 48 hours."
             )
         )
+        _clean_unwanted_inbox(config, subscription, messages)
     else:
         console.print(
             f"{escape(result.error or 'This provider needs a browser step')}\nRun `nothx open-unsubscribe {subscription_id}`. After provider confirmation, run `nothx resolve {subscription_id} --completed`."

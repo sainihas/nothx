@@ -2446,14 +2446,19 @@ def message_cleanup_key(
     return (account.casefold(), message_id, from_address.casefold(), _iso_timestamp(received_at))
 
 
-def get_locally_cleaned_message_keys() -> set[tuple[str, str, str, str]]:
+def get_locally_cleaned_message_keys(
+    *,
+    subscription_id: int | None = None,
+) -> set[tuple[str, str, str, str]]:
     with get_db() as conn:
         rows = conn.execute(
             """SELECT m.account, m.message_id, m.from_address, m.received_at
                FROM mailbox_actions a
                JOIN unsubscribe_operations o ON o.id = a.operation_id
                JOIN message_refs m ON m.id = a.message_ref_id
-               WHERE o.affects_subscription = 0 AND a.outcome IN ('moved', 'partial')"""
+               WHERE o.affects_subscription = 0 AND a.outcome IN ('moved', 'partial')
+                 AND (? IS NULL OR o.subscription_id = ?)""",
+            (subscription_id, subscription_id),
         ).fetchall()
     return {key for row in rows if (key := message_cleanup_key(*row)) is not None}
 

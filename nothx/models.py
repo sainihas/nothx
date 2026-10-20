@@ -210,6 +210,13 @@ class EmailHeader:
     locally_cleaned: bool = False
 
     @property
+    def cleanup_identity(self) -> str:
+        if self.message_id:
+            return self.message_id
+        material = "\0".join((self.sender_address, self.subject, self.date.isoformat()))
+        return "header-sha256:" + hashlib.sha256(material.encode()).hexdigest()
+
+    @property
     def is_bulk_precedence(self) -> bool:
         return (self.precedence or "").strip().lower() in ("bulk", "junk", "list")
 

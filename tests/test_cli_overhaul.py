@@ -3486,7 +3486,10 @@ def test_source_acceptance_does_not_clean_other_messages(configured_cli):
     assert move.call_args.kwargs["message_ids"] == {messages[0][1]["id"]}
 
 
-def test_own_junk_move_is_not_provider_threat_and_does_not_hide_delivery(configured_cli):
+@pytest.mark.parametrize("message_id", ["<offer-73@example.com>", ""])
+def test_own_junk_move_is_not_provider_threat_and_does_not_hide_delivery(
+    configured_cli, message_id
+):
     from dataclasses import replace
 
     from nothx.cli import _clean_unwanted_inbox, _persisted_threat_action
@@ -3496,7 +3499,9 @@ def test_own_junk_move_is_not_provider_threat_and_does_not_hide_delivery(configu
     scan, classes = _subscription_scan(Action.UNSUB)
     key = next(iter(classes))
     now = datetime.now(UTC)
-    header = replace(scan.subscription_emails[key][0], date=now, received_at=now)
+    header = replace(
+        scan.subscription_emails[key][0], date=now, received_at=now, message_id=message_id
+    )
     sender = scan.subscription_stats[key]
     subscription, messages = _persist_subscription_records(sender, [header], classes[key])
     request, _ = db.claim_unsubscribe_operation(subscription["id"], "request", "owner")
@@ -3521,7 +3526,7 @@ def test_own_junk_move_is_not_provider_threat_and_does_not_hide_delivery(configu
     copied = replace(header, mailbox_name="Junk", mailbox_role="junk", uid=901, keywords=("$Junk",))
     copied.locally_cleaned = (
         db.message_cleanup_key(
-            copied.account_key, copied.message_id, copied.sender_address, copied.received_at
+            copied.account_key, copied.cleanup_identity, copied.sender_address, copied.received_at
         )
         in db.get_locally_cleaned_message_keys()
     )

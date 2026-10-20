@@ -550,10 +550,17 @@ def _persisted_threat_action(
             or message.get("mailbox_role") == "junk"
             or bool(normalized & {"$junk", r"\junk", "spam", r"\spam"})
         )
+        cleanup_identity = message.get("message_id")
+        if not cleanup_identity:
+            try:
+                bulk = json.loads(message.get("bulk_evidence_json") or "{}")
+                cleanup_identity = bulk.get("cleanup_identity") if isinstance(bulk, dict) else None
+            except (ValueError, TypeError):
+                cleanup_identity = None
         if (
             db.message_cleanup_key(
                 message["account"],
-                message.get("message_id"),
+                cleanup_identity,
                 message.get("from_address"),
                 message.get("received_at"),
             )
@@ -685,6 +692,7 @@ def _persist_subscription_records(
                         "trusted": auth.trusted,
                     },
                     bulk_evidence={
+                        "cleanup_identity": header.cleanup_identity,
                         "list_id": header.normalized_list_id,
                         "precedence": header.precedence,
                         "feedback_id": bool(header.feedback_id),

@@ -277,6 +277,7 @@ def _persist_headers(
                     flags=[*header.system_flags, *header.keywords, *header.gmail_labels],
                     auth_evidence=_auth_evidence(header),
                     bulk_evidence={
+                        "cleanup_identity": header.cleanup_identity,
                         "list_id": header.normalized_list_id,
                         "precedence": header.precedence,
                         "feedback_id": bool(header.feedback_id),
@@ -576,7 +577,7 @@ def scan_inbox(
                             header.locally_cleaned = (
                                 db.message_cleanup_key(
                                     account_key,
-                                    header.message_id,
+                                    header.cleanup_identity,
                                     header.sender_address,
                                     header.received_at,
                                 )

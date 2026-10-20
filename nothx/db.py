@@ -2452,7 +2452,11 @@ def get_locally_cleaned_message_keys(
 ) -> set[tuple[str, str, str, str]]:
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT m.account, m.message_id, m.from_address, m.received_at
+            """SELECT m.account,
+                      COALESCE(NULLIF(m.message_id, ''),
+                          CASE WHEN json_valid(m.bulk_evidence_json)
+                          THEN json_extract(m.bulk_evidence_json, '$.cleanup_identity') END),
+                      m.from_address, m.received_at
                FROM mailbox_actions a
                JOIN unsubscribe_operations o ON o.id = a.operation_id
                JOIN message_refs m ON m.id = a.message_ref_id

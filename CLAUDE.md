@@ -86,7 +86,10 @@ def new_command(flag: bool):
 - Use parameterized queries for SQLite
 
 ### Don't:
-- Read email bodies — only headers (From, Subject, Date, List-Unsubscribe)
+- Fetch bodies during default scans — use headers (From, Subject, Date, List-Unsubscribe).
+  When the user enables footer scanning, the bounded local fallback may inspect
+  authenticated list/bulk mail and explicit commercial offers. Never send footer
+  content to AI; keep attachment, personal-provider, and protected-mail exclusions.
 - Log sensitive data (passwords, API keys)
 - Auto-unsubscribe protected domains (banks, .gov, healthcare)
 - Crash on external failures

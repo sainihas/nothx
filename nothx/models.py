@@ -52,6 +52,7 @@ class UnsubMethod(Enum):
 
     ONE_CLICK = "one-click"
     GET = "get"
+    BROWSER = "browser"
     MAILTO = "mailto"
 
 

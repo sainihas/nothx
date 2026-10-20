@@ -6,6 +6,8 @@ import imaplib
 import json
 import logging
 import re
+import subprocess
+import sys
 import uuid
 import webbrowser
 from collections.abc import Iterator
@@ -4675,6 +4677,38 @@ def schedule(monthly: bool, weekly: bool, daily: bool, off: bool, show_status: b
         console.print(f"[red]{msg}[/red]")
 
 
+@main.command("browser-setup")
+def browser_setup() -> None:
+    """Install the isolated browser runtime and enable page completion."""
+    import importlib.util
+
+    if importlib.util.find_spec("playwright") is None:
+        raise click.ClickException(
+            "Install browser support first: `pipx inject nothx playwright`. Then run this command again."
+        )
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium", "--only-shell"],
+            check=True,
+        )
+        sync_api = importlib.import_module("playwright.sync_api")
+        with sync_api.sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=True, chromium_sandbox=True, timeout=15_000
+            )
+            browser.close()
+    except Exception:
+        raise click.ClickException(
+            "Browser installation or launch failed; fallback remains unchanged"
+        ) from None
+    config = Config.load()
+    config.browser_fallback_enabled = True
+    config.save()
+    console.print(
+        "Browser fallback enabled. Pending confirmation pages can use `nothx resolve ID --retry`."
+    )
+
+
 @main.command("config")
 @click.option("--show", is_flag=True, help="Show current config")
 @click.option("--ai", type=click.Choice(["on", "off"]), help="Enable/disable AI")
@@ -4692,6 +4726,11 @@ def schedule(monthly: bool, weekly: bool, daily: bool, off: bool, show_status: b
     help="Review or allow automatic actions on marketing with at least 25% marked read",
 )
 @click.option(
+    "--browser-fallback",
+    type=click.Choice(["on", "off"]),
+    help="Enable/disable isolated browser completion after browser-setup",
+)
+@click.option(
     "--unwanted-mail",
     type=click.Choice(["keep", "junk"]),
     help="Keep approved unsubscribe mail in Inbox or move it to Junk after request acceptance",
@@ -4703,6 +4742,7 @@ def config_cmd(
     mode: str | None,
     engaged_marketing: str | None = None,
     unwanted_mail: str | None = None,
+    browser_fallback: str | None = None,
 ):
     """View or modify configuration."""
     config = Config.load()
@@ -4727,6 +4767,11 @@ def config_cmd(
         config.review_engaged_marketing = engaged_marketing == "review"
         config.save()
         console.print(f"Engaged marketing: {engaged_marketing}")
+
+    if browser_fallback:
+        config.browser_fallback_enabled = browser_fallback == "on"
+        config.save()
+        console.print(f"Browser fallback: {browser_fallback}")
 
     if unwanted_mail:
         config.move_unwanted_to_junk = unwanted_mail == "junk"
@@ -4754,6 +4799,7 @@ def config_cmd(
         console.print(
             f"{_L} Approved unwanted mail: {'junk' if config.move_unwanted_to_junk else 'keep'}"
         )
+        console.print(f"{_L} Browser fallback: {config.browser_fallback_enabled}")
         console.print(f"{_L} Footer scan: {config.footer_scan_enabled}")
         console.print(f"{_L} Unsubscribe contact consent: {config.permits_unsubscribe}")
         console.print(f"{_L} Mailbox mutation consent: {config.permits_mailbox_mutation}")

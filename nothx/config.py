@@ -242,6 +242,7 @@ class Config:
     move_unwanted_to_junk: bool = False
     microsoft_client_id: str | None = None
     footer_scan_enabled: bool = False
+    browser_fallback_enabled: bool = False
     # Granted by default (see the CONSENT_REVOKED note above). Revoking stores
     # CONSENT_REVOKED; anything else — including the version constant — permits.
     unsubscribe_consent_version: int = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
@@ -284,6 +285,7 @@ class Config:
             "move_unwanted_to_junk": self.move_unwanted_to_junk,
             "microsoft_client_id": self.microsoft_client_id,
             "footer_scan_enabled": self.footer_scan_enabled,
+            "browser_fallback_enabled": self.browser_fallback_enabled,
             "unsubscribe_consent_version": self.unsubscribe_consent_version,
             "mailbox_mutation_consent_version": self.mailbox_mutation_consent_version,
             "scan_bulk_without_unsubscribe": self.scan_bulk_without_unsubscribe,
@@ -362,6 +364,7 @@ class Config:
             "microsoft_client_id"
         )
         config.footer_scan_enabled = data.get("footer_scan_enabled", False)
+        config.browser_fallback_enabled = data.get("browser_fallback_enabled", False)
         config.unsubscribe_consent_version = data.get(
             "unsubscribe_consent_version", CURRENT_UNSUBSCRIBE_CONSENT_VERSION
         )

@@ -393,7 +393,11 @@ def unsubscribe_subscription(
             else:
                 result = _execute_mailto(target, account, config)
         else:
-            result = _execute_get(target)
+            result = (
+                _execute_get(target, browser_fallback=True)
+                if config.browser_fallback_enabled
+                else _execute_get(target)
+            )
 
         # Only redacted metadata crosses the executor boundary.
         result.target_display = _redact_target(target)
@@ -834,7 +838,7 @@ def _execute_one_click(url: str) -> UnsubResult:
         )
 
 
-def _execute_get(url: str) -> UnsubResult:
+def _execute_get(url: str, *, browser_fallback: bool = False) -> UnsubResult:
     """Execute GET request to unsubscribe URL (last-resort method)."""
     limited = _rate_limited(UnsubMethod.GET)
     if limited:
@@ -920,6 +924,29 @@ def _execute_get(url: str) -> UnsubResult:
                 result, "needs_user", "ambiguous_confirmation", ambiguous_send=True
             )
         if needs_confirmation:
+            if browser_fallback:
+                from .browser import complete_unsubscribe
+
+                browser_result = complete_unsubscribe(response.final_url)
+                if not browser_result.ambiguous_send and browser_result.error_code in {
+                    "browser_not_installed",
+                    "browser_unavailable",
+                }:
+                    result.error = "Browser support is unavailable; run `nothx browser-setup`"
+                    return _mark_attempt(result, "needs_user", "interactive_response")
+                return _mark_attempt(
+                    UnsubResult(
+                        success=browser_result.success,
+                        method=UnsubMethod.BROWSER,
+                        needs_confirmation=not browser_result.success,
+                        error=None
+                        if browser_result.success
+                        else "Browser confirmation needs review",
+                    ),
+                    "accepted" if browser_result.success else "needs_user",
+                    browser_result.error_code,
+                    ambiguous_send=browser_result.ambiguous_send,
+                )
             return _mark_attempt(result, "needs_user", "interactive_response")
         retryable = _retryable_http_status(response.status)
         return _mark_attempt(

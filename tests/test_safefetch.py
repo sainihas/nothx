@@ -104,6 +104,46 @@ def _redirect(code: int, location: str) -> urllib.error.HTTPError:
 
 
 class TestSafeFetch:
+    def test_browser_transport_preserves_redirect_and_temporary_cookies(self, monkeypatch):
+        response = _redirect(303, "/confirmed")
+        response.headers["Set-Cookie"] = "session=synthetic; Secure; HttpOnly"
+        response.headers["Access-Control-Allow-Origin"] = "https://news.example"
+        monkeypatch.setattr(safefetch, "_validate_host", lambda host: ("93.184.216.34",))
+
+        def redirect(*args):
+            raise response
+
+        monkeypatch.setattr(safefetch, "_open_request", redirect)
+        result = safe_fetch(
+            "https://news.example/unsubscribe",
+            method="POST",
+            follow_redirects=False,
+            return_redirects=True,
+            allow_cookies=True,
+        )
+        assert result.status == 303
+        assert result.headers["location"] == "/confirmed"
+        assert result.headers["set-cookie"] == "session=synthetic; Secure; HttpOnly"
+        assert result.headers["access-control-allow-origin"] == "https://news.example"
+
+    @pytest.mark.parametrize("charset", ["iso-8859-1", "unknown-charset"])
+    def test_response_charset_and_default_cookie_isolation(self, monkeypatch, charset):
+        import email.message
+
+        response = _FakeResponse(body=b"caf\xe9")
+        response.headers = email.message.Message()
+        response.headers["Content-Type"] = f"text/html; charset={charset}"
+        response.headers["Set-Cookie"] = "session=synthetic"
+        monkeypatch.setattr(safefetch, "_validate_host", lambda host: ("93.184.216.34",))
+        monkeypatch.setattr(safefetch, "_open_request", lambda *args: response)
+        result = safe_fetch("https://news.example/unsubscribe")
+        assert result.body == ("café" if charset == "iso-8859-1" else "caf�")
+        assert "set-cookie" not in result.headers
+
+    def test_cookies_cannot_follow_redirects_implicitly(self):
+        with pytest.raises(ValueError, match="caller-validated"):
+            safe_fetch("https://news.example/unsubscribe", allow_cookies=True)
+
     def test_connect_uses_validated_ip_and_strips_sensitive_context(self, monkeypatch):
         """Production transport must not resolve the hostname a second time."""
         captured = {}

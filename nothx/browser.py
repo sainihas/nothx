@@ -5,12 +5,13 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from importlib import import_module
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-from .safefetch import safe_fetch
+from .safefetch import ResolutionError, SSRFBlockedError, safe_fetch
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ def _origin(url: str) -> tuple[str, str | None, int]:
 
 
 def _confirmed(text: str) -> bool:
-    for line in text.splitlines():
+    for line in re.findall(r"[^.!?\n]+[.!?]?", text):
         if "?" in line or re.search(r"\b(?:if|when|once|after|before|until)\b", line, re.I):
             continue
         if CONFIRMED.search(line) or re.fullmatch(r"\s*already unsubscribed[.!]?\s*", line, re.I):
@@ -67,6 +68,7 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
     total_bytes = 0
     submitted = False
     visited = False
+    page_started = False
     blocked = False
     blocked_action = False
     accepted_submit = False
@@ -78,12 +80,21 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
         nonlocal requests, total_bytes, submitted, blocked, blocked_action, accepted_submit
         nonlocal navigation
         request = route.request
-        candidate = request.url in approved_targets or (
-            _unsubscribe_target(request.url)
-            and (request.method == "POST" or request.resource_type in {"xhr", "fetch"})
+        candidate = (
+            request.url.split("?", 1)[0] in approved_targets
+            or (_unsubscribe_target(request.url) and request.method == "POST")
+            or (
+                clicked
+                and request.resource_type in {"xhr", "fetch"}
+                and (request.method == "POST" or _origin(request.url) == origin)
+                and not re.search(r"/(?:analytics|events|telemetry)/", urlsplit(request.url).path)
+            )
         )
         try:
             if request.resource_type not in {"document", "script", "stylesheet", "xhr", "fetch"}:
+                route.abort()
+                return
+            if request.resource_type == "document" and request.frame != page.main_frame:
                 route.abort()
                 return
             requests += 1
@@ -98,10 +109,10 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
                 request.method == "POST" or request.resource_type == "document"
             ) and target_origin != origin:
                 raise ValueError("Cross-origin action")
-            if (
-                candidate
-                or request.method == "POST"
-                or (clicked and request.resource_type in {"xhr", "fetch"})
+            previously_submitted = submitted
+            if candidate or (
+                request.method == "POST"
+                and not re.search(r"/(?:analytics|events|telemetry)/", urlsplit(request.url).path)
             ):
                 submitted = True
             request_headers = request.all_headers()
@@ -128,18 +139,23 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
                     requests += 1
                 if requests > 80 or total_bytes > 16 * 1024 * 1024 or time.monotonic() >= deadline:
                     raise ValueError("Browser request budget exhausted")
-                response = safe_fetch(
-                    target,
-                    method=method,
-                    data=data,
-                    headers=headers,
-                    timeout=max(0.1, min(10, deadline - time.monotonic())),
-                    max_body=2 * 1024 * 1024,
-                    allow_http=False,
-                    follow_redirects=False,
-                    return_redirects=True,
-                    allow_cookies=target_origin == origin,
-                )
+                try:
+                    response = safe_fetch(
+                        target,
+                        method=method,
+                        data=data,
+                        headers=headers,
+                        timeout=max(0.1, min(10, deadline - time.monotonic())),
+                        max_body=2 * 1024 * 1024,
+                        allow_http=False,
+                        follow_redirects=False,
+                        return_redirects=True,
+                        allow_cookies=target_origin == origin,
+                    )
+                except (SSRFBlockedError, ResolutionError):
+                    if hop == 0:
+                        submitted = previously_submitted
+                    raise
                 total_bytes += len(response.body.encode())
                 if not 300 <= response.status < 400:
                     break
@@ -152,7 +168,7 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
                 ):
                     raise ValueError("Unsafe or exhausted redirect")
                 if candidate:
-                    approved_targets.add(destination)
+                    approved_targets.add(destination.split("?", 1)[0])
                 if response.status == 303 or (response.status in {301, 302} and method == "POST"):
                     method, data = "GET", None
                 if request.resource_type == "document":
@@ -170,9 +186,22 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
                         cookies = SimpleCookie()
                         cookies.load(line)
                         for cookie in cookies.values():
-                            context.add_cookies(
-                                [{"name": cookie.key, "value": cookie.value, "url": target}]
-                            )
+                            parsed = urlsplit(target)
+                            saved: dict[str, Any] = {
+                                "name": cookie.key,
+                                "value": cookie.value,
+                                "domain": parsed.hostname,
+                                "path": cookie["path"] or parsed.path.rsplit("/", 1)[0] or "/",
+                                "secure": bool(cookie["secure"]),
+                                "httpOnly": bool(cookie["httponly"]),
+                            }
+                            if cookie["max-age"]:
+                                saved["expires"] = max(1, time.time() + int(cookie["max-age"]))
+                            elif cookie["expires"]:
+                                saved["expires"] = max(
+                                    1, parsedate_to_datetime(cookie["expires"]).timestamp()
+                                )
+                            context.add_cookies([saved])
                     headers["cookie"] = "; ".join(
                         f"{cookie['name']}={cookie['value']}"
                         for cookie in context.cookies(destination)
@@ -221,6 +250,7 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
                 page = context.new_page()
                 context.on("page", lambda other: other.close() if other != page else None)
                 page.set_default_timeout(2000)
+                page_started = True
                 page.goto(
                     url,
                     wait_until="domcontentloaded",
@@ -228,62 +258,65 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
                 )
                 visited = True
                 while time.monotonic() < deadline:
-                    if navigation:
-                        target, navigation = navigation, None
-                        page.goto(
-                            target,
-                            wait_until="domcontentloaded",
-                            timeout=max(1, (deadline - time.monotonic()) * 1000),
+                    try:
+                        if navigation:
+                            target, navigation = navigation, None
+                            page.goto(
+                                target,
+                                wait_until="domcontentloaded",
+                                timeout=max(1, (deadline - time.monotonic()) * 1000),
+                            )
+                            continue
+                        text = page.locator("body").inner_text(timeout=2000)
+                        gates = page.locator(
+                            'input[type="password"]:visible, iframe[src*="captcha"]:visible, [data-sitekey]:visible'
                         )
-                        continue
-                    text = page.locator("body").inner_text(timeout=2000)
-                    gates = page.locator(
-                        'input[type="password"]:visible, iframe[src*="captcha"]:visible, [data-sitekey]:visible'
-                    )
-                    if gates.count() or (
-                        not clicked
-                        and not accepted_submit
-                        and re.search(
-                            r"complete (?:the|a) captcha|verify (?:that )?you are human|sign in to|log in to|login required",
-                            text,
-                            re.I,
-                        )
-                    ):
-                        return BrowserOutcome(False, "browser_user_interaction", submitted)
-                    buttons = page.get_by_role("button", name=BUTTON_NAME).filter(visible=True)
-                    if (
-                        accepted_submit
-                        and not blocked_action
-                        and _confirmed(text)
-                        and (
-                            buttons.count() == 0
-                            or (buttons.count() == 1 and not buttons.first.is_enabled())
-                        )
-                    ):
-                        return BrowserOutcome(True)
-                    if not clicked and buttons.count() == 1:
-                        button = buttons.first
-                        form = button.locator("xpath=ancestor::form[1]")
+                        if gates.count() or (
+                            not clicked
+                            and not accepted_submit
+                            and re.search(
+                                r"complete (?:the|a) captcha|verify (?:that )?you are human|(?:sign|log) in to unsubscribe|login required",
+                                text,
+                                re.I,
+                            )
+                        ):
+                            return BrowserOutcome(False, "browser_user_interaction", submitted)
+                        buttons = page.get_by_role("button", name=BUTTON_NAME).filter(visible=True)
                         if (
-                            form.count()
-                            and form.locator(
-                                'input:visible:not([type="submit"]):not([type="button"]):not([readonly]):not([disabled]), select:visible, textarea:visible'
-                            ).count()
+                            accepted_submit
+                            and not blocked_action
+                            and _confirmed(text)
+                            and (
+                                buttons.count() == 0
+                                or (buttons.count() == 1 and not buttons.first.is_enabled())
+                            )
                         ):
-                            return BrowserOutcome(False, "browser_preference_choice", submitted)
-                        if re.search(
-                            r"delete (?:your )?account|close (?:your )?account|all (?:emails|communications|messages)",
-                            text,
-                            re.I,
-                        ):
-                            return BrowserOutcome(False, "browser_scope_choice", submitted)
-                        if form.count():
-                            target = urljoin(page.url, form.get_attribute("action") or page.url)
-                            if _origin(target) != origin:
+                            return BrowserOutcome(True)
+                        if not clicked and buttons.count() == 1:
+                            button = buttons.first
+                            form = button.locator("xpath=ancestor::form[1]")
+                            if (
+                                form.count()
+                                and form.locator(
+                                    'input:visible:not([type="submit"]):not([type="button"]):not([readonly]):not([disabled]), select:visible, textarea:visible'
+                                ).count()
+                            ):
+                                return BrowserOutcome(False, "browser_preference_choice", submitted)
+                            if re.search(
+                                r"delete (?:your )?account|close (?:your )?account|all (?:emails|communications|messages)",
+                                text,
+                                re.I,
+                            ):
                                 return BrowserOutcome(False, "browser_scope_choice", submitted)
-                            approved_targets.add(target.split("#", 1)[0])
-                        clicked = True
-                        button.click(timeout=2000)
+                            if form.count():
+                                target = urljoin(page.url, form.get_attribute("action") or page.url)
+                                if _origin(target) != origin:
+                                    return BrowserOutcome(False, "browser_scope_choice", submitted)
+                                approved_targets.add(target.split("#", 1)[0].split("?", 1)[0])
+                            clicked = True
+                            button.click(timeout=2000)
+                    except getattr(sync_api, "Error", ()):
+                        pass
                     page.wait_for_timeout(250)
                 return BrowserOutcome(
                     False, "browser_blocked" if blocked else "browser_unconfirmed", submitted
@@ -294,6 +327,10 @@ def complete_unsubscribe(url: str) -> BrowserOutcome:
     except Exception:
         return BrowserOutcome(
             False,
-            "browser_unconfirmed" if visited or submitted else "browser_unavailable",
+            "browser_unconfirmed"
+            if visited or submitted
+            else "browser_page_failed"
+            if page_started
+            else "browser_unavailable",
             submitted,
         )

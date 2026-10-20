@@ -10,7 +10,14 @@ from nothx.unsubscriber import _execute_get
 
 
 @pytest.mark.parametrize(
-    "text", ["You have been unsubscribed", "You've been unsubscribed", "Already unsubscribed"]
+    "text",
+    [
+        "You have been unsubscribed",
+        "You've been unsubscribed",
+        "Already unsubscribed",
+        "You have been unsubscribed. Changed your mind? Resubscribe.",
+        "You have been unsubscribed. Allow 10 days before changes take effect.",
+    ],
 )
 def test_browser_confirmation_assertions(text):
     assert _confirmed(text)
@@ -244,3 +251,43 @@ def test_missing_browser_preserves_get_retry_semantics(error):
     assert result.method is UnsubMethod.GET
     assert result._error_code == "interactive_response"
     assert not result._ambiguous_send
+
+
+@pytest.mark.parametrize("post_status", [200, 403])
+def test_state_get_cannot_mask_failed_generic_submission(post_status):
+    api, _, _, context, page = fake_browser()
+    page.locator("body").inner_text.side_effect = [
+        "Unsubscribe",
+        "You have been unsubscribed. Changed your mind?",
+    ]
+    buttons = page.get_by_role.return_value.filter.return_value
+    buttons.count.side_effect = [1, 0]
+    buttons.first.locator.return_value.count.return_value = 0
+    page.wait_for_timeout.side_effect = [None, TimeoutError("test deadline")]
+    routes = []
+    for path, method in [("/api/unsubscribe/state", "GET"), ("/api/preferences", "POST")]:
+        route = MagicMock()
+        route.request = SimpleNamespace(
+            url="https://news.example" + path,
+            method=method,
+            resource_type="fetch",
+            headers={},
+            post_data_buffer=None,
+        )
+        route.request.all_headers = lambda: {}
+        routes.append(route)
+    page.goto.side_effect = lambda *args, **kwargs: context.route.call_args.args[1](routes[0])
+    buttons.first.click.side_effect = lambda **kwargs: context.route.call_args.args[1](routes[1])
+    with (
+        patch("nothx.browser.import_module", return_value=api),
+        patch(
+            "nothx.browser.safe_fetch",
+            side_effect=[
+                FetchResponse(200, "{}", routes[0].request.url, 0),
+                FetchResponse(post_status, "{}", routes[1].request.url, 0),
+            ],
+        ),
+    ):
+        result = complete_unsubscribe("https://news.example/unsubscribe")
+    assert result.success == (post_status == 200)
+    assert result.ambiguous_send == (post_status != 200)

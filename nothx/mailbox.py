@@ -582,6 +582,7 @@ def move_uid_to_junk(
             locator,
             destination,
             method="uid-move",
+            retryable=False,
             junk_keyword_set=set_junk,
             not_junk_keyword_removed=removed_not_junk,
             error="UID MOVE failed; COPY fallback suppressed because completion is ambiguous",

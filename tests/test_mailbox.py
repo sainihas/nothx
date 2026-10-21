@@ -302,6 +302,7 @@ class TestMoveToJunk:
         client.command_status["MOVE"] = "NO"
         result = move_uid_to_junk(client, locator(), junk())
         assert result.outcome is MailboxActionOutcome.FAILED
+        assert result.retryable is False
         assert all(command != "COPY" for command, _ in client.commands)
 
     def test_ambiguous_move_exception_is_non_retryable(self) -> None:

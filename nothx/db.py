@@ -342,6 +342,12 @@ def _migrate(conn: sqlite3.Connection, version: int | None = None) -> None:
             "UPDATE mailbox_actions SET retryable = 0 WHERE outcome IN ('partial', 'failed')"
         )
     _create_authoritative_indexes(conn)
+    conn.execute(
+        "UPDATE mailbox_actions SET retryable = 0 "
+        "WHERE action = 'move_to_junk' AND outcome = 'failed' AND retryable = 1 "
+        "AND detail_redacted = ?",
+        ("UID MOVE failed; COPY fallback suppressed because completion is ambiguous",),
+    )
 
     if version < 2:
         _migrate_explicit_legacy_overrides(conn)
@@ -2416,8 +2422,23 @@ def list_mailbox_actions(
         return [dict(row) for row in rows]
 
 
+def list_unresolved_mailbox_sources(account: str) -> list[dict[str, Any]]:
+    with get_db() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                """SELECT a.id, m.account, m.mailbox, m.uidvalidity, m.uid
+                   FROM mailbox_actions a JOIN message_refs m ON m.id = a.message_ref_id
+                   WHERE m.account = ? AND m.mailbox_role = 'inbox'
+                     AND a.action = 'move_to_junk' AND a.dry_run = 0
+                     AND a.outcome IN ('partial', 'failed') AND a.retryable = 0""",
+                (account,),
+            ).fetchall()
+        ]
+
+
 def reconcile_missing_mailbox_source(action_id: int) -> bool:
-    """Close a partial move after the caller proves its exact source UID absent.
+    """Close an uncertain move after the caller proves its exact source UID absent.
 
     This records observation only; it must never authorize replaying COPY or
     MOVE. The caller must freshly verify the original UIDVALIDITY as well.
@@ -2429,9 +2450,26 @@ def reconcile_missing_mailbox_source(action_id: int) -> bool:
                    detail_redacted = 'Source absence verified without replaying mailbox mutation',
                    completed_at = ?
                WHERE id = ? AND action = 'move_to_junk'
-                 AND outcome = 'partial' AND retryable = 0""",
+                 AND outcome IN ('partial', 'failed') AND retryable = 0 AND dry_run = 0""",
             (_iso_timestamp(), action_id),
         )
+        if result.rowcount:
+            timestamp = _iso_timestamp()
+            conn.execute(
+                """UPDATE unsubscribe_operations
+                   SET outcome = 'blocked', error_code = NULL,
+                       detail_redacted = 'Source absence verified; destination unconfirmed',
+                       completed_at = ?, updated_at = ?
+                   WHERE id = (SELECT operation_id FROM mailbox_actions WHERE id = ?)
+                     AND affects_subscription = 0 AND outcome IN ('failed', 'needs_user')
+                     AND claim_owner IS NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM mailbox_actions a
+                         WHERE a.operation_id = unsubscribe_operations.id
+                           AND a.outcome NOT IN ('moved', 'already_junk', 'not_found')
+                     )""",
+                (timestamp, timestamp, action_id),
+            )
         return result.rowcount == 1
 
 

@@ -1160,3 +1160,64 @@ def test_mailbox_cleanup_does_not_replace_unsubscribe_state_or_metrics(state_db)
     assert db.get_operation_metrics()["blocked"] == 0
     with pytest.raises(ValueError, match="scope"):
         db.claim_unsubscribe_operation(subscription["id"], "cleanup", "other", kind="block")
+
+
+def test_legacy_ambiguous_move_is_terminal_after_upgrade(state_db):
+    subscription = _subscription()
+    message = _message(subscription["id"])
+    db.record_mailbox_action(
+        subscription["id"],
+        message["id"],
+        "move-to-junk-v1",
+        action="move_to_junk",
+        outcome="failed",
+        source_mailbox="INBOX",
+        retryable=True,
+        detail_redacted="UID MOVE failed; COPY fallback suppressed because completion is ambiguous",
+    )
+    db.init_db()
+    db.init_db()
+    assert db.list_mailbox_actions()[0]["retryable"] == 0
+    assert len(db.list_unresolved_mailbox_sources("me@example.com")) == 1
+    assert db.list_unresolved_mailbox_sources("other@example.com") == []
+
+
+@pytest.mark.parametrize("affects_subscription", [True, False])
+def test_reconcile_waits_for_all_actions_and_preserves_subscription(state_db, affects_subscription):
+    subscription = _subscription()
+    operation, _ = db.claim_unsubscribe_operation(
+        subscription["id"],
+        "cleanup",
+        "cleaner",
+        kind="block",
+        affects_subscription=affects_subscription,
+    )
+    actions = [
+        db.record_mailbox_action(
+            subscription["id"],
+            _message(subscription["id"], uid=uid)["id"],
+            "move-to-junk-v1",
+            action="move_to_junk",
+            outcome="partial",
+            source_mailbox="INBOX",
+            operation_id=operation["id"],
+            claim_owner="cleaner",
+            retryable=False,
+        )
+        for uid in (1, 2)
+    ]
+    db.update_unsubscribe_operation_outcome(operation["id"], "failed", claim_owner="cleaner")
+    before = db.get_subscription(subscription["id"])
+    assert db.reconcile_missing_mailbox_source(actions[0]["id"])
+    assert db.get_unsubscribe_operation(operation["id"])["outcome"] == "failed"
+    assert db.reconcile_missing_mailbox_source(actions[1]["id"])
+    assert db.get_unsubscribe_operation(operation["id"])["outcome"] == (
+        "failed" if affects_subscription else "blocked"
+    )
+    assert db.get_subscription(subscription["id"]) == before
+    assert not db.reconcile_missing_mailbox_source(actions[0]["id"])
+    if not affects_subscription:
+        assert db.get_operation_metrics()["blocked"] == 0
+        assert db.get_unsubscribe_operation(operation["id"])["detail_redacted"] == (
+            "Source absence verified; destination unconfirmed"
+        )

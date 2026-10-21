@@ -3543,3 +3543,119 @@ def test_own_junk_move_is_not_provider_threat_and_does_not_hide_delivery(
     copied.provider_threat = "phishing"
     _persist_subscription_records(sender, [copied], classes[key])
     assert _persisted_threat_action(subscription["id"]) is Action.REVIEW
+
+
+def _uncertain_cleanup() -> tuple[dict, dict]:
+    scan, classifications = _subscription_scan(Action.UNSUB)
+    key = next(iter(scan.subscription_stats))
+    subscription, messages = _persist_subscription_records(
+        scan.subscription_stats[key], scan.subscription_emails[key], classifications[key]
+    )
+    operation, _ = db.claim_unsubscribe_operation(
+        subscription["id"], "synthetic-cleanup", "cleaner", kind="block", affects_subscription=False
+    )
+    action = db.record_mailbox_action(
+        subscription["id"],
+        messages[0][1]["id"],
+        "move-to-junk-v1",
+        action="move_to_junk",
+        outcome="failed",
+        source_mailbox="INBOX",
+        target_mailbox="Junk",
+        operation_id=operation["id"],
+        claim_owner="cleaner",
+        retryable=False,
+    )
+    db.update_unsubscribe_operation_outcome(operation["id"], "failed", claim_owner="cleaner")
+    return operation, action
+
+
+@pytest.mark.parametrize(
+    ("validation", "resolved"),
+    [
+        (UIDValidation(False, 44, False, exact_search_completed=True), True),
+        (UIDValidation(True, 44, True, exact_search_completed=True), False),
+        (UIDValidation(False, 99, False, exact_search_completed=True), False),
+        (UIDValidation(False, 44, False), False),
+    ],
+)
+@pytest.mark.parametrize("command", [cleanup, run])
+def test_scan_reconciles_absent_cleanup_without_replaying(
+    configured_cli, validation, resolved, command
+):
+    from nothx.scanner import MailboxCoverage
+
+    runner, _config = configured_cli
+    operation, action = _uncertain_cleanup()
+    before = db.get_subscription(action["subscription_id"])
+    scan = ScanResult(
+        {},
+        {},
+        coverage=[MailboxCoverage("default", "INBOX", "inbox", "full history", 0, 0, 0, True)],
+    )
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.IMAPConnection", return_value=connection),
+        patch("nothx.cli.validate_uid_locator", return_value=validation) as validate,
+    ):
+        result = runner.invoke(command, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert validate.call_args.kwargs["readonly"] is True
+    connection.move_message_to_junk.assert_not_called()
+    assert db.list_mailbox_actions()[0]["outcome"] == ("not_found" if resolved else "failed")
+    assert db.get_unsubscribe_operation(operation["id"])["outcome"] == (
+        "blocked" if resolved else "failed"
+    )
+    assert db.get_subscription(action["subscription_id"]) == before
+    assert ("no moves replayed" in result.output) is resolved
+
+
+@pytest.mark.parametrize("scope", ["incomplete", "other_account", "junk", "preview"])
+def test_scan_does_not_reconcile_outside_complete_inbox_scope(configured_cli, scope):
+    from nothx.scanner import MailboxCoverage
+
+    runner, _config = configured_cli
+    _uncertain_cleanup()
+    scan = ScanResult(
+        {},
+        {},
+        coverage=[
+            MailboxCoverage(
+                "other" if scope == "other_account" else "default",
+                "Junk" if scope == "junk" else "INBOX",
+                "junk" if scope == "junk" else "inbox",
+                "full history",
+                0,
+                0,
+                0,
+                scope != "incomplete",
+            )
+        ],
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan),
+        patch("nothx.cli.IMAPConnection") as connection,
+    ):
+        result = runner.invoke(cleanup, ["--preview" if scope == "preview" else "--auto"])
+    assert result.exit_code == 0, result.output
+    connection.assert_not_called()
+    assert db.list_mailbox_actions()[0]["outcome"] == "failed"
+
+
+def test_cleanup_reconciliation_transport_failure_stays_uncertain(configured_cli):
+    from nothx.cli import _reconcile_mailbox_sources
+
+    _runner, config = configured_cli
+    operation, _action = _uncertain_cleanup()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    with (
+        patch("nothx.cli.IMAPConnection", return_value=connection),
+        patch("nothx.cli.validate_uid_locator", side_effect=OSError("connection lost")),
+    ):
+        _reconcile_mailbox_sources(config, accounts={"user@example.com"})
+    connection.move_message_to_junk.assert_not_called()
+    assert db.list_mailbox_actions()[0]["outcome"] == "failed"
+    assert db.get_unsubscribe_operation(operation["id"])["outcome"] == "failed"

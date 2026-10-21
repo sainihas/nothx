@@ -961,6 +961,41 @@ def _reconcile_due_operations(
         db.update_unsubscribe_operation_outcome(operation["id"], "ineffective")
 
 
+def _reconcile_mailbox_sources(config: Config, *, accounts: set[str]) -> None:
+    resolved = 0
+    for account in config.accounts.values():
+        if account.email.casefold() not in accounts:
+            continue
+        pending = db.list_unresolved_mailbox_sources(account.email.casefold())
+        if not pending:
+            continue
+        try:
+            with IMAPConnection(account) as connection:
+                if connection.conn is None:
+                    continue
+                for row in pending:
+                    locator = MessageRef(
+                        row["account"], row["mailbox"], row["uidvalidity"], row["uid"]
+                    )
+                    validation = validate_uid_locator(
+                        cast(Any, connection.conn), locator, readonly=True
+                    )
+                    if (
+                        validation.exact_search_completed
+                        and validation.selected_uidvalidity == locator.uidvalidity
+                        and not validation.uid_exists
+                        and db.reconcile_missing_mailbox_source(row["id"])
+                    ):
+                        resolved += 1
+        except (IMAPError, OSError, ValueError, imaplib.IMAP4.error):
+            console.print("[warning]Some earlier Inbox moves remain unconfirmed.[/warning]")
+    if resolved:
+        console.print(
+            f"[muted]Confirmed {resolved} earlier cleanup source(s) absent from Inbox; "
+            "no moves replayed.[/muted]"
+        )
+
+
 def _block_subscription(
     config: Config,
     sender: SenderStats,
@@ -1099,10 +1134,9 @@ def _move_persisted_subscription_to_junk(
                     moved += 1
                     continue
                 if previous and not bool(previous.get("retryable", 1)):
-                    # COPY may already have placed this message in Junk. A
-                    # non-retryable partial is durably terminal so a later run
-                    # cannot create another destination copy.
-                    if previous["outcome"] == "partial":
+                    # An uncertain MOVE or COPY must never create another
+                    # destination copy; only source absence can resolve it.
+                    if previous["outcome"] in {"partial", "failed"}:
                         validation = validate_uid_locator(
                             cast(Any, connection.conn), locator, readonly=True
                         )
@@ -2626,6 +2660,18 @@ def _run_scan(
             config,
             accounts=verification_accounts,
         )
+        if isinstance(coverage, list):
+            _reconcile_mailbox_sources(
+                config,
+                accounts={
+                    config.accounts[row.account].email.casefold()
+                    for row in coverage
+                    if row.account in config.accounts
+                    and row.role == "inbox"
+                    and row.complete
+                    and config.accounts[row.account].email.casefold() not in incomplete_accounts
+                },
+            )
 
     if not sender_stats:
         if scan_errors or skipped_invalid:
@@ -3780,8 +3826,12 @@ def status(learning: bool):
         for row in cleanup_operations[:10]:
             console.print(
                 f"  Subscription #{row['subscription_id']}: "
-                f"{row['error_code'] or 'in progress'}; run `nothx cleanup` to retry eligible moves"
+                f"{row['error_code'] or 'in progress'}; run `nothx cleanup` to recheck sources and retry eligible moves"
             )
+        console.print(
+            "[muted]Ambiguous moves are never retried. If their sources remain in Inbox, "
+            "inspect Inbox and Junk manually.[/muted]"
+        )
     if any(outcomes.values()) or active_manual:
         console.print("\n[header]Subscription operations[/header]")
         console.print(

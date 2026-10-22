@@ -3659,3 +3659,123 @@ def test_cleanup_reconciliation_transport_failure_stays_uncertain(configured_cli
     connection.move_message_to_junk.assert_not_called()
     assert db.list_mailbox_actions()[0]["outcome"] == "failed"
     assert db.get_unsubscribe_operation(operation["id"])["outcome"] == "failed"
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_resolve_mixed_authentication_preview_exposes_only_eligible_sources(
+    configured_cli, dry_run
+):
+    from dataclasses import replace
+
+    from nothx.cli import resolve_subscription
+
+    runner, _config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    rejected = replace(
+        headers[0],
+        uid=202,
+        subject="Untrusted promotion",
+        dkim_pass=False,
+        list_unsubscribe="<https://invalid.example/unsubscribe?token=opaque>",
+    )
+    stats = _stats_for_emails(headers[0].domain, [rejected, *headers])
+    before = db.get_subscription(subscription["id"])
+    with (
+        patch("nothx.resolution.refresh_sources", return_value=(stats, [rejected, *headers])),
+        patch("nothx.cli.unsubscribe_subscription") as send,
+    ):
+        result = runner.invoke(
+            resolve_subscription,
+            [str(subscription["id"]), "--dry-run" if dry_run else "--yes"],
+        )
+    assert result.exit_code == (0 if dry_run else 1), result.output
+    if dry_run:
+        assert "UID 101" in result.output
+        assert "excluded by contact policy" in result.output
+        assert "--source-uid" in result.output
+        assert "An unscoped request remains blocked" in result.output
+    else:
+        assert "does not permit contacting" in result.output
+    assert "UID 202" not in result.output
+    assert "Untrusted promotion" not in result.output
+    assert "opaque" not in result.output
+    assert "secret" not in result.output
+    assert db.get_subscription(subscription["id"]) == before
+    assert db.list_unsubscribe_operations(subscription_id=subscription["id"]) == []
+    send.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [["--dry-run"], ["--source-uid", "101", "--yes"], ["--source-uid", "101", "--dry-run"]],
+)
+def test_resolve_refuses_when_no_fresh_source_permits_contact(configured_cli, options):
+    from nothx.cli import resolve_subscription
+
+    runner, _config, subscription, stats, headers = _resolve_fixture(configured_cli)
+    headers[0].dkim_pass = False
+    with (
+        patch("nothx.resolution.refresh_sources", return_value=(stats, headers)),
+        patch("nothx.cli.unsubscribe_subscription") as send,
+    ):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), *options])
+    assert result.exit_code == 1
+    assert "does not permit contacting" in result.output
+    assert "UID 101" not in result.output
+    assert db.list_unsubscribe_operations(subscription_id=subscription["id"]) == []
+    send.assert_not_called()
+
+
+def test_resolve_mixed_preview_then_selected_execution(configured_cli):
+    from dataclasses import replace
+
+    from nothx.cli import resolve_subscription
+
+    runner, _config, subscription, _stats, headers = _resolve_fixture(configured_cli)
+    rejected = replace(headers[0], uid=202, subject="Untrusted campaign", dkim_pass=False)
+    mixed = [rejected, *headers]
+    with (
+        patch(
+            "nothx.resolution.refresh_sources",
+            side_effect=[
+                (_stats_for_emails(headers[0].domain, mixed), mixed),
+                (_stats_for_emails(headers[0].domain, headers), headers),
+            ],
+        ) as refresh,
+        patch(
+            "nothx.cli.unsubscribe_subscription",
+            return_value=UnsubResult(success=True, method=UnsubMethod.GET),
+        ) as send,
+    ):
+        preview = runner.invoke(resolve_subscription, [str(subscription["id"]), "--dry-run"])
+        assert preview.exit_code == 0, preview.output
+        send.assert_not_called()
+        applied = runner.invoke(
+            resolve_subscription, [str(subscription["id"]), "--source-uid", "101", "--yes"]
+        )
+    assert applied.exit_code == 0, applied.output
+    assert refresh.call_args.kwargs["source_uid"] == 101
+    send.assert_called_once()
+    assert send.call_args.args[0] == headers
+
+
+def test_resolve_policy_filter_without_candidate_does_not_offer_empty_selection(configured_cli):
+    from dataclasses import replace
+
+    from nothx.cli import resolve_subscription
+
+    runner, _config, subscription, _stats, headers = _resolve_fixture(configured_cli)
+    rejected = replace(headers[0], uid=202, dkim_pass=False)
+    permitted = replace(headers[0], list_unsubscribe=None)
+    mixed = [rejected, permitted]
+    with (
+        patch(
+            "nothx.resolution.refresh_sources",
+            return_value=(_stats_for_emails(permitted.domain, mixed), mixed),
+        ),
+        patch("nothx.cli.unsubscribe_subscription") as send,
+    ):
+        result = runner.invoke(resolve_subscription, [str(subscription["id"]), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "No eligible untried method" in result.output
+    assert "Choose" not in result.output
+    send.assert_not_called()

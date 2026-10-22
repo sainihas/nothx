@@ -4382,8 +4382,18 @@ def resolve_subscription(
         raise click.ClickException(
             _redact_failure_detail(str(error)) or "Source refresh failed"
         ) from None
-    if any(not is_contact_permitted(header, config) for header in headers):
-        raise click.ClickException("Fresh source evidence does not permit contacting this sender")
+    permitted_headers = [header for header in headers if is_contact_permitted(header, config)]
+    excluded_sources = len(headers) - len(permitted_headers)
+    if excluded_sources:
+        if not dry_run or not permitted_headers:
+            raise click.ClickException(
+                "Fresh source evidence does not permit contacting this sender"
+            )
+        console.print(
+            f"[warning]{excluded_sources} source(s) excluded by contact policy. "
+            "An unscoped request remains blocked.[/warning]"
+        )
+        headers = permitted_headers
     # Only interactive GETs are safe to revisit after an explicit retry. Failed
     # SMTP/POSTs and every accepted endpoint remain excluded.
     exclusions = {
@@ -4422,6 +4432,8 @@ def resolve_subscription(
         )
         return
     if dry_run:
+        if excluded_sources:
+            console.print("Choose one displayed source with --source-uid to resolve it.")
         console.print(
             f"{len(sources)} candidate source(s); no request sent and no decisions changed."
         )

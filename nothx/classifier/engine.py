@@ -3,6 +3,7 @@
 import fnmatch
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 
 from ..config import Config
 from ..models import Action, Classification, EmailType, SenderStats
@@ -19,6 +20,8 @@ from .heuristics import (
 )
 from .patterns import PatternMatcher
 from .rules import RulesMatcher
+
+THOROUGH_AI_CONFIDENCE = 0.6
 
 logger = logging.getLogger("nothx.classifier.engine")
 
@@ -104,6 +107,8 @@ class ClassificationEngine:
         if persist and self._is_ai_candidate(sender) and self.ai.is_available():
             ai_attempted = True
             ai_result = self.ai.classify_single(sender, persist=persist)
+            if ai_result and (thorough := self._thorough_unsubscribe(sender, ai_result)):
+                return self._apply_action_policy(sender, thorough)
             if ai_result and ai_result.confidence < self.config.thresholds.unsub_confidence:
                 return self._uncertain_ai_result(ai_result)
             if ai_result and ai_result.confidence >= self.config.thresholds.unsub_confidence:
@@ -162,6 +167,31 @@ class ClassificationEngine:
             confidence=0.5,
             reasoning="Could not confidently classify - needs manual review",
             source="uncertain",
+        )
+
+    def _thorough_unsubscribe(
+        self, sender: SenderStats, result: Classification
+    ) -> Classification | None:
+        """In thorough cleanup, unsubscribe from list mail the AI reads as marketing."""
+        if (
+            self.config.cleanup_level != "thorough"
+            or result.email_type not in (EmailType.MARKETING, EmailType.NEWSLETTER)
+            or result.action not in (Action.UNSUB, Action.REVIEW)
+            or result.confidence < THOROUGH_AI_CONFIDENCE
+            or sender.protected_subject_emails
+            or not (sender.has_unsubscribe or sender.list_id or sender.can_unsubscribe_emails)
+        ):
+            return None
+        if result.action is Action.UNSUB and result.confidence >= (
+            self.config.thresholds.unsub_confidence
+        ):
+            return None
+        return replace(
+            result,
+            action=Action.UNSUB,
+            reasoning=f"{result.reasoning}; thorough cleanup unsubscribes from list mail",
+            recommended_action=result.recommended_action or result.action,
+            original_source=result.original_source or result.source,
         )
 
     def _uncertain_ai_result(self, result: Classification) -> Classification:
@@ -596,6 +626,13 @@ class ClassificationEngine:
             for sender in needs_ai:
                 if sender.classification_key in ai_results:
                     result = ai_results[sender.classification_key]
+                    if thorough := self._thorough_unsubscribe(sender, result):
+                        results[sender.classification_key] = self._apply_action_policy(
+                            sender, thorough
+                        )
+                        source_counts["ai"] += 1
+                        ai_success_count += 1
+                        continue
                     if result.confidence >= self.config.thresholds.unsub_confidence:
                         results[sender.classification_key] = self._apply_action_policy(
                             sender, result

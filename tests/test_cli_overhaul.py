@@ -1923,6 +1923,33 @@ def test_missing_unsubscribe_method_does_not_bypass_volume_safeguard(configured_
     assert subscription["classification_source"] == "volume_policy"
 
 
+@pytest.mark.parametrize(("level", "requested"), [("standard", False), ("thorough", True)])
+def test_thorough_cleanup_acts_on_low_volume_list_marketing(configured_cli, level, requested):
+    runner, config = configured_cli
+    config.cleanup_level = level
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _subscription_scan(Action.UNSUB)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    sender.total_emails = 1
+    sender.has_unsubscribe = True
+    classifications[sender.classification_key].source = "ai"
+    accepted = UnsubResult(
+        success=True, method=UnsubMethod.GET, outcome=UnsubscribeOutcome.REQUESTED
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine") as engine,
+        patch("nothx.cli._reconcile_due_operations"),
+        patch("nothx.cli.unsubscribe_subscription", return_value=accepted) as unsub,
+        patch("nothx.cli._record_unsubscribe_result"),
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert unsub.called is requested
+
+
 def test_incomplete_scan_cannot_verify_or_escalate_existing_operations(configured_cli):
     from nothx.scanner import MailboxCoverage
 

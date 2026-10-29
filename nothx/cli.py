@@ -43,6 +43,7 @@ from .classifier.heuristics import (
     has_protected_subject,
 )
 from .config import (
+    CLEANUP_LEVELS,
     CONSENT_REVOKED,
     CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
     CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
@@ -3006,6 +3007,12 @@ def _run_scan(
                 )
             )
             and sender.total_emails < min_emails
+            and not (
+                config.cleanup_level == "thorough"
+                and classification.action is Action.UNSUB
+                and classification.email_type in {EmailType.MARKETING, EmailType.NEWSLETTER}
+                and sender.has_unsubscribe
+            )
         ):
             logger.debug(
                 "Deferring %s to review: only %d emails (< %d)",
@@ -4793,6 +4800,12 @@ def browser_setup() -> None:
     help="Enable/disable isolated browser completion after browser-setup",
 )
 @click.option(
+    "--cleanup",
+    type=click.Choice(CLEANUP_LEVELS),
+    help="thorough unsubscribes from every marketing list and newsletter; "
+    "receipts, security and protected senders stay safe",
+)
+@click.option(
     "--unwanted-mail",
     type=click.Choice(["keep", "junk"]),
     help="Keep approved unsubscribe mail in Inbox or move it to Junk after request acceptance",
@@ -4805,9 +4818,15 @@ def config_cmd(
     engaged_marketing: str | None = None,
     unwanted_mail: str | None = None,
     browser_fallback: str | None = None,
+    cleanup: str | None = None,
 ):
     """View or modify configuration."""
     config = Config.load()
+
+    if cleanup:
+        config.cleanup_level = cleanup
+        config.save()
+        console.print(f"Cleanup level: {cleanup}")
 
     if ai:
         config.ai.enabled = ai == "on"
@@ -4845,13 +4864,20 @@ def config_cmd(
                 console.print("Mailbox consent is missing; Junk movement remains disabled.")
 
     if show or (
-        not ai and not mode and not footer_scan and not engaged_marketing and not unwanted_mail
+        not ai
+        and not mode
+        and not footer_scan
+        and not engaged_marketing
+        and not unwanted_mail
+        and not browser_fallback
+        and not cleanup
     ):
         console.print("\n[header]Current Configuration[/header]")
         console.print(f"{_L} Config dir: {get_config_dir()}")
         console.print(f"{_L} AI enabled: {config.ai.enabled}")
         console.print(f"{_L} AI provider: {config.ai.provider}")
         console.print(f"{_L} Operation mode: {config.operation_mode}")
+        console.print(f"{_L} Cleanup level: {config.cleanup_level}")
         console.print(f"{_L} Scan days: {config.scan_days}")
         console.print(f"{_L} Scan Junk: {config.scan_junk}")
         console.print(

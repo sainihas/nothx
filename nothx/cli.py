@@ -3540,15 +3540,74 @@ def _review_scan_decisions(
     def visible(group: str, row: _DecisionRow) -> bool:
         return group != "keep" or _is_marketing_candidate(row[1], row[2])
 
+    def stop_action(row: _DecisionRow) -> Action | None:
+        _key, sender, classification = row
+        recommended = classification.recommended_action or classification.action
+        if (
+            sender.account_key in incomplete_accounts
+            or classification.source == "scan_policy"
+            or (sender.protected_subject_emails and not _confirmed_provider_threat(sender))
+            or not (
+                recommended in {Action.UNSUB, Action.BLOCK}
+                or classification.email_type
+                in {EmailType.MARKETING, EmailType.NEWSLETTER, EmailType.COLD_OUTREACH}
+            )
+        ):
+            return None
+        if (
+            recommended is Action.BLOCK
+            or classification.email_type is EmailType.COLD_OUTREACH
+            or not (sender.has_unsubscribe or sender.can_unsubscribe_emails > 0)
+        ):
+            return Action.BLOCK
+        return Action.UNSUB
+
+    def recommended_stop(row: _DecisionRow) -> bool:
+        classification = row[2]
+        return stop_action(row) is not None and (
+            (classification.recommended_action or classification.action)
+            in {Action.UNSUB, Action.BLOCK}
+        )
+
+    def stop(rows: list[_DecisionRow], chosen: list[_DecisionRow]) -> None:
+        counts = {Action.UNSUB: 0, Action.BLOCK: 0}
+        for row in chosen:
+            action = stop_action(row)
+            if action is None or row not in rows:
+                continue
+            rows.remove(row)
+            key, sender, classification = row
+            groups[action.value][1].append(
+                (key, sender, _manual_classification(classification, action))
+            )
+            counts[action] += 1
+        console.print(
+            f"[success]✓ {counts[Action.UNSUB]:,} set to unsubscribe, "
+            f"{counts[Action.BLOCK]:,} set to block[/success]"
+        )
+
     _select_header("Review marketing and spam by sender")
     console.print(
         "[muted]Choose a group, then search or select a sender. "
         "Accounts and mailing lists stay separate. Finish when ready.[/muted]"
     )
     while True:
+        recommended = [row for row in to_review if recommended_stop(row)]
+        bulk_choices = (
+            [
+                questionary.Choice(
+                    f"Stop all {len(recommended):,} recommended senders "
+                    "(unsubscribe, or block when there is no unsubscribe method)",
+                    value="stop_recommended",
+                )
+            ]
+            if recommended
+            else []
+        )
         group = questionary.select(
             "Which decisions would you like to inspect?",
-            choices=[
+            choices=bulk_choices
+            + [
                 questionary.Choice(
                     f"{title} ({sum(visible(key, row) for row in rows):,})", value=key
                 )
@@ -3556,11 +3615,14 @@ def _review_scan_decisions(
                 if any(visible(key, row) for row in rows)
             ]
             + [questionary.Choice("Finish review", value="finish")],
-            default="finish",
+            default=bulk_choices[0].value if bulk_choices else "finish",
             **Q_COMMON,
         ).ask()
         if group is None or group == "finish":
             return
+        if group == "stop_recommended":
+            stop(to_review, recommended)
+            continue
         if group not in groups:
             continue
         title, rows = groups[group]
@@ -3589,6 +3651,17 @@ def _review_scan_decisions(
                 questionary.Choice(_review_sender_label(sender), value=f"sender:{key}")
                 for key, sender, _ in shown
             ]
+            stoppable = [
+                row for row in filtered if group in {"review", "keep"} and stop_action(row)
+            ]
+            if stoppable:
+                choices.insert(
+                    0,
+                    questionary.Choice(
+                        f"Select several to stop at once ({len(stoppable):,} eligible)",
+                        value="bulk",
+                    ),
+                )
             choices.append(
                 questionary.Choice("Search by sender, account, list, or subject", value="search")
             )
@@ -3615,6 +3688,22 @@ def _review_scan_decisions(
             if selected in {"next", "previous"}:
                 page += 1 if selected == "next" else -1
                 page = max(0, page)
+                continue
+            if selected == "bulk":
+                picked = questionary.checkbox(
+                    "Senders to stop (space toggles, enter applies)",
+                    choices=[
+                        questionary.Choice(
+                            f"{_review_sender_label(row[1])} · {stop_action(row).value}",  # type: ignore[union-attr]
+                            value=index,
+                            checked=recommended_stop(row),
+                        )
+                        for index, row in enumerate(stoppable)
+                    ],
+                    style=Q_STYLE,
+                ).ask()
+                if picked:
+                    stop(rows, [stoppable[index] for index in picked])
                 continue
             if selected == "search":
                 entered = questionary.text(

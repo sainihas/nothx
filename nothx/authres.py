@@ -24,6 +24,12 @@ PROVIDER_AUTHSERV_IDS: dict[str, tuple[str, ...]] = {
     "outlook": ("", "outlook.com", "hotmail.com", ".prod.outlook.com", ".protection.outlook.com"),
 }
 
+# Mail a provider imports from another account (Gmailify, mail fetcher) carries
+# only the origin's header; it is trusted solely as the topmost instance.
+IMPORTED_AUTHSERV_IDS: dict[str, tuple[str, ...]] = {
+    "gmail": ("mx.microsoft.com",),
+}
+
 _FOLD_RE = re.compile(r"\r?\n[ \t]+")
 _COMMENT_RE = re.compile(r"\([^()]*\)")
 _METHOD_RE = re.compile(r"\s*(dkim|spf|dmarc|arc)\s*=\s*([A-Za-z0-9_]+)", re.IGNORECASE)
@@ -190,23 +196,26 @@ def parse_authentication_results(headers: Sequence[str], provider: str) -> AuthV
     if patterns is None:
         return AuthVerdicts()  # unknown provider: don't trust any instance
 
+    parsed: list[tuple[str, list[str]]] = []
     for raw in headers:
         if not raw:
             continue
-        unfolded = _FOLD_RE.sub(" ", raw)
-        clean = _strip_comments(unfolded)
-        segments = clean.split(";")
-        if not segments:
-            continue
-
+        segments = _strip_comments(_FOLD_RE.sub(" ", raw)).split(";")
         # authserv-id is the first whitespace token of the first segment.
         first_tokens = segments[0].split()
         # If that token contains '=', the header has no authserv-id (matches "").
         authserv_id = "" if (not first_tokens or "=" in first_tokens[0]) else first_tokens[0]
+        parsed.append((authserv_id, segments))
 
-        if not _authserv_matches(authserv_id, patterns):
-            continue
-
+    trusted = next(
+        (segments for authserv_id, segments in parsed if _authserv_matches(authserv_id, patterns)),
+        None,
+    )
+    if trusted is None and parsed:
+        authserv_id, segments = parsed[0]
+        if _authserv_matches(authserv_id, IMPORTED_AUTHSERV_IDS.get(provider, ())):
+            trusted = segments
+    for segments in [trusted] if trusted is not None else []:
         method_results: dict[str, list[AuthResult]] = {
             "dkim": [],
             "spf": [],

@@ -821,6 +821,39 @@ def test_promotional_subject_with_transactional_word_does_not_create_protected_h
     assert not has_protected_subject("Quick question about your account")
 
 
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Examplepass for Teams is live!",
+        "1Password for Teams is live!",
+        "Welcome to Example.dev",
+        "Thanks for signing up — here is 20% off",
+        "Our accountability report",
+    ],
+)
+def test_brand_and_onboarding_words_are_not_protected_notices(subject):
+    from nothx.classifier.heuristics import has_protected_subject
+
+    assert not has_protected_subject(subject)
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Reset your password",
+        "Your payments are due",
+        "New login to your account",
+        "Orders shipped",
+        "Your eStatement is now ready!",
+        "Your e-receipt",
+    ],
+)
+def test_whole_word_notices_stay_protected(subject):
+    from nothx.classifier.heuristics import has_protected_subject
+
+    assert has_protected_subject(subject)
+
+
 @pytest.mark.parametrize("notice", ["SECURITY ALERT: new login", "PAYMENT RECEIPT #123456"])
 @pytest.mark.parametrize("batch", [False, True])
 @pytest.mark.parametrize("aggregated", [False, True])

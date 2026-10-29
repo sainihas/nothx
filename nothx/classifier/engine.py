@@ -2,6 +2,7 @@
 
 import fnmatch
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -22,6 +23,9 @@ from .patterns import PatternMatcher
 from .rules import RulesMatcher
 
 THOROUGH_AI_CONFIDENCE = 0.6
+SECURITY_SUBJECT_PATTERN = re.compile(
+    r"\b(password|verify|verification|security|2fa|login)s?\b", re.IGNORECASE
+)
 THOROUGH_UNLISTED_AI_CONFIDENCE = 0.75
 
 logger = logging.getLogger("nothx.classifier.engine")
@@ -342,10 +346,9 @@ class ClassificationEngine:
         if has_risk_signal:
             return None
 
-        security_words = ("password", "verify", "verification", "security", "2fa", "login")
         email_type = (
             EmailType.SECURITY
-            if any(word in subject.casefold() for word in security_words for subject in subjects)
+            if any(SECURITY_SUBJECT_PATTERN.search(subject) for subject in subjects)
             else EmailType.TRANSACTIONAL
         )
         safe_sender = any(

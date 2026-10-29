@@ -4,6 +4,7 @@ import csv
 import hashlib
 import imaplib
 import json
+import fnmatch
 import logging
 import re
 import subprocess
@@ -3162,6 +3163,7 @@ def _run_scan(
                 to_review,
                 to_block,
                 incomplete_accounts=frozenset(incomplete_accounts),
+                protected_domains=tuple(config.safety.never_unsub_domains),
             )
             updated_tree = Tree("[header]Updated decisions[/header]")
             updated_tree.add(f"[unsubscribe]{len(to_unsub)} unsubscribe candidates[/unsubscribe]")
@@ -3581,6 +3583,7 @@ def _review_scan_decisions(
     to_block: list[_DecisionRow],
     *,
     incomplete_accounts: frozenset[str] = frozenset(),
+    protected_domains: tuple[str, ...] = (),
 ) -> None:
     groups = {
         "review": ("Needs review", to_review),
@@ -3595,10 +3598,18 @@ def _review_scan_decisions(
     def stop_action(row: _DecisionRow) -> Action | None:
         _key, sender, classification = row
         recommended = classification.recommended_action or classification.action
+        protected = (
+            sender.protected_subject_emails
+            or "safety_policy" in {classification.source, classification.original_source}
+            or any(
+                fnmatch.fnmatch(sender.domain.casefold(), pattern.casefold())
+                for pattern in protected_domains
+            )
+        )
         if (
             sender.account_key in incomplete_accounts
             or classification.source == "scan_policy"
-            or (sender.protected_subject_emails and not _confirmed_provider_threat(sender))
+            or (protected and not _confirmed_provider_threat(sender))
             or not (
                 recommended in {Action.UNSUB, Action.BLOCK}
                 or classification.email_type

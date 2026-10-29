@@ -277,6 +277,22 @@ def test_bulk_select_stops_picked_senders_and_skips_protected_mail():
     assert review == [other, protected]
 
 
+@pytest.mark.parametrize("marker", ["domain", "safety_policy"])
+def test_stop_all_recommended_skips_protected_domains(marker):
+    bank = row(0)
+    bank[2].recommended_action = Action.BLOCK
+    if marker == "safety_policy":
+        bank[2].original_source = "safety_policy"
+    review, block = [bank], []
+    prompts = run_picker(
+        (([], [], review, block)),
+        ["finish"],
+        protected_domains=("*.example",) if marker == "domain" else (),
+    )
+    assert all(choice != "stop_recommended" for choice in str(prompts[0][1]))
+    assert review == [bank] and block == []
+
+
 def test_no_stop_all_offer_without_recommendations():
     prompts = run_picker(([], [], [row(0, email_type=EmailType.UNKNOWN)], []), ["finish"])
     assert all(choice.value != "stop_recommended" for choice in prompts[0][1]["choices"])

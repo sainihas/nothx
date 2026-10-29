@@ -224,6 +224,9 @@ class SafetyConfig:
     dry_run: bool = False
 
 
+CLEANUP_LEVELS = ("standard", "thorough")
+
+
 @dataclass
 class Config:
     """Main configuration for nothx."""
@@ -239,6 +242,7 @@ class Config:
     scan_days: int = 30
     scan_junk: bool = True
     review_engaged_marketing: bool = True
+    cleanup_level: str = "standard"
     move_unwanted_to_junk: bool = False
     microsoft_client_id: str | None = None
     footer_scan_enabled: bool = False
@@ -282,6 +286,7 @@ class Config:
             "scan_days": self.scan_days,
             "scan_junk": self.scan_junk,
             "review_engaged_marketing": self.review_engaged_marketing,
+            "cleanup_level": self.cleanup_level,
             "move_unwanted_to_junk": self.move_unwanted_to_junk,
             "microsoft_client_id": self.microsoft_client_id,
             "footer_scan_enabled": self.footer_scan_enabled,
@@ -359,6 +364,8 @@ class Config:
         config.scan_days = data.get("scan_days", 30)
         config.scan_junk = data.get("scan_junk", True)
         config.review_engaged_marketing = data.get("review_engaged_marketing", True)
+        level = data.get("cleanup_level", "standard")
+        config.cleanup_level = level if level in CLEANUP_LEVELS else "standard"
         config.move_unwanted_to_junk = data.get("move_unwanted_to_junk", False)
         config.microsoft_client_id = os.environ.get("NOTHX_MICROSOFT_CLIENT_ID") or data.get(
             "microsoft_client_id"

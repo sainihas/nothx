@@ -1,6 +1,7 @@
 """Command-line interface for nothx."""
 
 import csv
+import fnmatch
 import hashlib
 import imaplib
 import json
@@ -11,8 +12,8 @@ import sys
 import uuid
 import webbrowser
 from collections.abc import Iterator
-from dataclasses import replace
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import click
@@ -43,6 +44,7 @@ from .classifier.heuristics import (
     has_protected_subject,
 )
 from .config import (
+    CLEANUP_LEVELS,
     CONSENT_REVOKED,
     CURRENT_MAILBOX_MUTATION_CONSENT_VERSION,
     CURRENT_UNSUBSCRIBE_CONSENT_VERSION,
@@ -70,6 +72,7 @@ from .safefetch import redacted_url
 from .scanner import MailboxCoverage, scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
 from .theme import console, print_animated_welcome
+from .timeutil import ensure_utc, utcnow
 from .unsubscriber import (
     UnsafeUnsubscribeError,
     contact_suppression_reason,
@@ -78,6 +81,8 @@ from .unsubscriber import (
 )
 
 logger = logging.getLogger(__name__)
+
+DORMANT_SENDER_DAYS = 365
 
 
 # Questionary style — orange1 highlight matching our logo color
@@ -501,25 +506,17 @@ def _learn_subscription_policy(subscription: dict[str, Any], action_value: str) 
     get_learner().update_from_action(record)
 
 
-def _persisted_threat_action(
-    subscription_id: int,
-    *,
-    folder_evidence: bool = True,
-    sender: SenderStats | None = None,
-    include_auth: bool = True,
-) -> Action | None:
-    """Distinguish hard threats from conflicting Inbox/Junk folder evidence."""
-    hard_threat = bool(
-        sender
-        and (
-            sender.provider_threat
-            or sender.phishing_emails
-            or (include_auth and sender.authentication_failed_emails)
-        )
-    )
-    junk = bool(sender and (sender.junk_emails or sender.junk_keyword_emails))
-    inbox = bool(sender and sender.clean_inbox_emails)
-    not_junk = bool(sender and sender.not_junk_emails)
+@dataclass(frozen=True)
+class StoredEvidence:
+    hard_threat: bool
+    junk: bool
+    inbox: bool
+    not_junk: bool
+
+
+def _stored_folder_evidence(subscription_id: int, *, include_auth: bool = True) -> StoredEvidence:
+    """Summarize stored per-message folder and threat evidence for one identity."""
+    hard_threat = junk = inbox = not_junk = False
     locally_cleaned = db.get_locally_cleaned_message_keys(subscription_id=subscription_id)
     for message in db.list_message_refs(subscription_id=subscription_id, limit=100_000):
         try:
@@ -572,10 +569,33 @@ def _persisted_threat_action(
         junk |= is_junk
         inbox |= message.get("mailbox_role") == "inbox" and not is_junk and not is_hard_threat
         not_junk |= bool(normalized & {"$notjunk", r"\notjunk", "notjunk", "$nonjunk"})
+    return StoredEvidence(hard_threat=hard_threat, junk=junk, inbox=inbox, not_junk=not_junk)
+
+
+def _persisted_threat_action(
+    subscription_id: int,
+    *,
+    folder_evidence: bool = True,
+    sender: SenderStats | None = None,
+    include_auth: bool = True,
+) -> Action | None:
+    """Distinguish hard threats from conflicting Inbox/Junk folder evidence."""
+    stored = _stored_folder_evidence(subscription_id, include_auth=include_auth)
+    hard_threat = stored.hard_threat or bool(
+        sender
+        and (
+            sender.provider_threat
+            or sender.phishing_emails
+            or (include_auth and sender.authentication_failed_emails)
+        )
+    )
+    junk = stored.junk or bool(sender and (sender.junk_emails or sender.junk_keyword_emails))
+    inbox = stored.inbox or bool(sender and sender.clean_inbox_emails)
+    not_junk = stored.not_junk or bool(sender and sender.not_junk_emails)
     if hard_threat:
         return Action.REVIEW if folder_evidence and (inbox or not_junk) else Action.BLOCK
-    if folder_evidence and junk:
-        return Action.REVIEW if inbox or not_junk else Action.BLOCK
+    if folder_evidence and junk and not (inbox or not_junk):
+        return Action.BLOCK
     return None
 
 
@@ -2720,6 +2740,17 @@ def _run_scan(
         }
         if ai_preview:
             classification_options["allow_ai"] = True
+        for sender in sender_stats.values():
+            if not (sender.account_key and sender.identity_kind and sender.identity_value):
+                continue
+            subscription = db.get_subscription(
+                account=sender.account_key,
+                identity_kind=sender.identity_kind,
+                identity_value=sender.identity_value,
+            )
+            if subscription is not None:
+                stored = _stored_folder_evidence(subscription["id"])
+                sender.stored_inbox_evidence = stored.inbox or stored.not_junk
         classifications = engine.classify_batch(
             list(sender_stats.values()), **classification_options
         )
@@ -2904,7 +2935,7 @@ def _run_scan(
                     reasoning="Provider junk/phishing evidence requires local suppression",
                     source="provider_policy",
                 )
-            elif sender.has_threat_conflict or sender.has_junk_conflict:
+            elif sender.has_threat_conflict:
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.UNKNOWN,
                     action=Action.REVIEW,
@@ -2943,6 +2974,7 @@ def _run_scan(
     outside_cleanup_review = []
 
     min_emails = config.thresholds.min_emails_before_action
+    dormant_groups = 0
     deterministic_block_sources = {
         "user_rule",
         "provider_policy",
@@ -2992,6 +3024,39 @@ def _run_scan(
                 original_source=classification.original_source or classification.source,
             )
 
+        if (
+            (
+                classification.action in (Action.UNSUB, Action.REVIEW)
+                or (
+                    classification.action is Action.BLOCK
+                    and classification.source not in deterministic_block_sources
+                )
+            )
+            and classification.source not in {"user_rule", "stored_policy"}
+            and sender.last_seen is not None
+            and ensure_utc(sender.last_seen) < utcnow() - timedelta(days=DORMANT_SENDER_DAYS)
+        ):
+            if classification.action is not Action.REVIEW or _is_marketing_candidate(
+                sender, classification
+            ):
+                dormant_groups += 1
+            outside_cleanup_review.append(
+                (
+                    key,
+                    sender,
+                    replace(
+                        classification,
+                        action=Action.REVIEW,
+                        source="dormant_policy",
+                        reasoning=f"No mail in over {DORMANT_SENDER_DAYS} days; nothing to stop",
+                        recommended_action=classification.recommended_action
+                        or classification.action,
+                        original_source=classification.original_source or classification.source,
+                    ),
+                )
+            )
+            continue
+
         # Don't auto-act on senders we've barely seen — defer to review.
         # Explicit user rules/overrides (source="user_rule") always take
         # highest priority and are never deferred by the email-count guard.
@@ -3006,6 +3071,12 @@ def _run_scan(
                 )
             )
             and sender.total_emails < min_emails
+            and not (
+                config.cleanup_level == "thorough"
+                and classification.action is Action.UNSUB
+                and classification.email_type in {EmailType.MARKETING, EmailType.NEWSLETTER}
+                and sender.has_unsubscribe
+            )
         ):
             logger.debug(
                 "Deferring %s to review: only %d emails (< %d)",
@@ -3063,9 +3134,15 @@ def _run_scan(
         tree.add(f"[muted]{existing_junk} matching messages already in Junk[/muted]")
     tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
     tree.add(f"[review]{len(to_review)} marketing/spam groups need review[/review]")
-    if outside_cleanup_review:
+    if dormant_groups:
         tree.add(
-            f"[muted]{len(outside_cleanup_review)} other groups left unchanged, outside cleanup review[/muted]"
+            f"[muted]{dormant_groups} marketing groups silent for over a year; "
+            "nothing to unsubscribe[/muted]"
+        )
+    if len(outside_cleanup_review) > dormant_groups:
+        tree.add(
+            f"[muted]{len(outside_cleanup_review) - dormant_groups} other groups left unchanged, "
+            "outside cleanup review[/muted]"
         )
     console.print(tree)
 
@@ -3092,6 +3169,7 @@ def _run_scan(
                 to_review,
                 to_block,
                 incomplete_accounts=frozenset(incomplete_accounts),
+                protected_domains=tuple(config.safety.never_unsub_domains),
             )
             updated_tree = Tree("[header]Updated decisions[/header]")
             updated_tree.add(f"[unsubscribe]{len(to_unsub)} unsubscribe candidates[/unsubscribe]")
@@ -3143,6 +3221,7 @@ def _run_scan(
                 transient=True,
             ) as progress:
                 task = progress.add_task("Processing...", total=len(to_unsub) + len(to_block))
+                suppressed_locally = 0
 
                 for key, sender, classification in to_block:
                     headers = scan_result.get_emails_for_subscription(key) if authoritative else []
@@ -3305,14 +3384,21 @@ def _run_scan(
                             )
                             _, move_failed = _clean_unwanted_inbox(config, subscription, messages)
                             stats.failed += move_failed
-                            if exhausted_retry:
+                            refused = result.outcome is UnsubscribeOutcome.BLOCKED
+                            if exhausted_retry or refused:
                                 block_classification = Classification(
                                     email_type=EmailType.UNKNOWN,
                                     action=Action.BLOCK,
                                     confidence=1.0,
-                                    reasoning="No fresh endpoint remained after the allowed retry",
-                                    source="retry_policy",
+                                    reasoning=(
+                                        "Provider flagged this mail as junk; blocked without "
+                                        "contacting the sender"
+                                        if refused
+                                        else "No fresh endpoint remained after the allowed retry"
+                                    ),
+                                    source="provider_policy" if refused else "retry_policy",
                                 )
+                                suppressed_locally += refused
                                 if config.permits_mailbox_mutation:
                                     moved, move_failed = _block_subscription(
                                         config,
@@ -3353,6 +3439,8 @@ def _run_scan(
                         stats.auto_unsubbed += 1
                     elif result.needs_confirmation:
                         stats.review_queued += 1
+                    elif result.outcome is UnsubscribeOutcome.BLOCKED:
+                        suppressed_locally += 1
                     else:
                         stats.failed += 1
                     progress.advance(task)
@@ -3360,6 +3448,11 @@ def _run_scan(
             console.print(
                 f"\n[success]✓ {stats.auto_unsubbed} unsubscribe request(s) accepted[/success]"
             )
+            if suppressed_locally:
+                console.print(
+                    f"[muted]{suppressed_locally} junk-flagged sender(s) blocked locally "
+                    "instead of contacted[/muted]"
+                )
             if stats.failed:
                 console.print(f"[warning]! {stats.failed} action(s) failed[/warning]")
             if to_block:
@@ -3496,6 +3589,7 @@ def _review_scan_decisions(
     to_block: list[_DecisionRow],
     *,
     incomplete_accounts: frozenset[str] = frozenset(),
+    protected_domains: tuple[str, ...] = (),
 ) -> None:
     groups = {
         "review": ("Needs review", to_review),
@@ -3507,15 +3601,82 @@ def _review_scan_decisions(
     def visible(group: str, row: _DecisionRow) -> bool:
         return group != "keep" or _is_marketing_candidate(row[1], row[2])
 
+    def stop_action(row: _DecisionRow) -> Action | None:
+        _key, sender, classification = row
+        recommended = classification.recommended_action or classification.action
+        protected = (
+            sender.protected_subject_emails
+            or "safety_policy" in {classification.source, classification.original_source}
+            or any(
+                fnmatch.fnmatch(sender.domain.casefold(), pattern.casefold())
+                for pattern in protected_domains
+            )
+        )
+        if (
+            sender.account_key in incomplete_accounts
+            or classification.source == "scan_policy"
+            or (protected and not _confirmed_provider_threat(sender))
+            or not (
+                recommended in {Action.UNSUB, Action.BLOCK}
+                or classification.email_type
+                in {EmailType.MARKETING, EmailType.NEWSLETTER, EmailType.COLD_OUTREACH}
+            )
+        ):
+            return None
+        if (
+            recommended is Action.BLOCK
+            or classification.email_type is EmailType.COLD_OUTREACH
+            or not (sender.has_unsubscribe or sender.can_unsubscribe_emails > 0)
+        ):
+            return Action.BLOCK
+        return Action.UNSUB
+
+    def recommended_stop(row: _DecisionRow) -> bool:
+        classification = row[2]
+        return stop_action(row) is not None and (
+            (classification.recommended_action or classification.action)
+            in {Action.UNSUB, Action.BLOCK}
+        )
+
+    def stop(rows: list[_DecisionRow], chosen: list[_DecisionRow]) -> None:
+        counts = {Action.UNSUB: 0, Action.BLOCK: 0}
+        for row in chosen:
+            action = stop_action(row)
+            if action is None or row not in rows:
+                continue
+            rows.remove(row)
+            key, sender, classification = row
+            groups[action.value][1].append(
+                (key, sender, _manual_classification(classification, action))
+            )
+            counts[action] += 1
+        console.print(
+            f"[success]✓ {counts[Action.UNSUB]:,} set to unsubscribe, "
+            f"{counts[Action.BLOCK]:,} set to block[/success]"
+        )
+
     _select_header("Review marketing and spam by sender")
     console.print(
         "[muted]Choose a group, then search or select a sender. "
         "Accounts and mailing lists stay separate. Finish when ready.[/muted]"
     )
     while True:
+        recommended = [row for row in to_review if recommended_stop(row)]
+        bulk_choices = (
+            [
+                questionary.Choice(
+                    f"Stop all {len(recommended):,} recommended senders "
+                    "(unsubscribe, or block when there is no unsubscribe method)",
+                    value="stop_recommended",
+                )
+            ]
+            if recommended
+            else []
+        )
         group = questionary.select(
             "Which decisions would you like to inspect?",
-            choices=[
+            choices=bulk_choices
+            + [
                 questionary.Choice(
                     f"{title} ({sum(visible(key, row) for row in rows):,})", value=key
                 )
@@ -3523,11 +3684,14 @@ def _review_scan_decisions(
                 if any(visible(key, row) for row in rows)
             ]
             + [questionary.Choice("Finish review", value="finish")],
-            default="finish",
+            default=bulk_choices[0].value if bulk_choices else "finish",
             **Q_COMMON,
         ).ask()
         if group is None or group == "finish":
             return
+        if group == "stop_recommended":
+            stop(to_review, recommended)
+            continue
         if group not in groups:
             continue
         title, rows = groups[group]
@@ -3556,6 +3720,17 @@ def _review_scan_decisions(
                 questionary.Choice(_review_sender_label(sender), value=f"sender:{key}")
                 for key, sender, _ in shown
             ]
+            stoppable = [
+                row for row in filtered if group in {"review", "keep"} and stop_action(row)
+            ]
+            if stoppable:
+                choices.insert(
+                    0,
+                    questionary.Choice(
+                        f"Select several to stop at once ({len(stoppable):,} eligible)",
+                        value="bulk",
+                    ),
+                )
             choices.append(
                 questionary.Choice("Search by sender, account, list, or subject", value="search")
             )
@@ -3582,6 +3757,22 @@ def _review_scan_decisions(
             if selected in {"next", "previous"}:
                 page += 1 if selected == "next" else -1
                 page = max(0, page)
+                continue
+            if selected == "bulk":
+                picked = questionary.checkbox(
+                    "Senders to stop (space toggles, enter applies)",
+                    choices=[
+                        questionary.Choice(
+                            f"{_review_sender_label(row[1])} · {stop_action(row).value}",  # type: ignore[union-attr]
+                            value=index,
+                            checked=recommended_stop(row),
+                        )
+                        for index, row in enumerate(stoppable)
+                    ],
+                    style=Q_STYLE,
+                ).ask()
+                if picked:
+                    stop(rows, [stoppable[index] for index in picked])
                 continue
             if selected == "search":
                 entered = questionary.text(
@@ -4793,6 +4984,12 @@ def browser_setup() -> None:
     help="Enable/disable isolated browser completion after browser-setup",
 )
 @click.option(
+    "--cleanup",
+    type=click.Choice(CLEANUP_LEVELS),
+    help="thorough unsubscribes from every marketing list and newsletter; "
+    "receipts, security and protected senders stay safe",
+)
+@click.option(
     "--unwanted-mail",
     type=click.Choice(["keep", "junk"]),
     help="Keep approved unsubscribe mail in Inbox or move it to Junk after request acceptance",
@@ -4805,9 +5002,15 @@ def config_cmd(
     engaged_marketing: str | None = None,
     unwanted_mail: str | None = None,
     browser_fallback: str | None = None,
+    cleanup: str | None = None,
 ):
     """View or modify configuration."""
     config = Config.load()
+
+    if cleanup:
+        config.cleanup_level = cleanup
+        config.save()
+        console.print(f"Cleanup level: {cleanup}")
 
     if ai:
         config.ai.enabled = ai == "on"
@@ -4845,13 +5048,20 @@ def config_cmd(
                 console.print("Mailbox consent is missing; Junk movement remains disabled.")
 
     if show or (
-        not ai and not mode and not footer_scan and not engaged_marketing and not unwanted_mail
+        not ai
+        and not mode
+        and not footer_scan
+        and not engaged_marketing
+        and not unwanted_mail
+        and not browser_fallback
+        and not cleanup
     ):
         console.print("\n[header]Current Configuration[/header]")
         console.print(f"{_L} Config dir: {get_config_dir()}")
         console.print(f"{_L} AI enabled: {config.ai.enabled}")
         console.print(f"{_L} AI provider: {config.ai.provider}")
         console.print(f"{_L} Operation mode: {config.operation_mode}")
+        console.print(f"{_L} Cleanup level: {config.cleanup_level}")
         console.print(f"{_L} Scan days: {config.scan_days}")
         console.print(f"{_L} Scan Junk: {config.scan_junk}")
         console.print(

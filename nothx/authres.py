@@ -24,6 +24,12 @@ PROVIDER_AUTHSERV_IDS: dict[str, tuple[str, ...]] = {
     "outlook": ("", "outlook.com", "hotmail.com", ".prod.outlook.com", ".protection.outlook.com"),
 }
 
+# Mail Gmail imports from Outlook carries only Exchange's header; it is trusted
+# solely as the topmost instance and only beside Exchange's organization stamp.
+IMPORTED_AUTHSERV_IDS: dict[str, tuple[str, ...]] = {
+    "gmail": ("mx.microsoft.com", ""),
+}
+
 _FOLD_RE = re.compile(r"\r?\n[ \t]+")
 _COMMENT_RE = re.compile(r"\([^()]*\)")
 _METHOD_RE = re.compile(r"\s*(dkim|spf|dmarc|arc)\s*=\s*([A-Za-z0-9_]+)", re.IGNORECASE)
@@ -179,7 +185,37 @@ def _enum_to_bool(result: AuthResult) -> bool | None:
     return None
 
 
-def parse_authentication_results(headers: Sequence[str], provider: str) -> AuthVerdicts:
+def _parse_headers(headers: Sequence[str]) -> list[tuple[str, list[str]]]:
+    parsed: list[tuple[str, list[str]]] = []
+    for raw in headers:
+        if not raw:
+            continue
+        segments = _strip_comments(_FOLD_RE.sub(" ", raw)).split(";")
+        # authserv-id is the first whitespace token of the first segment.
+        first_tokens = segments[0].split()
+        # If that token contains '=', the header has no authserv-id (matches "").
+        authserv_id = "" if (not first_tokens or "=" in first_tokens[0]) else first_tokens[0]
+        parsed.append((authserv_id, segments))
+    return parsed
+
+
+def is_trusted_import(headers: Sequence[str], provider: str) -> bool:
+    """Whether the mail lacks the provider's stamp and carries an importer's on top."""
+    patterns = PROVIDER_AUTHSERV_IDS.get(provider)
+    imported = IMPORTED_AUTHSERV_IDS.get(provider)
+    parsed = _parse_headers(headers)
+    return bool(
+        patterns
+        and imported
+        and parsed
+        and not any(_authserv_matches(authserv_id, patterns) for authserv_id, _ in parsed)
+        and _authserv_matches(parsed[0][0], imported)
+    )
+
+
+def parse_authentication_results(
+    headers: Sequence[str], provider: str, *, exchange_import: bool = False
+) -> AuthVerdicts:
     """Return SPF/DKIM/DMARC verdicts from the first trusted A-R header.
 
     Args:
@@ -190,23 +226,14 @@ def parse_authentication_results(headers: Sequence[str], provider: str) -> AuthV
     if patterns is None:
         return AuthVerdicts()  # unknown provider: don't trust any instance
 
-    for raw in headers:
-        if not raw:
-            continue
-        unfolded = _FOLD_RE.sub(" ", raw)
-        clean = _strip_comments(unfolded)
-        segments = clean.split(";")
-        if not segments:
-            continue
-
-        # authserv-id is the first whitespace token of the first segment.
-        first_tokens = segments[0].split()
-        # If that token contains '=', the header has no authserv-id (matches "").
-        authserv_id = "" if (not first_tokens or "=" in first_tokens[0]) else first_tokens[0]
-
-        if not _authserv_matches(authserv_id, patterns):
-            continue
-
+    parsed = _parse_headers(headers)
+    trusted = next(
+        (segments for authserv_id, segments in parsed if _authserv_matches(authserv_id, patterns)),
+        None,
+    )
+    if trusted is None and exchange_import and is_trusted_import(headers, provider):
+        trusted = parsed[0][1]
+    for segments in [trusted] if trusted is not None else []:
         method_results: dict[str, list[AuthResult]] = {
             "dkim": [],
             "spf": [],

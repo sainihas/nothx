@@ -59,6 +59,56 @@ class TestImapDate:
 
 
 class TestParseHeader:
+    def test_outlook_import_on_gmail_uses_exchange_authentication(self):
+        base = (
+            "From: Store <deals@store.example>\r\n"
+            "Subject: Big Sale\r\n"
+            "Date: Tue, 30 Jun 2026 10:00:00 +0200\r\n"
+            "Authentication-Results: spf=pass smtp.mailfrom=store.example; "
+            "dkim=pass header.d=store.example;dmarc=pass header.from=store.example\r\n"
+        )
+        stamped = base + "X-MS-Exchange-Organization-AuthSource: relay.example.outlook.com\r\n\r\n"
+        imported = make_connection()._parse_header(parse_message(stamped), is_seen=False)
+        forged = make_connection()._parse_header(parse_message(base + "\r\n"), is_seen=False)
+        assert imported is not None and imported.authentication.trusted is True
+        assert forged is not None and forged.authentication.trusted is False
+
+    def test_outlook_import_needs_a_microsoft_exchange_stamp(self):
+        msg = parse_message(
+            "From: Store <deals@store.example>\r\n"
+            "Subject: Big Sale\r\n"
+            "Date: Tue, 30 Jun 2026 10:00:00 +0200\r\n"
+            "Authentication-Results: mx.microsoft.com 1; spf=pass smtp.mailfrom=store.example; "
+            "dkim=pass header.d=store.example;dmarc=pass header.from=store.example\r\n"
+            "X-MS-Exchange-Organization-AuthSource: relay.store.example\r\n\r\n"
+        )
+        header = make_connection()._parse_header(msg, is_seen=False)
+        assert header is not None and header.authentication.trusted is False
+
+    def test_outlook_import_keeps_microsoft_phishing_verdict(self):
+        msg = parse_message(
+            "From: Bank <alerts@bank.example>\r\n"
+            "Subject: Verify your account\r\n"
+            "Date: Tue, 30 Jun 2026 10:00:00 +0200\r\n"
+            "Authentication-Results: mx.microsoft.com 1; spf=pass smtp.mailfrom=bank.example; "
+            "dkim=pass header.d=bank.example;dmarc=pass header.from=bank.example\r\n"
+            "X-Forefront-Antispam-Report: CIP:192.0.2.1;CTRY:;SFV:NSPM;CAT:HPHSH;SCL:9\r\n"
+            "X-MS-Exchange-Organization-AuthSource: relay.example.outlook.com\r\n\r\n"
+        )
+        gmail_native = parse_message(
+            msg.as_string().replace("X-MS-Exchange-Organization-AuthSource", "X-Other")
+        )
+        gmail_stamped = parse_message(
+            "Authentication-Results: mx.google.com; dkim=pass header.d=bank.example; "
+            "dmarc=pass header.from=bank.example\r\n" + msg.as_string()
+        )
+        imported = make_connection()._parse_header(msg, is_seen=False)
+        native = make_connection()._parse_header(gmail_native, is_seen=False)
+        stamped = make_connection()._parse_header(gmail_stamped, is_seen=False)
+        assert imported is not None and imported.provider_threat == "HPHSH"
+        assert native is not None and native.provider_threat is None
+        assert stamped is not None and stamped.provider_threat is None
+
     def test_basic_header(self):
         msg = parse_message(
             "From: Store <deals@store.com>\r\n"

@@ -196,3 +196,46 @@ class TestUnknownProvider:
     def test_empty_headers(self):
         v = parse_authentication_results([], "gmail")
         assert v == parse_authentication_results([None], "gmail")
+
+
+class TestGmailImportedMail:
+    MICROSOFT = (
+        "mx.microsoft.com 1; spf=pass smtp.mailfrom=msg.example.com; dkim=pass "
+        "header.d=example.com;dmarc=pass action=none header.from=example.com"
+    )
+
+    def test_topmost_microsoft_header_is_trusted_without_a_gmail_header(self):
+        v = parse_authentication_results([self.MICROSOFT], "gmail", exchange_import=True)
+        assert v.spf is True and v.dkim is True and v.dmarc is True
+        assert v.evidence.trusted is True
+
+    def test_gmail_header_wins_over_microsoft_header(self):
+        v = parse_authentication_results(
+            ["mx.google.com; dkim=fail; spf=fail; dmarc=fail", self.MICROSOFT],
+            "gmail",
+            exchange_import=True,
+        )
+        assert v.dkim is False and v.dmarc is False
+
+    def test_microsoft_header_below_another_header_is_not_trusted(self):
+        v = parse_authentication_results(
+            ["relay.example.net; dkim=fail", self.MICROSOFT], "gmail", exchange_import=True
+        )
+        assert v.dkim is None and v.evidence.trusted is False
+
+    def test_topmost_microsoft_header_without_authserv_id_is_trusted(self):
+        header = "spf=pass smtp.mailfrom=example.com; dkim=pass header.d=example.com;dmarc=pass"
+        v = parse_authentication_results([header], "gmail", exchange_import=True)
+        assert v.dkim is True and v.dmarc is True
+
+    def test_bare_header_never_outranks_a_gmail_header(self):
+        v = parse_authentication_results(
+            ["mx.google.com; dkim=fail; dmarc=fail", "dkim=pass; dmarc=pass"],
+            "gmail",
+            exchange_import=True,
+        )
+        assert v.dkim is False
+
+    def test_import_rule_needs_the_exchange_stamp(self):
+        v = parse_authentication_results([self.MICROSOFT], "gmail")
+        assert v.dkim is None and v.evidence.trusted is False

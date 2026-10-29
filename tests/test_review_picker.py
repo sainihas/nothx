@@ -35,6 +35,12 @@ def row(
     )
 
 
+@pytest.fixture(autouse=True)
+def no_stored_threats():
+    with patch("nothx.cli._confirmed_provider_threat", return_value=False):
+        yield
+
+
 def run_picker(groups, answers, searches=(), **kwargs):
     prompts = []
     values = iter(answers)
@@ -233,3 +239,66 @@ def test_explicit_offer_from_named_sender_needs_no_list_headers():
     sender.authenticated_emails = 1
     sender.sample_subjects = ["Trade-in weekend: 25% bonus credit"]
     assert _is_marketing_candidate(sender, classification)
+
+
+def test_stop_all_recommended_moves_only_recommended_senders():
+    listed = row(0)
+    listed[2].recommended_action = Action.UNSUB
+    unlisted = row(1)
+    unlisted[1].has_unsubscribe = False
+    unlisted[2].recommended_action = Action.UNSUB
+    undecided = row(2, email_type=EmailType.UNKNOWN)
+    review = [listed, unlisted, undecided]
+    unsub, block = [], []
+    prompts = run_picker((unsub, [], review, block), ["stop_recommended", "finish"])
+    assert prompts[0][1]["default"] == "stop_recommended"
+    assert review == [undecided]
+    assert [item[0] for item in block] == [unlisted[0]]
+    assert all(item[2].source == "user_rule" for item in block)
+
+
+def test_stop_all_recommended_reaches_the_unsubscribe_group():
+    listed = row(0)
+    listed[2].recommended_action = Action.UNSUB
+    review, unsub = [listed], []
+    run_picker((unsub, [], review, []), ["stop_recommended", "finish"])
+    assert [item[0] for item in unsub] == [listed[0]] and unsub[0][2].action is Action.UNSUB
+
+
+def test_bulk_select_stops_picked_senders_and_skips_protected_mail():
+    picked, other = row(0), row(1)
+    protected = row(2)
+    protected[1].protected_subject_emails = 1
+    review, unsub = [picked, other, protected], []
+    seen = {}
+
+    def checkbox(message, choices, **kwargs):
+        seen["choices"] = choices
+        return SimpleNamespace(ask=lambda: [0])
+
+    with patch("nothx.cli.questionary.checkbox", side_effect=checkbox):
+        run_picker((unsub, [], review, []), ["review", "bulk", "back", "finish"])
+    assert len(seen["choices"]) == 2
+    assert [item[0] for item in unsub] == [picked[0]]
+    assert review == [other, protected]
+
+
+@pytest.mark.parametrize("marker", ["domain", "safety_policy"])
+def test_stop_all_recommended_skips_protected_domains(marker):
+    bank = row(0)
+    bank[2].recommended_action = Action.BLOCK
+    if marker == "safety_policy":
+        bank[2].original_source = "safety_policy"
+    review, block = [bank], []
+    prompts = run_picker(
+        (([], [], review, block)),
+        ["finish"],
+        protected_domains=("*.example",) if marker == "domain" else (),
+    )
+    assert all(choice != "stop_recommended" for choice in str(prompts[0][1]))
+    assert review == [bank] and block == []
+
+
+def test_no_stop_all_offer_without_recommendations():
+    prompts = run_picker(([], [], [row(0, email_type=EmailType.UNKNOWN)], []), ["finish"])
+    assert all(choice.value != "stop_recommended" for choice in prompts[0][1]["choices"])

@@ -24,8 +24,8 @@ PROVIDER_AUTHSERV_IDS: dict[str, tuple[str, ...]] = {
     "outlook": ("", "outlook.com", "hotmail.com", ".prod.outlook.com", ".protection.outlook.com"),
 }
 
-# Mail a provider imports from another account (Gmailify, mail fetcher) carries
-# only the origin's header; it is trusted solely as the topmost instance.
+# Mail Gmail imports from Outlook carries only Exchange's header; it is trusted
+# solely as the topmost instance and only beside Exchange's organization stamp.
 IMPORTED_AUTHSERV_IDS: dict[str, tuple[str, ...]] = {
     "gmail": ("mx.microsoft.com", ""),
 }
@@ -185,7 +185,9 @@ def _enum_to_bool(result: AuthResult) -> bool | None:
     return None
 
 
-def parse_authentication_results(headers: Sequence[str], provider: str) -> AuthVerdicts:
+def parse_authentication_results(
+    headers: Sequence[str], provider: str, *, exchange_import: bool = False
+) -> AuthVerdicts:
     """Return SPF/DKIM/DMARC verdicts from the first trusted A-R header.
 
     Args:
@@ -211,7 +213,7 @@ def parse_authentication_results(headers: Sequence[str], provider: str) -> AuthV
         (segments for authserv_id, segments in parsed if _authserv_matches(authserv_id, patterns)),
         None,
     )
-    if trusted is None and parsed:
+    if trusted is None and parsed and exchange_import:
         authserv_id, segments = parsed[0]
         if _authserv_matches(authserv_id, IMPORTED_AUTHSERV_IDS.get(provider, ())):
             trusted = segments

@@ -59,6 +59,20 @@ class TestImapDate:
 
 
 class TestParseHeader:
+    def test_outlook_import_on_gmail_uses_exchange_authentication(self):
+        base = (
+            "From: Store <deals@store.example>\r\n"
+            "Subject: Big Sale\r\n"
+            "Date: Tue, 30 Jun 2026 10:00:00 +0200\r\n"
+            "Authentication-Results: spf=pass smtp.mailfrom=store.example; "
+            "dkim=pass header.d=store.example;dmarc=pass header.from=store.example\r\n"
+        )
+        stamped = base + "X-MS-Exchange-Organization-AuthSource: relay.example.outlook.com\r\n\r\n"
+        imported = make_connection()._parse_header(parse_message(stamped), is_seen=False)
+        forged = make_connection()._parse_header(parse_message(base + "\r\n"), is_seen=False)
+        assert imported is not None and imported.authentication.trusted is True
+        assert forged is not None and forged.authentication.trusted is False
+
     def test_basic_header(self):
         msg = parse_message(
             "From: Store <deals@store.com>\r\n"

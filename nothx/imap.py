@@ -77,6 +77,7 @@ _FETCH_HEADER_FIELDS = [
     "X-FOREFRONT-ANTISPAM-REPORT",
     "X-MICROSOFT-ANTISPAM",
     "X-MS-EXCHANGE-ORGANIZATION-SCL",
+    "X-MS-EXCHANGE-ORGANIZATION-AUTHSOURCE",
     *ESP_HEADER_MAP.keys(),
 ]
 
@@ -926,7 +927,9 @@ class IMAPConnection:
             )
 
             verdicts = parse_authentication_results(
-                msg.get_all("Authentication-Results", []), self.account.provider
+                msg.get_all("Authentication-Results", []),
+                self.account.provider,
+                exchange_import=bool(msg.get("X-MS-Exchange-Organization-AuthSource")),
             )
             _display_name, from_address = email.utils.parseaddr(sender)
             from_domain = from_address.rsplit("@", 1)[1] if from_address.count("@") == 1 else None

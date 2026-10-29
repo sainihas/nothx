@@ -218,3 +218,14 @@ class TestGmailImportedMail:
     def test_microsoft_header_below_another_header_is_not_trusted(self):
         v = parse_authentication_results(["relay.example.net; dkim=fail", self.MICROSOFT], "gmail")
         assert v.dkim is None and v.evidence.trusted is False
+
+    def test_topmost_microsoft_header_without_authserv_id_is_trusted(self):
+        header = "spf=pass smtp.mailfrom=example.com; dkim=pass header.d=example.com;dmarc=pass"
+        v = parse_authentication_results([header], "gmail")
+        assert v.dkim is True and v.dmarc is True
+
+    def test_bare_header_never_outranks_a_gmail_header(self):
+        v = parse_authentication_results(
+            ["mx.google.com; dkim=fail; dmarc=fail", "dkim=pass; dmarc=pass"], "gmail"
+        )
+        assert v.dkim is False

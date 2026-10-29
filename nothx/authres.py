@@ -27,7 +27,7 @@ PROVIDER_AUTHSERV_IDS: dict[str, tuple[str, ...]] = {
 # Mail a provider imports from another account (Gmailify, mail fetcher) carries
 # only the origin's header; it is trusted solely as the topmost instance.
 IMPORTED_AUTHSERV_IDS: dict[str, tuple[str, ...]] = {
-    "gmail": ("mx.microsoft.com",),
+    "gmail": ("mx.microsoft.com", ""),
 }
 
 _FOLD_RE = re.compile(r"\r?\n[ \t]+")

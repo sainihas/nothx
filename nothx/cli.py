@@ -1,10 +1,10 @@
 """Command-line interface for nothx."""
 
 import csv
+import fnmatch
 import hashlib
 import imaplib
 import json
-import fnmatch
 import logging
 import re
 import subprocess

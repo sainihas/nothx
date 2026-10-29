@@ -2006,6 +2006,32 @@ def test_senders_silent_for_a_year_are_not_contacted(configured_cli, days_ago, c
     assert ("silent for over a year" in result.output) is not contacted
 
 
+def test_unlisted_sender_silent_for_a_year_is_not_sent_to_review(configured_cli):
+    from datetime import timedelta
+
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _subscription_scan(Action.BLOCK)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    sender.last_seen = datetime.now(UTC) - timedelta(days=400)
+    sender.total_emails = 1
+    classifications[sender.classification_key].source = "method_policy"
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine") as engine,
+        patch("nothx.cli._reconcile_due_operations"),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert not block.called
+    assert "1 marketing/spam groups need review" not in result.output
+    assert "1 marketing groups silent for over a year" in result.output
+
+
 def test_incomplete_scan_cannot_verify_or_escalate_existing_operations(configured_cli):
     from nothx.scanner import MailboxCoverage
 

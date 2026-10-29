@@ -3025,12 +3025,18 @@ def _run_scan(
             )
 
         if (
-            classification.action in (Action.UNSUB, Action.REVIEW)
+            (
+                classification.action in (Action.UNSUB, Action.REVIEW)
+                or (
+                    classification.action is Action.BLOCK
+                    and classification.source not in deterministic_block_sources
+                )
+            )
             and classification.source not in {"user_rule", "stored_policy"}
             and sender.last_seen is not None
             and ensure_utc(sender.last_seen) < utcnow() - timedelta(days=DORMANT_SENDER_DAYS)
         ):
-            if classification.action is Action.UNSUB or _is_marketing_candidate(
+            if classification.action is not Action.REVIEW or _is_marketing_candidate(
                 sender, classification
             ):
                 dormant_groups += 1

@@ -3176,6 +3176,7 @@ def _run_scan(
                 transient=True,
             ) as progress:
                 task = progress.add_task("Processing...", total=len(to_unsub) + len(to_block))
+                suppressed_locally = 0
 
                 for key, sender, classification in to_block:
                     headers = scan_result.get_emails_for_subscription(key) if authoritative else []
@@ -3386,6 +3387,8 @@ def _run_scan(
                         stats.auto_unsubbed += 1
                     elif result.needs_confirmation:
                         stats.review_queued += 1
+                    elif result.outcome is UnsubscribeOutcome.BLOCKED:
+                        suppressed_locally += 1
                     else:
                         stats.failed += 1
                     progress.advance(task)
@@ -3393,6 +3396,11 @@ def _run_scan(
             console.print(
                 f"\n[success]✓ {stats.auto_unsubbed} unsubscribe request(s) accepted[/success]"
             )
+            if suppressed_locally:
+                console.print(
+                    f"[muted]{suppressed_locally} junk-flagged sender(s) blocked locally "
+                    "instead of contacted[/muted]"
+                )
             if stats.failed:
                 console.print(f"[warning]! {stats.failed} action(s) failed[/warning]")
             if to_block:

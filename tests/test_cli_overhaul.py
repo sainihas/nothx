@@ -1950,6 +1950,31 @@ def test_thorough_cleanup_acts_on_low_volume_list_marketing(configured_cli, leve
     assert unsub.called is requested
 
 
+def test_junk_refusal_is_reported_as_local_block_not_failure(configured_cli):
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _subscription_scan(Action.UNSUB)
+    refused = UnsubResult(
+        success=False,
+        method=None,
+        error="Provider marked this mail as junk or phishing; use mailbox blocking",
+        outcome=UnsubscribeOutcome.BLOCKED,
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine") as engine,
+        patch("nothx.cli._reconcile_due_operations"),
+        patch("nothx.cli.unsubscribe_subscription", return_value=refused),
+        patch("nothx.cli._record_unsubscribe_result"),
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert "action(s) failed" not in result.output
+    assert "1 junk-flagged sender(s) blocked locally" in result.output
+
+
 def test_incomplete_scan_cannot_verify_or_escalate_existing_operations(configured_cli):
     from nothx.scanner import MailboxCoverage
 

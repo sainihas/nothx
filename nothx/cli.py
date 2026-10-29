@@ -3376,14 +3376,21 @@ def _run_scan(
                             )
                             _, move_failed = _clean_unwanted_inbox(config, subscription, messages)
                             stats.failed += move_failed
-                            if exhausted_retry:
+                            refused = result.outcome is UnsubscribeOutcome.BLOCKED
+                            if exhausted_retry or refused:
                                 block_classification = Classification(
                                     email_type=EmailType.UNKNOWN,
                                     action=Action.BLOCK,
                                     confidence=1.0,
-                                    reasoning="No fresh endpoint remained after the allowed retry",
-                                    source="retry_policy",
+                                    reasoning=(
+                                        "Provider flagged this mail as junk; blocked without "
+                                        "contacting the sender"
+                                        if refused
+                                        else "No fresh endpoint remained after the allowed retry"
+                                    ),
+                                    source="provider_policy" if refused else "retry_policy",
                                 )
+                                suppressed_locally += refused
                                 if config.permits_mailbox_mutation:
                                     moved, move_failed = _block_subscription(
                                         config,

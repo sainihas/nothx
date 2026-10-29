@@ -1953,6 +1953,7 @@ def test_thorough_cleanup_acts_on_low_volume_list_marketing(configured_cli, leve
 def test_junk_refusal_is_reported_as_local_block_not_failure(configured_cli):
     runner, config = configured_cli
     config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
     config.save()
     scan_result, classifications = _subscription_scan(Action.UNSUB)
     refused = UnsubResult(
@@ -1967,12 +1968,14 @@ def test_junk_refusal_is_reported_as_local_block_not_failure(configured_cli):
         patch("nothx.cli._reconcile_due_operations"),
         patch("nothx.cli.unsubscribe_subscription", return_value=refused),
         patch("nothx.cli._record_unsubscribe_result"),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
     ):
         engine.return_value.classify_batch.return_value = classifications
         result = runner.invoke(run, ["--auto"])
     assert result.exit_code == 0, result.output
     assert "action(s) failed" not in result.output
     assert "1 junk-flagged sender(s) blocked locally" in result.output
+    assert block.call_args.args[3].action is Action.BLOCK
 
 
 @pytest.mark.parametrize(("days_ago", "contacted"), [(30, True), (400, False)])

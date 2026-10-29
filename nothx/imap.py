@@ -8,6 +8,7 @@ import re
 import shlex
 import socket
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email.header import Header, decode_header
 from email.message import Message
@@ -80,6 +81,8 @@ _FETCH_HEADER_FIELDS = [
     "X-MS-EXCHANGE-ORGANIZATION-AUTHSOURCE",
     *ESP_HEADER_MAP.keys(),
 ]
+
+_EXCHANGE_HOST_SUFFIXES = (".outlook.com", ".exchangelabs.com")
 
 # IMAP date-searches require English month abbreviations (RFC 3501);
 # strftime("%b") is locale-dependent and breaks on non-English locales.
@@ -926,14 +929,22 @@ class IMAPConnection:
                 None,
             )
 
+            auth_source = msg.get("X-MS-Exchange-Organization-AuthSource", "")
+            exchange_import = (
+                auth_source.strip().rstrip(".").casefold().endswith(_EXCHANGE_HOST_SUFFIXES)
+            )
             verdicts = parse_authentication_results(
                 msg.get_all("Authentication-Results", []),
                 self.account.provider,
-                exchange_import=bool(msg.get("X-MS-Exchange-Organization-AuthSource")),
+                exchange_import=exchange_import,
             )
             _display_name, from_address = email.utils.parseaddr(sender)
             from_domain = from_address.rsplit("@", 1)[1] if from_address.count("@") == 1 else None
             provider_signals = parse_provider_signals(msg, self.account.provider)
+            if exchange_import and provider_signals.threat is None:
+                imported_threat = parse_provider_signals(msg, "outlook").threat
+                if imported_threat:
+                    provider_signals = replace(provider_signals, threat=imported_threat)
             unsubscribe_values = msg.get_all("List-Unsubscribe", [])
             unsubscribe_post_values = msg.get_all("List-Unsubscribe-Post", [])
 

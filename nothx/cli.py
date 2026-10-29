@@ -574,8 +574,8 @@ def _persisted_threat_action(
         not_junk |= bool(normalized & {"$notjunk", r"\notjunk", "notjunk", "$nonjunk"})
     if hard_threat:
         return Action.REVIEW if folder_evidence and (inbox or not_junk) else Action.BLOCK
-    if folder_evidence and junk:
-        return Action.REVIEW if inbox or not_junk else Action.BLOCK
+    if folder_evidence and junk and not (inbox or not_junk):
+        return Action.BLOCK
     return None
 
 
@@ -2904,7 +2904,7 @@ def _run_scan(
                     reasoning="Provider junk/phishing evidence requires local suppression",
                     source="provider_policy",
                 )
-            elif sender.has_threat_conflict or sender.has_junk_conflict:
+            elif sender.has_threat_conflict:
                 classifications[sender.classification_key] = Classification(
                     email_type=EmailType.UNKNOWN,
                     action=Action.REVIEW,

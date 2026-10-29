@@ -679,7 +679,7 @@ def test_active_unsubscribe_policy_cannot_be_reclassified_to_keep(configured_cli
     record.assert_called_once()
 
 
-def test_persisted_junk_and_fresh_inbox_evidence_require_review(configured_cli):
+def test_persisted_junk_beside_fresh_inbox_mail_keeps_stored_policy(configured_cli):
     runner, config = configured_cli
     config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
     config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
@@ -710,14 +710,20 @@ def test_persisted_junk_and_fresh_inbox_evidence_require_review(configured_cli):
         patch("nothx.cli.scan_inbox", return_value=scan_result),
         patch("nothx.cli.ClassificationEngine", return_value=engine),
         patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
-        patch("nothx.cli.unsubscribe_subscription") as unsubscribe,
+        patch(
+            "nothx.cli.unsubscribe_subscription",
+            return_value=UnsubResult(
+                success=True, method=UnsubMethod.GET, outcome=UnsubscribeOutcome.REQUESTED
+            ),
+        ) as unsubscribe,
+        patch("nothx.cli._record_unsubscribe_result"),
     ):
         result = runner.invoke(run, ["--auto"])
 
     assert result.exit_code == 0
     block.assert_not_called()
-    unsubscribe.assert_not_called()
-    assert db.get_subscription(subscription["id"])["policy_action"] == "review"
+    unsubscribe.assert_called_once()
+    assert db.get_subscription(subscription["id"])["policy_action"] == "unsub"
 
 
 def test_persistence_uses_promoted_scanner_identity(configured_cli):
@@ -1477,10 +1483,10 @@ def test_invalid_sender_warning_is_visible_without_false_success(configured_cli)
     assert "No marketing emails found" not in result.output
 
 
-def test_persisted_folder_conflict_is_reviewed_and_never_contacted(configured_cli):
+def test_persisted_folder_conflict_is_not_threat_evidence(configured_cli):
     from nothx.cli import _persisted_threat_action, _subscription_has_persisted_threat
 
-    runner, _config = configured_cli
+    del configured_cli
     scan, classifications = _subscription_scan(Action.UNSUB)
     key, stats = next(iter(scan.subscription_stats.items()))
     headers = scan.get_emails_for_subscription(key)
@@ -1498,19 +1504,8 @@ def test_persisted_folder_conflict_is_reviewed_and_never_contacted(configured_cl
         uid=2,
     )
     _persist_subscription_records(stats, [junk_header], classifications[key])
-    assert _subscription_has_persisted_threat(subscription["id"])
-    assert _persisted_threat_action(subscription["id"]) is Action.REVIEW
-    with (
-        patch("nothx.cli.scan_inbox", return_value=scan),
-        patch("nothx.cli.ClassificationEngine.classify_batch", return_value=classifications),
-        patch("nothx.cli.unsubscribe_subscription") as unsub,
-        patch("nothx.cli._block_subscription") as block,
-    ):
-        result = runner.invoke(run, ["--auto"])
-    assert result.exit_code == 0, result.output
-    assert "1 marketing/spam groups need review" in result.output
-    unsub.assert_not_called()
-    block.assert_not_called()
+    assert not _subscription_has_persisted_threat(subscription["id"])
+    assert _persisted_threat_action(subscription["id"]) is None
 
 
 def test_ai_diagnostics_explain_disabled_provider_and_pipx_recovery(configured_cli):
@@ -1946,7 +1941,7 @@ def test_incomplete_scan_cannot_verify_or_escalate_existing_operations(configure
     assert reconcile.call_args.kwargs["accounts"] == set()
 
 
-def test_fresh_inbox_evidence_conflicts_with_stored_junk_in_preview(configured_cli):
+def test_fresh_inbox_evidence_clears_soft_stored_junk_but_not_threats(configured_cli):
     from nothx.cli import _persisted_threat_action
 
     runner, _config = configured_cli
@@ -1958,7 +1953,7 @@ def test_fresh_inbox_evidence_conflicts_with_stored_junk_in_preview(configured_c
     )
     db.upsert_message_ref(subscription["id"], sender.account_key, "Spam", "junk", 1, 1)
     assert _persisted_threat_action(subscription["id"]) is Action.BLOCK
-    assert _persisted_threat_action(subscription["id"], sender=sender) is Action.REVIEW
+    assert _persisted_threat_action(subscription["id"], sender=sender) is None
     sender.provider_threat = True
     assert _persisted_threat_action(subscription["id"], sender=sender) is Action.REVIEW
     sender.clean_inbox_emails = 0

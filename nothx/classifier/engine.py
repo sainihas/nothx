@@ -196,13 +196,7 @@ class ClassificationEngine:
                 source="provider_policy",
             )
         if sender.has_junk_conflict:
-            return Classification(
-                email_type=EmailType.UNKNOWN,
-                action=Action.REVIEW,
-                confidence=0.5,
-                reasoning="Mailbox has conflicting Junk and Inbox/NotJunk evidence",
-                source="provider_policy",
-            )
+            return None
         if sender.junk_emails or sender.junk_keyword_emails:
             return Classification(
                 email_type=EmailType.COLD_OUTREACH,

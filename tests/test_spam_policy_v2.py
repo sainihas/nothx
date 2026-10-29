@@ -234,7 +234,7 @@ def test_gmail_and_standard_flags_are_consumed_with_conflict_visible():
     assert header.server_can_unsubscribe is True
 
 
-def test_conflicting_junk_flags_require_review(policy_engine):
+def test_conflicting_junk_flags_defer_to_content(policy_engine):
     sender = SenderStats(
         domain="mixed.example",
         total_emails=1,
@@ -244,8 +244,8 @@ def test_conflicting_junk_flags_require_review(policy_engine):
 
     result = policy_engine.classify(sender)
 
-    assert result.action is Action.REVIEW
-    assert "conflicting" in result.reasoning.casefold()
+    assert result.action is not Action.BLOCK
+    assert result.source != "provider_policy"
 
 
 def test_complete_auth_results_preserve_aligned_instances():
@@ -523,7 +523,7 @@ def test_operational_notifications_are_never_automatically_suppressed(
 
 
 @pytest.mark.parametrize("batch", [False, True])
-def test_mixed_inbox_and_junk_requires_review_without_explicit_threat(policy_engine, batch):
+def test_mixed_inbox_and_junk_defers_to_content_without_explicit_threat(policy_engine, batch):
     sender = SenderStats(
         domain="service.example",
         total_emails=5,
@@ -537,7 +537,7 @@ def test_mixed_inbox_and_junk_requires_review_without_explicit_threat(policy_eng
         if batch
         else policy_engine.classify(sender)
     )
-    assert result.action is Action.REVIEW
+    assert result.source not in {"provider_policy", "uncertain"}
     sender.provider_threat = True
     assert policy_engine.classify(sender).action is Action.REVIEW
     sender.clean_inbox_emails = 0

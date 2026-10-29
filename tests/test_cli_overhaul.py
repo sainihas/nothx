@@ -1975,6 +1975,34 @@ def test_junk_refusal_is_reported_as_local_block_not_failure(configured_cli):
     assert "1 junk-flagged sender(s) blocked locally" in result.output
 
 
+@pytest.mark.parametrize(("days_ago", "contacted"), [(30, True), (400, False)])
+def test_senders_silent_for_a_year_are_not_contacted(configured_cli, days_ago, contacted):
+    from datetime import timedelta
+
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _subscription_scan(Action.UNSUB)
+    sender = next(iter(scan_result.subscription_stats.values()))
+    sender.last_seen = datetime.now(UTC) - timedelta(days=days_ago)
+    classifications[sender.classification_key].source = "ai"
+    accepted = UnsubResult(
+        success=True, method=UnsubMethod.GET, outcome=UnsubscribeOutcome.REQUESTED
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine") as engine,
+        patch("nothx.cli._reconcile_due_operations"),
+        patch("nothx.cli.unsubscribe_subscription", return_value=accepted) as unsub,
+        patch("nothx.cli._record_unsubscribe_result"),
+    ):
+        engine.return_value.classify_batch.return_value = classifications
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert unsub.called is contacted
+    assert ("silent for over a year" in result.output) is not contacted
+
+
 def test_incomplete_scan_cannot_verify_or_escalate_existing_operations(configured_cli):
     from nothx.scanner import MailboxCoverage
 

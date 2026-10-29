@@ -12,7 +12,7 @@ import uuid
 import webbrowser
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import click
@@ -71,6 +71,7 @@ from .safefetch import redacted_url
 from .scanner import MailboxCoverage, scan_inbox
 from .scheduler import get_schedule_status, install_schedule, uninstall_schedule
 from .theme import console, print_animated_welcome
+from .timeutil import ensure_utc, utcnow
 from .unsubscriber import (
     UnsafeUnsubscribeError,
     contact_suppression_reason,
@@ -79,6 +80,8 @@ from .unsubscriber import (
 )
 
 logger = logging.getLogger(__name__)
+
+DORMANT_SENDER_DAYS = 365
 
 
 # Questionary style — orange1 highlight matching our logo color
@@ -2970,6 +2973,7 @@ def _run_scan(
     outside_cleanup_review = []
 
     min_emails = config.thresholds.min_emails_before_action
+    dormant_groups = 0
     deterministic_block_sources = {
         "user_rule",
         "provider_policy",
@@ -3018,6 +3022,30 @@ def _run_scan(
                 recommended_action=classification.recommended_action or classification.action,
                 original_source=classification.original_source or classification.source,
             )
+
+        if (
+            classification.action in (Action.UNSUB, Action.REVIEW)
+            and classification.source not in {"user_rule", "stored_policy"}
+            and sender.last_seen is not None
+            and ensure_utc(sender.last_seen) < utcnow() - timedelta(days=DORMANT_SENDER_DAYS)
+        ):
+            dormant_groups += 1
+            outside_cleanup_review.append(
+                (
+                    key,
+                    sender,
+                    replace(
+                        classification,
+                        action=Action.REVIEW,
+                        source="dormant_policy",
+                        reasoning=f"No mail in over {DORMANT_SENDER_DAYS} days; nothing to stop",
+                        recommended_action=classification.recommended_action
+                        or classification.action,
+                        original_source=classification.original_source or classification.source,
+                    ),
+                )
+            )
+            continue
 
         # Don't auto-act on senders we've barely seen — defer to review.
         # Explicit user rules/overrides (source="user_rule") always take
@@ -3096,9 +3124,14 @@ def _run_scan(
         tree.add(f"[muted]{existing_junk} matching messages already in Junk[/muted]")
     tree.add(f"[keep]{len(to_keep)} to keep[/keep]")
     tree.add(f"[review]{len(to_review)} marketing/spam groups need review[/review]")
-    if outside_cleanup_review:
+    if dormant_groups:
         tree.add(
-            f"[muted]{len(outside_cleanup_review)} other groups left unchanged, outside cleanup review[/muted]"
+            f"[muted]{dormant_groups} groups silent for over a year; nothing to unsubscribe[/muted]"
+        )
+    if len(outside_cleanup_review) > dormant_groups:
+        tree.add(
+            f"[muted]{len(outside_cleanup_review) - dormant_groups} other groups left unchanged, "
+            "outside cleanup review[/muted]"
         )
     console.print(tree)
 

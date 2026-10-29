@@ -90,6 +90,10 @@ def test_standard_still_reviews_uncertain_newsletters(make_engine, batch):
             _ai(EmailType.MARKETING, Action.UNSUB, 0.7),
             _list_sender(has_unsubscribe=False, list_id=None),
         ),
+        (
+            _ai(EmailType.MARKETING, Action.UNSUB, 0.85),
+            _list_sender(has_unsubscribe=False, list_id=None, authenticated_emails=0),
+        ),
         (_ai(EmailType.MARKETING, Action.UNSUB, 0.7), _list_sender(domain="mybank.example")),
     ],
 )
@@ -107,3 +111,11 @@ def test_unknown_cleanup_level_loads_as_standard(tmp_path: Path):
         raw = (tmp_path / "config.json").read_text().replace('"thorough"', '"extreme"')
         (tmp_path / "config.json").write_text(raw)
         assert Config.load().cleanup_level == "standard"
+
+
+def test_thorough_suppresses_confident_unlisted_marketing_locally(make_engine):
+    engine = make_engine("thorough", _ai(EmailType.MARKETING, Action.REVIEW, 0.8))
+    sender = _list_sender(has_unsubscribe=False, list_id=None, esp_name="ExampleESP")
+    result = engine.classify(sender)
+    assert result.action is Action.BLOCK
+    assert result.source == "method_policy"

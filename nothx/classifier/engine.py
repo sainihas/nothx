@@ -22,6 +22,7 @@ from .patterns import PatternMatcher
 from .rules import RulesMatcher
 
 THOROUGH_AI_CONFIDENCE = 0.6
+THOROUGH_UNLISTED_AI_CONFIDENCE = 0.75
 
 logger = logging.getLogger("nothx.classifier.engine")
 
@@ -172,14 +173,18 @@ class ClassificationEngine:
     def _thorough_unsubscribe(
         self, sender: SenderStats, result: Classification
     ) -> Classification | None:
-        """In thorough cleanup, unsubscribe from list mail the AI reads as marketing."""
+        """In thorough cleanup, act on mail the AI reads as marketing or a newsletter."""
         if (
             self.config.cleanup_level != "thorough"
             or result.email_type not in (EmailType.MARKETING, EmailType.NEWSLETTER)
             or result.action not in (Action.UNSUB, Action.REVIEW)
             or result.confidence < THOROUGH_AI_CONFIDENCE
             or sender.protected_subject_emails
-            or not (sender.has_unsubscribe or sender.list_id or sender.can_unsubscribe_emails)
+        ):
+            return None
+        listed = sender.has_unsubscribe or sender.list_id or sender.can_unsubscribe_emails
+        if not listed and (
+            result.confidence < THOROUGH_UNLISTED_AI_CONFIDENCE or sender.authenticated_emails <= 0
         ):
             return None
         if result.action is Action.UNSUB and result.confidence >= (

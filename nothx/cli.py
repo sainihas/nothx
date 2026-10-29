@@ -11,7 +11,7 @@ import sys
 import uuid
 import webbrowser
 from collections.abc import Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -502,25 +502,17 @@ def _learn_subscription_policy(subscription: dict[str, Any], action_value: str) 
     get_learner().update_from_action(record)
 
 
-def _persisted_threat_action(
-    subscription_id: int,
-    *,
-    folder_evidence: bool = True,
-    sender: SenderStats | None = None,
-    include_auth: bool = True,
-) -> Action | None:
-    """Distinguish hard threats from conflicting Inbox/Junk folder evidence."""
-    hard_threat = bool(
-        sender
-        and (
-            sender.provider_threat
-            or sender.phishing_emails
-            or (include_auth and sender.authentication_failed_emails)
-        )
-    )
-    junk = bool(sender and (sender.junk_emails or sender.junk_keyword_emails))
-    inbox = bool(sender and sender.clean_inbox_emails)
-    not_junk = bool(sender and sender.not_junk_emails)
+@dataclass(frozen=True)
+class StoredEvidence:
+    hard_threat: bool
+    junk: bool
+    inbox: bool
+    not_junk: bool
+
+
+def _stored_folder_evidence(subscription_id: int, *, include_auth: bool = True) -> StoredEvidence:
+    """Summarize stored per-message folder and threat evidence for one identity."""
+    hard_threat = junk = inbox = not_junk = False
     locally_cleaned = db.get_locally_cleaned_message_keys(subscription_id=subscription_id)
     for message in db.list_message_refs(subscription_id=subscription_id, limit=100_000):
         try:
@@ -573,6 +565,29 @@ def _persisted_threat_action(
         junk |= is_junk
         inbox |= message.get("mailbox_role") == "inbox" and not is_junk and not is_hard_threat
         not_junk |= bool(normalized & {"$notjunk", r"\notjunk", "notjunk", "$nonjunk"})
+    return StoredEvidence(hard_threat=hard_threat, junk=junk, inbox=inbox, not_junk=not_junk)
+
+
+def _persisted_threat_action(
+    subscription_id: int,
+    *,
+    folder_evidence: bool = True,
+    sender: SenderStats | None = None,
+    include_auth: bool = True,
+) -> Action | None:
+    """Distinguish hard threats from conflicting Inbox/Junk folder evidence."""
+    stored = _stored_folder_evidence(subscription_id, include_auth=include_auth)
+    hard_threat = stored.hard_threat or bool(
+        sender
+        and (
+            sender.provider_threat
+            or sender.phishing_emails
+            or (include_auth and sender.authentication_failed_emails)
+        )
+    )
+    junk = stored.junk or bool(sender and (sender.junk_emails or sender.junk_keyword_emails))
+    inbox = stored.inbox or bool(sender and sender.clean_inbox_emails)
+    not_junk = stored.not_junk or bool(sender and sender.not_junk_emails)
     if hard_threat:
         return Action.REVIEW if folder_evidence and (inbox or not_junk) else Action.BLOCK
     if folder_evidence and junk and not (inbox or not_junk):
@@ -2721,6 +2736,17 @@ def _run_scan(
         }
         if ai_preview:
             classification_options["allow_ai"] = True
+        for sender in sender_stats.values():
+            if not (sender.account_key and sender.identity_kind and sender.identity_value):
+                continue
+            subscription = db.get_subscription(
+                account=sender.account_key,
+                identity_kind=sender.identity_kind,
+                identity_value=sender.identity_value,
+            )
+            if subscription is not None:
+                stored = _stored_folder_evidence(subscription["id"])
+                sender.stored_inbox_evidence = stored.inbox or stored.not_junk
         classifications = engine.classify_batch(
             list(sender_stats.values()), **classification_options
         )

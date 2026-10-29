@@ -473,18 +473,19 @@ class SenderStats:
     protected_subject_emails: int = 0
     promotional_subject_emails: int = 0
     promotional_sample_subjects: list[str] = field(default_factory=list)
+    stored_inbox_evidence: bool = False
 
     @property
     def has_threat_conflict(self) -> bool:
         return bool(
             (self.provider_threat or self.phishing_emails)
-            and (self.clean_inbox_emails or self.not_junk_emails)
+            and (self.clean_inbox_emails or self.not_junk_emails or self.stored_inbox_evidence)
         )
 
     @property
     def has_junk_conflict(self) -> bool:
         return bool(
-            (self.clean_inbox_emails or self.not_junk_emails)
+            (self.clean_inbox_emails or self.not_junk_emails or self.stored_inbox_evidence)
             and (self.junk_emails or self.junk_keyword_emails)
         )
 

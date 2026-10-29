@@ -993,3 +993,18 @@ def test_offer_from_personal_mail_provider_stays_local(policy_engine):
     ):
         assert not policy_engine._is_ai_candidate(stats)
         assert not _footer_eligible(header)
+
+
+def test_stored_inbox_history_turns_current_junk_into_a_content_decision(policy_engine):
+    sender = SenderStats(
+        domain="orders.example",
+        total_emails=3,
+        junk_emails=3,
+        authenticated_emails=3,
+        sample_subjects=["Your order receipt", "Your order receipt", "Your order receipt"],
+    )
+    assert policy_engine.classify(sender).source == "provider_policy"
+    sender.stored_inbox_evidence = True
+    result = policy_engine.classify(sender)
+    assert result.source != "provider_policy"
+    assert result.action is not Action.BLOCK

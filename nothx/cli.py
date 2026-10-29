@@ -3029,7 +3029,10 @@ def _run_scan(
             and sender.last_seen is not None
             and ensure_utc(sender.last_seen) < utcnow() - timedelta(days=DORMANT_SENDER_DAYS)
         ):
-            dormant_groups += 1
+            if classification.action is Action.UNSUB or _is_marketing_candidate(
+                sender, classification
+            ):
+                dormant_groups += 1
             outside_cleanup_review.append(
                 (
                     key,
@@ -3126,7 +3129,8 @@ def _run_scan(
     tree.add(f"[review]{len(to_review)} marketing/spam groups need review[/review]")
     if dormant_groups:
         tree.add(
-            f"[muted]{dormant_groups} groups silent for over a year; nothing to unsubscribe[/muted]"
+            f"[muted]{dormant_groups} marketing groups silent for over a year; "
+            "nothing to unsubscribe[/muted]"
         )
     if len(outside_cleanup_review) > dormant_groups:
         tree.add(

@@ -35,6 +35,12 @@ def row(
     )
 
 
+@pytest.fixture(autouse=True)
+def no_stored_threats():
+    with patch("nothx.cli._confirmed_provider_threat", return_value=False):
+        yield
+
+
 def run_picker(groups, answers, searches=(), **kwargs):
     prompts = []
     values = iter(answers)

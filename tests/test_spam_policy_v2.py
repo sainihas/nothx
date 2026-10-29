@@ -846,6 +846,7 @@ def test_brand_and_onboarding_words_are_not_protected_notices(subject):
         "Orders shipped",
         "Your eStatement is now ready!",
         "Your e-receipt",
+        'Ordered: "Example USB-C cable..."',
     ],
 )
 def test_whole_word_notices_stay_protected(subject):

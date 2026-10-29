@@ -35,7 +35,7 @@ _SPAM_SENDER_PATTERNS_RAW = [
 
 # Safe patterns (likely transactional)
 _SAFE_SUBJECT_PATTERNS_RAW = [
-    r"\b(e-?)?(order|receipt|invoice|confirmation|shipping|delivery|tracking)s?\b",
+    r"\b(e-?)?(order|receipt|invoice|confirmation|shipping|delivery|tracking)(s|ed)?\b",
     r"\b(password|verify|verification|security|2fa|two-factor|login)s?\b",
     r"\b(e-?)?(account|statement|billing|payment)s?\b",
     r"#\d{5,}",  # Order numbers

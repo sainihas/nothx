@@ -119,3 +119,18 @@ def test_thorough_suppresses_confident_unlisted_marketing_locally(make_engine):
     result = engine.classify(sender)
     assert result.action is Action.BLOCK
     assert result.source == "method_policy"
+
+
+@pytest.mark.parametrize(
+    ("ai_result", "bulk", "blocked"),
+    [
+        (_ai(EmailType.NEWSLETTER, Action.REVIEW, 0.65), {"esp_name": "ExampleESP"}, True),
+        (_ai(EmailType.NEWSLETTER, Action.REVIEW, 0.65), {"bulk_precedence": True}, True),
+        (_ai(EmailType.MARKETING, Action.BLOCK, 0.85), {"esp_name": "ExampleESP"}, True),
+        (_ai(EmailType.NEWSLETTER, Action.REVIEW, 0.65), {"auto_submitted": True}, False),
+    ],
+)
+def test_thorough_uses_bulk_evidence_for_unlisted_mail(make_engine, ai_result, bulk, blocked):
+    engine = make_engine("thorough", ai_result)
+    sender = _list_sender(has_unsubscribe=False, list_id=None, **bulk)
+    assert (engine.classify(sender).action is Action.BLOCK) is blocked

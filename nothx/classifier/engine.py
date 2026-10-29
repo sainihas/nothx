@@ -177,14 +177,22 @@ class ClassificationEngine:
         if (
             self.config.cleanup_level != "thorough"
             or result.email_type not in (EmailType.MARKETING, EmailType.NEWSLETTER)
-            or result.action not in (Action.UNSUB, Action.REVIEW)
+            or result.action is Action.KEEP
             or result.confidence < THOROUGH_AI_CONFIDENCE
             or sender.protected_subject_emails
         ):
             return None
         listed = sender.has_unsubscribe or sender.list_id or sender.can_unsubscribe_emails
+        bulk = (
+            sender.esp_name
+            or sender.provider_bulk_emails
+            or sender.has_feedback_id
+            or sender.bulk_precedence
+        )
         if not listed and (
-            result.confidence < THOROUGH_UNLISTED_AI_CONFIDENCE or sender.authenticated_emails <= 0
+            sender.authenticated_emails <= 0
+            or result.confidence
+            < (THOROUGH_AI_CONFIDENCE if bulk else THOROUGH_UNLISTED_AI_CONFIDENCE)
         ):
             return None
         if result.action is Action.UNSUB and result.confidence >= (

@@ -15,7 +15,7 @@ from email.message import Message
 from typing import Any, cast
 
 from . import msauth
-from .authres import dkim_covers_unsubscribe, parse_authentication_results
+from .authres import dkim_covers_unsubscribe, is_trusted_import, parse_authentication_results
 from .config import AccountConfig
 from .errors import (
     ErrorCode,
@@ -930,11 +930,12 @@ class IMAPConnection:
             )
 
             auth_source = msg.get("X-MS-Exchange-Organization-AuthSource", "")
-            exchange_import = (
-                auth_source.strip().rstrip(".").casefold().endswith(_EXCHANGE_HOST_SUFFIXES)
-            )
+            auth_headers = msg.get_all("Authentication-Results", [])
+            exchange_import = auth_source.strip().rstrip(".").casefold().endswith(
+                _EXCHANGE_HOST_SUFFIXES
+            ) and is_trusted_import(auth_headers, self.account.provider)
             verdicts = parse_authentication_results(
-                msg.get_all("Authentication-Results", []),
+                auth_headers,
                 self.account.provider,
                 exchange_import=exchange_import,
             )

@@ -98,10 +98,16 @@ class TestParseHeader:
         gmail_native = parse_message(
             msg.as_string().replace("X-MS-Exchange-Organization-AuthSource", "X-Other")
         )
+        gmail_stamped = parse_message(
+            "Authentication-Results: mx.google.com; dkim=pass header.d=bank.example; "
+            "dmarc=pass header.from=bank.example\r\n" + msg.as_string()
+        )
         imported = make_connection()._parse_header(msg, is_seen=False)
         native = make_connection()._parse_header(gmail_native, is_seen=False)
+        stamped = make_connection()._parse_header(gmail_stamped, is_seen=False)
         assert imported is not None and imported.provider_threat == "HPHSH"
         assert native is not None and native.provider_threat is None
+        assert stamped is not None and stamped.provider_threat is None
 
     def test_basic_header(self):
         msg = parse_message(

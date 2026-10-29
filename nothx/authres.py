@@ -185,6 +185,34 @@ def _enum_to_bool(result: AuthResult) -> bool | None:
     return None
 
 
+def _parse_headers(headers: Sequence[str]) -> list[tuple[str, list[str]]]:
+    parsed: list[tuple[str, list[str]]] = []
+    for raw in headers:
+        if not raw:
+            continue
+        segments = _strip_comments(_FOLD_RE.sub(" ", raw)).split(";")
+        # authserv-id is the first whitespace token of the first segment.
+        first_tokens = segments[0].split()
+        # If that token contains '=', the header has no authserv-id (matches "").
+        authserv_id = "" if (not first_tokens or "=" in first_tokens[0]) else first_tokens[0]
+        parsed.append((authserv_id, segments))
+    return parsed
+
+
+def is_trusted_import(headers: Sequence[str], provider: str) -> bool:
+    """Whether the mail lacks the provider's stamp and carries an importer's on top."""
+    patterns = PROVIDER_AUTHSERV_IDS.get(provider)
+    imported = IMPORTED_AUTHSERV_IDS.get(provider)
+    parsed = _parse_headers(headers)
+    return bool(
+        patterns
+        and imported
+        and parsed
+        and not any(_authserv_matches(authserv_id, patterns) for authserv_id, _ in parsed)
+        and _authserv_matches(parsed[0][0], imported)
+    )
+
+
 def parse_authentication_results(
     headers: Sequence[str], provider: str, *, exchange_import: bool = False
 ) -> AuthVerdicts:
@@ -198,25 +226,13 @@ def parse_authentication_results(
     if patterns is None:
         return AuthVerdicts()  # unknown provider: don't trust any instance
 
-    parsed: list[tuple[str, list[str]]] = []
-    for raw in headers:
-        if not raw:
-            continue
-        segments = _strip_comments(_FOLD_RE.sub(" ", raw)).split(";")
-        # authserv-id is the first whitespace token of the first segment.
-        first_tokens = segments[0].split()
-        # If that token contains '=', the header has no authserv-id (matches "").
-        authserv_id = "" if (not first_tokens or "=" in first_tokens[0]) else first_tokens[0]
-        parsed.append((authserv_id, segments))
-
+    parsed = _parse_headers(headers)
     trusted = next(
         (segments for authserv_id, segments in parsed if _authserv_matches(authserv_id, patterns)),
         None,
     )
-    if trusted is None and parsed and exchange_import:
-        authserv_id, segments = parsed[0]
-        if _authserv_matches(authserv_id, IMPORTED_AUTHSERV_IDS.get(provider, ())):
-            trusted = segments
+    if trusted is None and exchange_import and is_trusted_import(headers, provider):
+        trusted = parsed[0][1]
     for segments in [trusted] if trusted is not None else []:
         method_results: dict[str, list[AuthResult]] = {
             "dkim": [],

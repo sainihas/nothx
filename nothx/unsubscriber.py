@@ -462,6 +462,79 @@ def unsubscribe_subscription(
     )
 
 
+def signed_junk_one_click_target(header: EmailHeader) -> str | None:
+    """Return the one-click target a junk-filed but signed sender may receive."""
+    if header.server_phishing or not header.server_junk:
+        return None
+    if (
+        header.dkim_pass is False
+        or header.dmarc_pass is False
+        or header.strongly_failed_authentication
+    ):
+        return None
+    target = _strict_one_click_target(header)
+    if target is None:
+        return None
+    if not (
+        header.server_can_unsubscribe
+        or (
+            header.dkim_covers_unsubscribe
+            and has_aligned_dkim_pass(header.authentication, header.domain)
+        )
+    ):
+        return None
+    return target
+
+
+def unsubscribe_signed_junk(email_headers: list[EmailHeader], config: Config) -> UnsubResult:
+    """Send one RFC 8058 POST for a signed, established sender the provider filed as junk.
+
+    The caller establishes sender history; this never falls back to links or mail.
+    """
+    ordered = sorted(email_headers, key=_message_date_key, reverse=True)
+    if not ordered:
+        return _grouped_result(UnsubscribeOutcome.FAILED, "No recent source message is available")
+    if any(header.server_phishing for header in ordered):
+        return _grouped_result(
+            UnsubscribeOutcome.BLOCKED,
+            "Provider marked this mail as phishing; use mailbox blocking",
+        )
+    if any(
+        _header_matches_patterns(header, config.safety.never_unsub_domains)
+        or _header_matches_patterns(header, config.safety.always_confirm_domains)
+        for header in ordered
+    ):
+        return _grouped_result(
+            UnsubscribeOutcome.BLOCKED,
+            "Protected domains are blocked locally, never contacted automatically",
+        )
+    if not config.permits_unsubscribe:
+        return _grouped_result(
+            UnsubscribeOutcome.BLOCKED,
+            "Current versioned unsubscribe-contact consent is required",
+        )
+    newest = ordered[0]
+    target = signed_junk_one_click_target(newest)
+    if target is None:
+        return _grouped_result(
+            UnsubscribeOutcome.BLOCKED,
+            "The newest message lacks a signed RFC 8058 one-click endpoint",
+        )
+    result = _execute_one_click(target)
+    result.target_display = _redact_target(target)
+    result.response_snippet = None
+    result.attempts = 1
+    result.attempt_results = (_persistable_attempt(result, target, newest.message_ref),)
+    if result.success:
+        result.outcome = UnsubscribeOutcome.REQUESTED
+    elif result.attempt_results[-1].ambiguous_send or result.needs_confirmation:
+        result.outcome = UnsubscribeOutcome.NEEDS_USER
+        result.needs_confirmation = True
+    else:
+        result.outcome = UnsubscribeOutcome.FAILED
+    return result
+
+
 def _grouped_result(
     outcome: UnsubscribeOutcome,
     error: str,

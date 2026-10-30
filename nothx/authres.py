@@ -322,9 +322,9 @@ def dkim_covers_unsubscribe(
     is skipped for API compatibility; automatic callers must always supply it.
 
     Correlation is deliberately fail-closed: Authentication-Results must expose
-    header.s plus a signing-domain identity (header.d, or the header.i AUID
+    a signing-domain identity (header.d, or with header.s the header.i AUID
     domain when the provider — notably Gmail — omits header.d), and exactly one
-    raw signature may match that identity. This prevents a passing signature
+    raw signature may match it; without header.s (Microsoft) only header.d counts. This prevents a passing signature
     from being confused with a second, attacker-added signature using the same
     partial identity. Alignment is checked against the matched signature's own
     d= tag, which is exact even when the identity came from header.i.
@@ -351,13 +351,15 @@ def dkim_covers_unsubscribe(
         auid_domain = _normalize_domain(_identifier_domain(result.identifier))
         if selector and (domain is not None or auid_domain is not None):
             passing_identities.add((domain, auid_domain, selector))
+        elif not selector and domain is not None:
+            passing_identities.add((domain, None, ""))
     for domain, auid_domain, selector in passing_identities:
         matches = []
         for tags in parsed_signatures:
             signature_domain = _normalize_domain(tags.get("d"))
             if signature_domain is None:
                 continue
-            if tags.get("s", "").strip().casefold() != selector:
+            if selector and tags.get("s", "").strip().casefold() != selector:
                 continue
             if domain is not None:
                 if signature_domain == domain:

@@ -3883,3 +3883,96 @@ def test_resolve_policy_filter_without_candidate_does_not_offer_empty_selection(
     assert "No eligible untried method" in result.output
     assert "Choose" not in result.output
     send.assert_not_called()
+
+
+def _junk_block_scan(first_seen: datetime) -> tuple[ScanResult, dict[str, Classification]]:
+    scan_result, classifications = _subscription_scan(Action.BLOCK)
+    key = next(iter(scan_result.subscription_emails))
+    header = scan_result.subscription_emails[key][0]
+    header.date = first_seen
+    sender = scan_result.subscription_stats[key]
+    sender.junk_keyword_emails = 1
+    sender.clean_inbox_emails = 0
+    classifications[key].source = "provider_policy"
+    _persist_subscription_records(sender, [header], classifications[key])
+    return scan_result, classifications
+
+
+def _run_signed_junk(runner, scan_result, classifications, *, blocked=True):
+    engine = MagicMock()
+    engine.classify_batch.return_value = classifications
+    requested = UnsubResult(
+        success=True, method=UnsubMethod.ONE_CLICK, outcome=UnsubscribeOutcome.REQUESTED
+    )
+    with (
+        patch("nothx.cli.scan_inbox", return_value=scan_result),
+        patch("nothx.cli.ClassificationEngine", return_value=engine),
+        patch("nothx.cli._block_subscription", return_value=(1, 0)) as block,
+        patch("nothx.cli.unsubscribe_signed_junk", return_value=requested) as signed,
+        patch("nothx.cli.unsubscribe_subscription") as unsubscribe,
+    ):
+        result = runner.invoke(run, ["--auto"])
+    assert result.exit_code == 0, result.output
+    assert block.call_count == int(blocked)
+    unsubscribe.assert_not_called()
+    return signed
+
+
+def test_established_junk_sender_gets_one_signed_request_beside_block(configured_cli):
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _junk_block_scan(datetime.now(UTC) - timedelta(days=200))
+
+    first = _run_signed_junk(runner, scan_result, classifications)
+    second = _run_signed_junk(runner, scan_result, classifications)
+
+    assert first.call_count == 1
+    assert second.call_count == 0
+
+
+def test_new_junk_domain_is_blocked_without_contact(configured_cli):
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _junk_block_scan(datetime.now(UTC) - timedelta(days=5))
+
+    signed = _run_signed_junk(runner, scan_result, classifications)
+
+    signed.assert_not_called()
+
+
+def test_phishing_sender_is_blocked_without_contact(configured_cli):
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _junk_block_scan(datetime.now(UTC) - timedelta(days=200))
+    next(iter(scan_result.subscription_stats.values())).phishing_emails = 1
+
+    signed = _run_signed_junk(runner, scan_result, classifications, blocked=False)
+
+    signed.assert_not_called()
+
+
+def test_registrable_domain_groups_brand_subdomains():
+    from nothx.cli import _registrable_domain
+
+    assert _registrable_domain("updates.mails.shop.example") == "shop.example"
+    assert _registrable_domain("news.shop.co.uk") == "shop.co.uk"
+
+
+def test_personal_mail_domain_is_blocked_without_contact(configured_cli):
+    runner, config = configured_cli
+    config.unsubscribe_consent_version = CURRENT_UNSUBSCRIBE_CONSENT_VERSION
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    scan_result, classifications = _junk_block_scan(datetime.now(UTC) - timedelta(days=200))
+    sender = next(iter(scan_result.subscription_stats.values()))
+    sender.domain = "gmail.com"
+
+    signed = _run_signed_junk(runner, scan_result, classifications)
+
+    signed.assert_not_called()

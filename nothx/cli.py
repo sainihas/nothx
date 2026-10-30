@@ -39,6 +39,7 @@ from . import __version__, db, msauth
 from .classifier import ClassificationEngine, get_learner
 from .classifier.ai import test_ai_connection
 from .classifier.heuristics import (
+    PERSONAL_MAIL_DOMAINS,
     has_explicit_offer_subject,
     has_promotional_subject,
     has_protected_subject,
@@ -77,6 +78,7 @@ from .unsubscriber import (
     UnsafeUnsubscribeError,
     contact_suppression_reason,
     is_contact_permitted,
+    unsubscribe_signed_junk,
     unsubscribe_subscription,
 )
 
@@ -3249,6 +3251,12 @@ def _run_scan(
                     if moved or not move_failed:
                         db.update_sender_status(sender.domain, SenderStatus.BLOCKED)
                     stats.failed += move_failed
+                    if authoritative and _signed_junk_unsubscribe_eligible(
+                        config, sender, classification
+                    ):
+                        signed = unsubscribe_signed_junk(headers, config)
+                        _record_unsubscribe_result(sender, headers, classification, signed)
+                        stats.auto_unsubbed += signed.success
                     progress.advance(task)
 
                 for key, sender, classification in to_unsub:
@@ -3543,6 +3551,51 @@ def _confirmed_provider_threat(sender: SenderStats) -> bool:
         subscription is not None
         and _persisted_threat_action(subscription["id"], folder_evidence=False, include_auth=False)
         is Action.BLOCK
+    )
+
+
+SIGNED_JUNK_ESTABLISHED_DAYS = 90
+_SECOND_LEVEL_LABELS = {"ac", "co", "com", "edu", "gov", "net", "org"}
+
+
+def _registrable_domain(domain: str) -> str:
+    labels = domain.casefold().strip(".").split(".")
+    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _SECOND_LEVEL_LABELS:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _signed_junk_unsubscribe_eligible(
+    config: Config, sender: SenderStats, classification: Classification
+) -> bool:
+    """A junk-filed sender with long history may get one signed one-click request."""
+    if (
+        classification.action is not Action.BLOCK
+        or classification.source not in {"provider_policy", "user_rule", "stored_policy"}
+        or not config.permits_unsubscribe
+        or not (sender.junk_emails or sender.junk_keyword_emails)
+        or sender.provider_threat
+        or sender.phishing_emails
+        or sender.authentication_failed_emails
+        or _registrable_domain(sender.domain) in PERSONAL_MAIL_DOMAINS
+        or not (sender.account_key and sender.identity_kind and sender.identity_value)
+    ):
+        return False
+    subscription = db.get_subscription(
+        account=sender.account_key,
+        identity_kind=sender.identity_kind,
+        identity_value=sender.identity_value,
+    )
+    if subscription is None or any(
+        attempt["method"] != "none"
+        for operation in db.list_unsubscribe_operations(subscription_id=subscription["id"])
+        if operation.get("kind") == "unsubscribe"
+        for attempt in db.list_unsubscribe_attempts(operation["id"])
+    ):
+        return False
+    earliest = _parse_timestamp(db.earliest_sender_domain_seen(_registrable_domain(sender.domain)))
+    return earliest is not None and earliest <= utcnow() - timedelta(
+        days=SIGNED_JUNK_ESTABLISHED_DAYS
     )
 
 

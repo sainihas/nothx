@@ -961,3 +961,77 @@ def test_redirect_loop_needs_user_and_never_replays_another_endpoint(monkeypatch
     assert result.attempt_results[0].error_code == "redirect_limit"
     assert result.attempt_results[0].ambiguous_send
     assert len(calls) == 1
+
+
+class TestSignedJunk:
+    @staticmethod
+    def junk(source: EmailHeader, *, phishing: bool = False) -> EmailHeader:
+        from dataclasses import replace
+
+        return replace(
+            source,
+            mailbox_role="junk",
+            keywords=(*source.keywords, *(("$phishing",) if phishing else ())),
+        )
+
+    @pytest.fixture
+    def posts(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        calls: list[str] = []
+
+        def one_click(url: str) -> UnsubResult:
+            calls.append(url)
+            return UnsubResult(success=True, method=UnsubMethod.ONE_CLICK)
+
+        monkeypatch.setattr(unsubscriber, "_execute_one_click", one_click)
+        return calls
+
+    def test_signed_one_click_from_junk_is_posted_once(self, posts: list[str]) -> None:
+        result = unsubscriber.unsubscribe_signed_junk(
+            [self.junk(header(one_click=True, can_unsubscribe=True))], consented_config()
+        )
+
+        assert result.outcome is UnsubscribeOutcome.REQUESTED
+        assert posts == ["https://mailer.example/unsubscribe/token"]
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            pytest.param(header(one_click=False, can_unsubscribe=True), id="no-one-click"),
+            pytest.param(header(one_click=True, authenticated=False), id="unsigned"),
+        ],
+    )
+    def test_unsigned_or_link_only_junk_is_never_contacted(
+        self, posts: list[str], source: EmailHeader
+    ) -> None:
+        result = unsubscriber.unsubscribe_signed_junk([self.junk(source)], consented_config())
+
+        assert result.outcome is UnsubscribeOutcome.BLOCKED
+        assert posts == []
+
+    def test_phishing_is_never_contacted(self, posts: list[str]) -> None:
+        source = self.junk(header(one_click=True, can_unsubscribe=True), phishing=True)
+
+        result = unsubscriber.unsubscribe_signed_junk([source], consented_config())
+
+        assert result.outcome is UnsubscribeOutcome.BLOCKED
+        assert posts == []
+
+    def test_protected_domain_is_never_contacted(self, posts: list[str]) -> None:
+        config = consented_config()
+        config.safety.never_unsub_domains = ["*.example"]
+
+        result = unsubscriber.unsubscribe_signed_junk(
+            [self.junk(header(one_click=True, can_unsubscribe=True))], config
+        )
+
+        assert result.outcome is UnsubscribeOutcome.BLOCKED
+        assert posts == []
+
+    def test_missing_consent_makes_no_request(self, posts: list[str]) -> None:
+        result = unsubscriber.unsubscribe_signed_junk(
+            [self.junk(header(one_click=True, can_unsubscribe=True))],
+            Config(unsubscribe_consent_version=CONSENT_REVOKED),
+        )
+
+        assert result.outcome is UnsubscribeOutcome.BLOCKED
+        assert posts == []

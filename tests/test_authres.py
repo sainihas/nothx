@@ -239,3 +239,29 @@ class TestGmailImportedMail:
     def test_import_rule_needs_the_exchange_stamp(self):
         v = parse_authentication_results([self.MICROSOFT], "gmail")
         assert v.dkim is None and v.evidence.trusted is False
+
+
+class TestSelectorlessCorrelation:
+    MICROSOFT = (
+        "mx.microsoft.com 1; spf=pass smtp.mailfrom=news.example; "
+        "dkim=pass (signature was verified) header.d=news.example; "
+        "dmarc=pass action=none header.from=news.example"
+    )
+    COVERING = "v=1; d=news.example; s=bulk; h=from:list-unsubscribe:list-unsubscribe-post; b=x"
+
+    def verdicts(self):
+        return parse_authentication_results([self.MICROSOFT], "gmail", exchange_import=True)
+
+    def test_unique_signature_for_the_passing_domain_correlates(self):
+        assert dkim_covers_unsubscribe([self.COVERING], self.verdicts(), "news.example") is True
+
+    def test_two_signatures_for_the_passing_domain_are_ambiguous(self):
+        other = "v=1; d=news.example; s=other; h=from:subject; b=y"
+        assert (
+            dkim_covers_unsubscribe([self.COVERING, other], self.verdicts(), "news.example")
+            is False
+        )
+
+    def test_signature_for_another_domain_does_not_correlate(self):
+        foreign = self.COVERING.replace("d=news.example", "d=esp.example")
+        assert dkim_covers_unsubscribe([foreign], self.verdicts(), "news.example") is False

@@ -845,6 +845,18 @@ def upsert_subscription(
         return dict(row)
 
 
+def earliest_sender_domain_seen(domain: str) -> str | None:
+    """Return the oldest first_seen across subscriptions at a domain or its subdomains."""
+    value = domain.casefold()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT MIN(first_seen) FROM subscriptions "
+            "WHERE lower(sender_domain) = ? OR lower(sender_domain) LIKE ?",
+            (value, "%." + value),
+        ).fetchone()
+    return row[0] if row else None
+
+
 def get_subscription(
     subscription_id: int | None = None,
     *,

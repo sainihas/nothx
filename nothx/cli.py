@@ -4765,6 +4765,79 @@ def resolve_subscription(
         )
 
 
+@main.command("block")
+@click.argument("subscription_id", type=int)
+@click.option("--dry-run", is_flag=True, help="Show what would move; change nothing")
+@click.option("--yes", is_flag=True, help="Confirm without a prompt")
+def block_subscription_command(subscription_id: int, dry_run: bool, yes: bool) -> None:
+    """Block one saved account/list identity locally: its Inbox mail moves to Junk now, and later runs keep moving
+    new mail from it. Nothing is sent to the sender. For unwanted mail that offers no unsubscribe method; `nothx undo`
+    changes the policy back."""
+    config = Config.load()
+    db.init_db()
+    subscription = db.get_subscription(subscription_id)
+    if subscription is None:
+        raise click.ClickException("Subscription not found")
+    if not any(
+        candidate.email.casefold() == str(subscription["account"]).casefold()
+        for candidate in config.accounts.values()
+    ):
+        raise click.ClickException("The subscription's account is not configured")
+    if (
+        subscription.get("policy_action") == "keep"
+        and subscription.get("policy_source") == "manual"
+    ):
+        raise click.ClickException(
+            "You chose to keep this identity; change that first with `nothx undo`"
+        )
+    inbox = db.list_message_refs(
+        subscription_id=subscription_id, mailbox_role="inbox", limit=100_000
+    )
+    label = (
+        subscription.get("list_id")
+        or subscription.get("from_address")
+        or subscription.get("identity_value")
+    )
+    console.print(
+        f"Block {label} ({subscription['account']}): {len(inbox)} Inbox message(s) to move to Junk."
+    )
+    if dry_run:
+        return
+    if not yes and not _styled_confirm("Block this identity?", False):
+        return
+    db.set_subscription_policy(subscription_id, "block", source="manual")
+    if not config.permits_mailbox_mutation:
+        console.print(
+            "Saved the block for future runs. Moving mail needs `nothx consent --mailbox --yes` first."
+        )
+        return
+    newest = max((ref.get("uid") or 0 for ref in inbox), default=0)
+    key = "block-cmd-v1-" + hashlib.sha256(f"{subscription_id}\0{newest}".encode()).hexdigest()
+    claim_owner = uuid.uuid4().hex
+    operation, acquired = db.claim_unsubscribe_operation(
+        subscription_id,
+        key,
+        claim_owner,
+        kind="block",
+        trigger_message_ref_id=inbox[-1]["id"] if inbox else None,
+    )
+    if not acquired:
+        console.print("Already blocked; future runs keep moving its mail.")
+        return
+    moved, failed = _move_persisted_subscription_to_junk(
+        config,
+        db.get_subscription(subscription_id) or subscription,
+        operation["id"],
+        claim_owner=claim_owner,
+    )
+    console.print(
+        f"Blocked. Moved {moved} message(s) to Junk"
+        + (f"; {failed} could not move." if failed else ".")
+    )
+    if failed:
+        raise SystemExit(1)
+
+
 @main.command("open-unsubscribe")
 @click.argument("subscription_id", type=int)
 @click.option(

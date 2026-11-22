@@ -28,6 +28,7 @@ from nothx.cli import (
     consent,
     export,
     history,
+    main,
     open_unsubscribe,
     review,
     run,
@@ -3976,3 +3977,54 @@ def test_personal_mail_domain_is_blocked_without_contact(configured_cli):
     signed = _run_signed_junk(runner, scan_result, classifications)
 
     signed.assert_not_called()
+
+
+def _blockable(policy="keep", source="automatic"):
+    subscription = db.upsert_subscription(
+        "user@example.com",
+        "list_id",
+        "digest.sender.example",
+        sender_domain="sender.example",
+        policy_action=policy,
+        policy_source=source,
+    )
+    db.upsert_message_ref(subscription["id"], "user@example.com", "INBOX", "inbox", 44, 91)
+    return subscription
+
+
+def test_block_command_saves_a_manual_block_and_moves_inbox_mail(configured_cli):
+    runner, config = configured_cli
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    subscription = _blockable()
+    with patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(1, 0)) as move:
+        result = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+    assert result.exit_code == 0, result.output
+    move.assert_called_once()
+    after = db.get_subscription(subscription["id"])
+    assert (after["policy_action"], after["policy_source"]) == ("block", "manual")
+    with patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(0, 0)) as again:
+        repeat = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+    assert repeat.exit_code == 0 and "Already blocked" in repeat.output
+    again.assert_not_called()
+
+
+def test_block_command_dry_run_and_consent_and_manual_keep(configured_cli):
+    runner, config = configured_cli
+    subscription = _blockable()
+    with patch("nothx.cli._move_persisted_subscription_to_junk") as move:
+        dry = runner.invoke(main, ["block", str(subscription["id"]), "--dry-run"])
+        assert (
+            dry.exit_code == 0
+            and db.get_subscription(subscription["id"])["policy_action"] == "keep"
+        )
+        config.mailbox_mutation_consent_version = CONSENT_REVOKED
+        config.save()
+        no_consent = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+    assert no_consent.exit_code == 0
+    move.assert_not_called()
+    assert db.get_subscription(subscription["id"])["policy_action"] == "block"
+    kept = _blockable(policy="keep", source="manual")
+    db.set_subscription_policy(kept["id"], "keep", source="manual")
+    refused = runner.invoke(main, ["block", str(kept["id"]), "--yes"])
+    assert refused.exit_code != 0

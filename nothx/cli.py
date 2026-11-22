@@ -4904,15 +4904,26 @@ def block_subscription_command(subscription_id: int, dry_run: bool, yes: bool) -
     inbox = db.list_message_refs(
         subscription_id=subscription_id, mailbox_role="inbox", limit=100_000
     )
-    newest = max((ref.get("uid") or 0 for ref in inbox), default=0)
-    key = "block-cmd-v1-" + hashlib.sha256(f"{subscription_id}\0{newest}".encode()).hexdigest()
+    done = {
+        action["message_ref_id"]
+        for action in db.list_mailbox_actions(subscription_id=subscription_id, limit=100_000)
+        if action["outcome"] in {"moved", "already_junk", "not_found"}
+    }
+    pending = sorted(ref["id"] for ref in inbox if ref["id"] not in done)
+    if not pending:
+        console.print("Nothing left to move; later runs keep moving its new mail.")
+        return
+    # The claim covers exactly what is left: a later block (new or older mail found) is a new operation, a repeat
+    # with nothing new is a no-op (2026-11-22: a key on the newest UID refused the history sweep as a repeat).
+    material = f"{subscription_id}\0" + ",".join(str(ref_id) for ref_id in pending)
+    key = "block-cmd-v2-" + hashlib.sha256(material.encode()).hexdigest()
     claim_owner = uuid.uuid4().hex
     operation, acquired = db.claim_unsubscribe_operation(
         subscription_id,
         key,
         claim_owner,
         kind="block",
-        trigger_message_ref_id=inbox[-1]["id"] if inbox else None,
+        trigger_message_ref_id=pending[-1],
     )
     if not acquired:
         console.print("Already blocked; future runs keep moving its mail.")
@@ -4922,6 +4933,7 @@ def block_subscription_command(subscription_id: int, dry_run: bool, yes: bool) -
         db.get_subscription(subscription_id) or subscription,
         operation["id"],
         claim_owner=claim_owner,
+        message_ids=set(pending),
     )
     console.print(
         f"Blocked. Moved {moved} message(s) to Junk"

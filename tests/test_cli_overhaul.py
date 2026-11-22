@@ -4095,3 +4095,39 @@ def test_block_command_clears_older_inbox_mail_of_exactly_that_identity(configur
     refs = db.list_message_refs(subscription_id=subscription["id"], mailbox_role="inbox", limit=10)
     assert [(r["uidvalidity"], r["uid"]) for r in refs] == [(77, 5)]
     move.assert_called_once()
+
+
+def test_block_command_moves_what_is_left_and_nothing_twice(configured_cli):
+    runner, config = configured_cli
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    subscription = _blockable()
+
+    def fake_move(cfg, sub, operation_id, *, claim_owner, message_ids=None, preserve_policy=False):
+        for ref_id in message_ids or ():
+            db.record_mailbox_action(
+                sub["id"],
+                ref_id,
+                f"test-{ref_id}",
+                action="move_to_junk",
+                outcome="moved",
+                source_mailbox="INBOX",
+                target_mailbox="Junk",
+            )
+        db.update_unsubscribe_operation_outcome(operation_id, "blocked", claim_owner=claim_owner)
+        return len(message_ids or ()), 0
+
+    with (
+        patch("nothx.cli._record_inbox_history", return_value=0),
+        patch("nothx.cli._move_persisted_subscription_to_junk", side_effect=fake_move) as move,
+    ):
+        first = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+        again = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+        db.upsert_message_ref(
+            subscription["id"], "user@example.com", "INBOX", "inbox", 44, 12
+        )  # older mail found
+        later = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+    assert first.exit_code == again.exit_code == later.exit_code == 0
+    assert "Nothing left to move" in again.output
+    assert move.call_count == 2
+    assert len(move.call_args.kwargs["message_ids"]) == 1

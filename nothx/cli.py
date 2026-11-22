@@ -4765,6 +4765,90 @@ def resolve_subscription(
         )
 
 
+BLOCK_HISTORY_LIMIT = 2_000
+
+
+def _record_inbox_history(config: Config, subscription: dict[str, Any]) -> int:
+    """Record the identity's older Inbox mail as message refs, so a block clears it too, not only the recent
+    lookback (2026-11-22: 136 older e-voting notices stayed in an Inbox after their sender was blocked). The server
+    search is only a filter: each candidate's own From address or List-Id must equal the identity exactly."""
+    import email
+    from email.utils import parseaddr
+
+    from .mailbox import _parse_positive_response_number, _response_data
+
+    account = next(
+        (
+            a
+            for a in config.accounts.values()
+            if a.email.casefold() == str(subscription["account"]).casefold()
+        ),
+        None,
+    )
+    if account is None:
+        return 0
+    kind, value = subscription["identity_kind"], str(subscription["identity_value"]).strip()
+    wanted = value.strip("<>").casefold()
+    if not wanted:
+        return 0
+    recorded = 0
+    with IMAPConnection(account) as connection:
+        if connection.conn is None:
+            return 0
+        client = cast(Any, connection.conn)
+        status, _ = client.select('"INBOX"', readonly=True)
+        if status != "OK":
+            return 0
+        uidvalidity = _parse_positive_response_number(_response_data(client, "UIDVALIDITY"))
+        if not uidvalidity:
+            return 0
+        criteria = ("HEADER", "List-Id", wanted) if kind == "list_id" else ("FROM", f'"{wanted}"')
+        status, data = client.uid("SEARCH", None, *criteria)
+        if status != "OK" or not data or not data[0]:
+            return 0
+        uids = [int(u) for u in data[0].split()][-BLOCK_HISTORY_LIMIT:]
+        for start in range(0, len(uids), 200):
+            chunk = uids[start : start + 200]
+            status, rows = client.uid(
+                "FETCH",
+                ",".join(str(u) for u in chunk),
+                "(UID BODY.PEEK[HEADER.FIELDS (FROM LIST-ID)])",
+            )
+            if status != "OK":
+                continue
+            for row in rows or []:
+                if not isinstance(row, tuple) or len(row) < 2:
+                    continue
+                meta = row[0].decode(errors="replace") if isinstance(row[0], bytes) else str(row[0])
+                found = re.search(r"UID (\d+)", meta)
+                if not found:
+                    continue
+                headers = email.message_from_bytes(
+                    row[1] if isinstance(row[1], bytes) else bytes(row[1])
+                )
+                sender = parseaddr(headers.get("From", ""))[1].casefold()
+                list_id = re.search(r"<([^>]+)>", headers.get("List-Id", "") or "")
+                actual = (
+                    (list_id.group(1).casefold() if list_id else "")
+                    if kind == "list_id"
+                    else sender
+                )
+                if actual != wanted:
+                    continue
+                db.upsert_message_ref(
+                    subscription["id"],
+                    subscription["account"],
+                    "INBOX",
+                    "inbox",
+                    uidvalidity,
+                    int(found.group(1)),
+                    from_address=sender or None,
+                    list_id=list_id.group(1) if list_id else None,
+                )
+                recorded += 1
+    return recorded
+
+
 @main.command("block")
 @click.argument("subscription_id", type=int)
 @click.option("--dry-run", is_flag=True, help="Show what would move; change nothing")
@@ -4811,6 +4895,15 @@ def block_subscription_command(subscription_id: int, dry_run: bool, yes: bool) -
             "Saved the block for future runs. Moving mail needs `nothx consent --mailbox --yes` first."
         )
         return
+    try:
+        history = _record_inbox_history(config, subscription)
+    except (IMAPError, OSError, imaplib.IMAP4.error):
+        history = 0  # the recent lookback still moves; a later block retries the history
+    if history:
+        console.print(f"Found {history} message(s) from it in the whole Inbox.")
+    inbox = db.list_message_refs(
+        subscription_id=subscription_id, mailbox_role="inbox", limit=100_000
+    )
     newest = max((ref.get("uid") or 0 for ref in inbox), default=0)
     key = "block-cmd-v1-" + hashlib.sha256(f"{subscription_id}\0{newest}".encode()).hexdigest()
     claim_owner = uuid.uuid4().hex

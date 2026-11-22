@@ -175,6 +175,7 @@ Use `nothx cleanup --details` for candidate tables before review.
 | `nothx config --browser-fallback off` | Disable browser page completion |
 | `nothx resolve ID --retry` | Explicitly allow one bounded retry of a failed/manual case |
 | `nothx resolve ID --completed` | Record provider confirmation you saw in the browser |
+| `nothx block ID` | Block one saved account/list locally: its Inbox mail (recent and older, matched exactly) moves to Junk now and on every later run; nothing is sent to the sender. For unwanted mail with no unsubscribe method. `--dry-run` previews |
 | `nothx run --full-history` | Scan all history in Inbox and configured folders |
 | `nothx run --rescan` | Repeat the configured lookback without rewinding the cursor |
 | `nothx update` | Check for and install updates |
@@ -188,7 +189,8 @@ Use `nothx cleanup --details` for candidate tables before review.
 
 ### Requirements
 - Python 3.11+
-- Gmail, Outlook, Yahoo, or iCloud account
+- Gmail, Outlook, Yahoo, or iCloud account (iCloud's Junk folder is found automatically; for other servers that do
+  not mark their Junk folder, set the account's `junk_mailbox`)
 - AI provider *(optional — works without AI too)*
 
 ### Installation

@@ -28,6 +28,7 @@ from nothx.cli import (
     consent,
     export,
     history,
+    main,
     open_unsubscribe,
     review,
     run,
@@ -3976,3 +3977,157 @@ def test_personal_mail_domain_is_blocked_without_contact(configured_cli):
     signed = _run_signed_junk(runner, scan_result, classifications)
 
     signed.assert_not_called()
+
+
+def _blockable(policy="keep", source="automatic"):
+    subscription = db.upsert_subscription(
+        "user@example.com",
+        "list_id",
+        "digest.sender.example",
+        sender_domain="sender.example",
+        policy_action=policy,
+        policy_source=source,
+    )
+    db.upsert_message_ref(subscription["id"], "user@example.com", "INBOX", "inbox", 44, 91)
+    return subscription
+
+
+def test_block_command_saves_a_manual_block_and_moves_inbox_mail(configured_cli):
+    runner, config = configured_cli
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    subscription = _blockable()
+    with (
+        patch("nothx.cli._record_inbox_history", return_value=0),
+        patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(1, 0)) as move,
+    ):
+        result = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+    assert result.exit_code == 0, result.output
+    move.assert_called_once()
+    after = db.get_subscription(subscription["id"])
+    assert (after["policy_action"], after["policy_source"]) == ("block", "manual")
+    with patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(0, 0)) as again:
+        repeat = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+    assert repeat.exit_code == 0 and "Already blocked" in repeat.output
+    again.assert_not_called()
+
+
+def test_block_command_dry_run_and_consent_and_manual_keep(configured_cli):
+    runner, config = configured_cli
+    subscription = _blockable()
+    with (
+        patch("nothx.cli._record_inbox_history", return_value=0),
+        patch("nothx.cli._move_persisted_subscription_to_junk") as move,
+    ):
+        dry = runner.invoke(main, ["block", str(subscription["id"]), "--dry-run"])
+        assert (
+            dry.exit_code == 0
+            and db.get_subscription(subscription["id"])["policy_action"] == "keep"
+        )
+        config.mailbox_mutation_consent_version = CONSENT_REVOKED
+        config.save()
+        no_consent = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+    assert no_consent.exit_code == 0
+    move.assert_not_called()
+    assert db.get_subscription(subscription["id"])["policy_action"] == "block"
+    kept = _blockable(policy="keep", source="manual")
+    db.set_subscription_policy(kept["id"], "keep", source="manual")
+    refused = runner.invoke(main, ["block", str(kept["id"]), "--yes"])
+    assert refused.exit_code != 0
+
+
+class _HistoryClient:
+    """An Inbox with two FROM-search hits: the identity itself, and a lookalike whose address contains it."""
+
+    def select(self, mailbox, readonly=False):
+        return "OK", [b"3"]
+
+    def response(self, code):
+        return (code, [b"77"]) if code == "UIDVALIDITY" else (code, [None])
+
+    def uid(self, command, *args):
+        if command == "SEARCH":
+            return "OK", [b"5 6"]
+        return "OK", [
+            (
+                b"1 (UID 5 BODY[HEADER.FIELDS (FROM LIST-ID)] {40}",
+                b"From: Digest <news@digest.example>\r\n\r\n",
+            ),
+            b")",
+            (
+                b"2 (UID 6 BODY[HEADER.FIELDS (FROM LIST-ID)] {40}",
+                b"From: x <xnews@digest.example.evil>\r\n\r\n",
+            ),
+            b")",
+        ]
+
+
+class _HistoryConnection:
+    def __init__(self, account):
+        self.conn = _HistoryClient()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_block_command_clears_older_inbox_mail_of_exactly_that_identity(configured_cli):
+    runner, config = configured_cli
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    subscription = db.upsert_subscription(
+        "user@example.com",
+        "from",
+        "news@digest.example",
+        from_address="news@digest.example",
+        sender_domain="digest.example",
+        policy_action="keep",
+        policy_source="automatic",
+    )
+    with (
+        patch("nothx.cli.IMAPConnection", _HistoryConnection),
+        patch("nothx.cli._move_persisted_subscription_to_junk", return_value=(1, 0)) as move,
+    ):
+        result = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+    assert result.exit_code == 0, result.output
+    refs = db.list_message_refs(subscription_id=subscription["id"], mailbox_role="inbox", limit=10)
+    assert [(r["uidvalidity"], r["uid"]) for r in refs] == [(77, 5)]
+    move.assert_called_once()
+
+
+def test_block_command_moves_what_is_left_and_nothing_twice(configured_cli):
+    runner, config = configured_cli
+    config.mailbox_mutation_consent_version = CURRENT_MAILBOX_MUTATION_CONSENT_VERSION
+    config.save()
+    subscription = _blockable()
+
+    def fake_move(cfg, sub, operation_id, *, claim_owner, message_ids=None, preserve_policy=False):
+        for ref_id in message_ids or ():
+            db.record_mailbox_action(
+                sub["id"],
+                ref_id,
+                f"test-{ref_id}",
+                action="move_to_junk",
+                outcome="moved",
+                source_mailbox="INBOX",
+                target_mailbox="Junk",
+            )
+        db.update_unsubscribe_operation_outcome(operation_id, "blocked", claim_owner=claim_owner)
+        return len(message_ids or ()), 0
+
+    with (
+        patch("nothx.cli._record_inbox_history", return_value=0),
+        patch("nothx.cli._move_persisted_subscription_to_junk", side_effect=fake_move) as move,
+    ):
+        first = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+        again = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+        db.upsert_message_ref(
+            subscription["id"], "user@example.com", "INBOX", "inbox", 44, 12
+        )  # older mail found
+        later = runner.invoke(main, ["block", str(subscription["id"]), "--yes"])
+    assert first.exit_code == again.exit_code == later.exit_code == 0
+    assert "Nothing left to move" in again.output
+    assert move.call_count == 2
+    assert len(move.call_args.kwargs["message_ids"]) == 1

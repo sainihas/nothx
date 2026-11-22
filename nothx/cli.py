@@ -4765,6 +4765,186 @@ def resolve_subscription(
         )
 
 
+BLOCK_HISTORY_LIMIT = 2_000
+
+
+def _record_inbox_history(config: Config, subscription: dict[str, Any]) -> int:
+    """Record the identity's older Inbox mail as message refs, so a block clears it too, not only the recent
+    lookback (2026-11-22: 136 older e-voting notices stayed in an Inbox after their sender was blocked). The server
+    search is only a filter: each candidate's own From address or List-Id must equal the identity exactly."""
+    import email
+    from email.utils import parseaddr
+
+    from .mailbox import _parse_positive_response_number, _response_data
+
+    account = next(
+        (
+            a
+            for a in config.accounts.values()
+            if a.email.casefold() == str(subscription["account"]).casefold()
+        ),
+        None,
+    )
+    if account is None:
+        return 0
+    kind, value = subscription["identity_kind"], str(subscription["identity_value"]).strip()
+    wanted = value.strip("<>").casefold()
+    if not wanted:
+        return 0
+    recorded = 0
+    with IMAPConnection(account) as connection:
+        if connection.conn is None:
+            return 0
+        client = cast(Any, connection.conn)
+        status, _ = client.select('"INBOX"', readonly=True)
+        if status != "OK":
+            return 0
+        uidvalidity = _parse_positive_response_number(_response_data(client, "UIDVALIDITY"))
+        if not uidvalidity:
+            return 0
+        criteria = ("HEADER", "List-Id", wanted) if kind == "list_id" else ("FROM", f'"{wanted}"')
+        status, data = client.uid("SEARCH", None, *criteria)
+        if status != "OK" or not data or not data[0]:
+            return 0
+        uids = [int(u) for u in data[0].split()][-BLOCK_HISTORY_LIMIT:]
+        for start in range(0, len(uids), 200):
+            chunk = uids[start : start + 200]
+            status, rows = client.uid(
+                "FETCH",
+                ",".join(str(u) for u in chunk),
+                "(UID BODY.PEEK[HEADER.FIELDS (FROM LIST-ID)])",
+            )
+            if status != "OK":
+                continue
+            for row in rows or []:
+                if not isinstance(row, tuple) or len(row) < 2:
+                    continue
+                meta = row[0].decode(errors="replace") if isinstance(row[0], bytes) else str(row[0])
+                found = re.search(r"UID (\d+)", meta)
+                if not found:
+                    continue
+                headers = email.message_from_bytes(
+                    row[1] if isinstance(row[1], bytes) else bytes(row[1])
+                )
+                sender = parseaddr(headers.get("From", ""))[1].casefold()
+                list_id = re.search(r"<([^>]+)>", headers.get("List-Id", "") or "")
+                actual = (
+                    (list_id.group(1).casefold() if list_id else "")
+                    if kind == "list_id"
+                    else sender
+                )
+                if actual != wanted:
+                    continue
+                db.upsert_message_ref(
+                    subscription["id"],
+                    subscription["account"],
+                    "INBOX",
+                    "inbox",
+                    uidvalidity,
+                    int(found.group(1)),
+                    from_address=sender or None,
+                    list_id=list_id.group(1) if list_id else None,
+                )
+                recorded += 1
+    return recorded
+
+
+@main.command("block")
+@click.argument("subscription_id", type=int)
+@click.option("--dry-run", is_flag=True, help="Show what would move; change nothing")
+@click.option("--yes", is_flag=True, help="Confirm without a prompt")
+def block_subscription_command(subscription_id: int, dry_run: bool, yes: bool) -> None:
+    """Block one saved account/list identity locally: its Inbox mail moves to Junk now, and later runs keep moving
+    new mail from it. Nothing is sent to the sender. For unwanted mail that offers no unsubscribe method; `nothx undo`
+    changes the policy back."""
+    config = Config.load()
+    db.init_db()
+    subscription = db.get_subscription(subscription_id)
+    if subscription is None:
+        raise click.ClickException("Subscription not found")
+    if not any(
+        candidate.email.casefold() == str(subscription["account"]).casefold()
+        for candidate in config.accounts.values()
+    ):
+        raise click.ClickException("The subscription's account is not configured")
+    if (
+        subscription.get("policy_action") == "keep"
+        and subscription.get("policy_source") == "manual"
+    ):
+        raise click.ClickException(
+            "You chose to keep this identity; change that first with `nothx undo`"
+        )
+    inbox = db.list_message_refs(
+        subscription_id=subscription_id, mailbox_role="inbox", limit=100_000
+    )
+    label = (
+        subscription.get("list_id")
+        or subscription.get("from_address")
+        or subscription.get("identity_value")
+    )
+    console.print(
+        f"Block {label} ({subscription['account']}): {len(inbox)} Inbox message(s) to move to Junk."
+    )
+    if dry_run:
+        return
+    if not yes and not _styled_confirm("Block this identity?", False):
+        return
+    db.set_subscription_policy(subscription_id, "block", source="manual")
+    if not config.permits_mailbox_mutation:
+        console.print(
+            "Saved the block for future runs. Moving mail needs `nothx consent --mailbox --yes` first."
+        )
+        return
+    try:
+        history = _record_inbox_history(config, subscription)
+    except (IMAPError, OSError, imaplib.IMAP4.error):
+        history = 0  # the recent lookback still moves; a later block retries the history
+    if history:
+        console.print(f"Found {history} message(s) from it in the whole Inbox.")
+    inbox = db.list_message_refs(
+        subscription_id=subscription_id, mailbox_role="inbox", limit=100_000
+    )
+    done = {
+        action["message_ref_id"]
+        for action in db.list_mailbox_actions(subscription_id=subscription_id, limit=100_000)
+        if action["outcome"] in {"moved", "already_junk", "not_found"}
+    }
+    pending = sorted(ref["id"] for ref in inbox if ref["id"] not in done)
+    if not pending:
+        console.print("Nothing left to move; later runs keep moving its new mail.")
+        return
+    # The claim covers exactly what is left: a later block (new or older mail found) is a new operation, a repeat
+    # with nothing new is a no-op (2026-11-22: a key on the newest UID refused the history sweep as a repeat).
+    material = f"{subscription_id}\0" + ",".join(str(ref_id) for ref_id in pending)
+    key = "block-cmd-v2-" + hashlib.sha256(material.encode()).hexdigest()
+    claim_owner = uuid.uuid4().hex
+    operation, acquired = db.claim_unsubscribe_operation(
+        subscription_id,
+        key,
+        claim_owner,
+        kind="block",
+        trigger_message_ref_id=pending[-1],
+    )
+    if not acquired:
+        console.print("Already blocked; future runs keep moving its mail.")
+        return
+    moved, failed = _move_persisted_subscription_to_junk(
+        config,
+        db.get_subscription(subscription_id) or subscription,
+        operation["id"],
+        claim_owner=claim_owner,
+        message_ids=set(pending),
+    )
+    console.print(
+        f"Blocked. Moved {moved} message(s) to Junk"
+        + (f"; {failed} could not move." if failed else ".")
+    )
+    if failed:
+        raise click.ClickException(
+            f"The block is saved, but {failed} message(s) could not move to Junk; a later run retries them"
+        )
+
+
 @main.command("open-unsubscribe")
 @click.argument("subscription_id", type=int)
 @click.option(

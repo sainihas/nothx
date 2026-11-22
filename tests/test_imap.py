@@ -263,3 +263,37 @@ def test_refresh_header_rejects_other_uid():
     with patch.object(connection, "_selected_uidvalidity", return_value=44):
         with pytest.raises(ValueError, match="different source UID"):
             connection.fetch_header(MessageRef("me@example.com", "INBOX", 44, 9))
+
+
+class TestProviderJunkMailbox:
+    """iCloud lists Junk without SPECIAL-USE \\Junk; its fixed name is the provider default."""
+
+    LIST = [
+        b'() "/" "Archive"',
+        b'() "/" "Junk"',
+        b'(\\Noinferiors) "/" "INBOX"',
+        b'(\\Trash) "/" "Deleted Messages"',
+    ]
+
+    def _connection(self, provider, junk_mailbox=None):
+        connection = IMAPConnection(
+            AccountConfig(provider, "me@example.com", "secret", junk_mailbox=junk_mailbox)
+        )
+        client = MagicMock()
+        client.capabilities = ("IMAP4REV1",)
+        client.list.return_value = ("OK", list(self.LIST))
+        connection.conn = client
+        return connection
+
+    def test_icloud_finds_its_junk_folder(self):
+        discovery = self._connection("icloud").discover_mailboxes()
+        assert discovery.junk is not None and discovery.junk.name == "Junk"
+
+    def test_other_providers_still_never_guess(self):
+        assert self._connection("yahoo").discover_mailboxes().junk is None
+
+    def test_a_configured_junk_mailbox_wins(self):
+        assert (
+            self._connection("icloud", junk_mailbox="Archive").discover_mailboxes().junk.name
+            == "Archive"
+        )

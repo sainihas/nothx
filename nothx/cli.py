@@ -4835,7 +4835,9 @@ def block_subscription_command(subscription_id: int, dry_run: bool, yes: bool) -
         + (f"; {failed} could not move." if failed else ".")
     )
     if failed:
-        raise SystemExit(1)
+        raise click.ClickException(
+            f"The block is saved, but {failed} message(s) could not move to Junk; a later run retries them"
+        )
 
 
 @main.command("open-unsubscribe")

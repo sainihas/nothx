@@ -132,6 +132,9 @@ IMAP_SERVERS = {
     "icloud": "imap.mail.me.com",
 }
 OUTLOOK_OAUTH_IMAP_SERVER = "outlook.office365.com"
+# Junk folders a provider names the same in every language but does not mark with SPECIAL-USE \Junk. iCloud lists
+# its Junk folder as plain "Junk", so without this every iCloud block failed "no unambiguous Junk mailbox".
+PROVIDER_JUNK_MAILBOX = {"icloud": "Junk"}
 IMAP_TIMEOUT = 60
 
 
@@ -296,6 +299,10 @@ class IMAPConnection:
         if not self.conn:
             raise RuntimeError("Not connected")
         try:
+            if junk_override is None:
+                junk_override = self.account.junk_mailbox or PROVIDER_JUNK_MAILBOX.get(
+                    self.account.provider
+                )
             return discover_imap_mailboxes(cast(Any, self.conn), junk_override=junk_override)
         except imaplib.IMAP4.error as error:
             raise IMAPError(
